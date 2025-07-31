@@ -1,0 +1,13 @@
+server:
+  port: 5000
+  username: "admin"
+  password: ""
+
+log:
+  level: debug          # debug, info, warn, error, fatal
+  format: json          # json, text
+  output: file          # stdout, file
+  max_size: 100         # MB
+  max_backups: 3
+  max_age: 28           # days
+  compress: true
