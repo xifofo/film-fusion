@@ -7,6 +7,7 @@ import (
 	"film-fusion/app/handler"
 	"film-fusion/app/logger"
 	"film-fusion/app/middleware"
+	"film-fusion/app/service"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -14,10 +15,11 @@ import (
 
 // Server 表示 HTTP 服务器
 type Server struct {
-	Config *config.Config
-	Logger *logger.Logger
-	gin    *gin.Engine
-	http   *http.Server
+	Config              *config.Config
+	Logger              *logger.Logger
+	gin                 *gin.Engine
+	http                *http.Server
+	tokenRefreshService *service.TokenRefreshService
 }
 
 // NewServer 创建一个新的 Server 实例
@@ -30,8 +32,9 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 			Addr:    ":" + cfg.Server.Port,
 			Handler: router,
 		},
-		Config: cfg,
-		Logger: log,
+		Config:              cfg,
+		Logger:              log,
+		tokenRefreshService: service.NewTokenRefreshService(log),
 	}
 
 	// 设置路由
@@ -44,10 +47,16 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 func (s *Server) Start() error {
 	s.Logger.Infof("在端口 %s 启动服务器", s.http.Addr)
 
+	// 启动令牌刷新服务
+	s.tokenRefreshService.Start()
+
 	return s.http.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// 停止令牌刷新服务
+	s.tokenRefreshService.Stop()
+
 	// 关闭数据库连接
 	if err := database.Close(); err != nil {
 		s.Logger.Errorf("关闭数据库连接失败: %v", err)
@@ -60,6 +69,7 @@ func (s *Server) setupRoutes() {
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	authHandler := handler.NewAuthHandler(s.Config)
+	cloudStorageHandler := handler.NewCloudStorageHandler()
 
 	// API路由组
 	api := s.gin.Group("/api/v1")
@@ -84,6 +94,22 @@ func (s *Server) setupRoutes() {
 		{
 			config.GET("/categories", systemConfigHandler.GetConfigCategories)
 			config.GET("/types", systemConfigHandler.GetConfigTypes)
+		}
+
+		// 网盘存储相关路由
+		storage := protected.Group("/storage")
+		{
+			// 基础CRUD操作
+			storage.POST("/", cloudStorageHandler.CreateCloudStorage)
+			storage.GET("/", cloudStorageHandler.GetCloudStorages)
+			storage.GET("/:id", cloudStorageHandler.GetCloudStorage)
+			storage.PUT("/:id", cloudStorageHandler.UpdateCloudStorage)
+			storage.DELETE("/:id", cloudStorageHandler.DeleteCloudStorage)
+
+			// 额外功能
+			storage.POST("/:id/refresh", cloudStorageHandler.RefreshToken)
+			storage.POST("/:id/test", cloudStorageHandler.TestConnection)
+			storage.GET("/types", cloudStorageHandler.GetStorageTypes)
 		}
 	}
 }

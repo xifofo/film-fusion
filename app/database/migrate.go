@@ -7,5 +7,6 @@ func AutoMigrate() error {
 	return DB.AutoMigrate(
 		&model.SystemConfig{},
 		&model.User{},
+		&model.CloudStorage{},
 	)
 }
