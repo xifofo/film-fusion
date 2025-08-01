@@ -3,7 +3,6 @@ package database
 import (
 	"film-fusion/app/config"
 	"film-fusion/app/logger"
-	"film-fusion/app/model"
 	"os"
 	"path/filepath"
 
@@ -34,9 +33,13 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 	log.Infof("数据库连接成功: %s", dbPath)
 
 	// 自动迁移表结构
-	DB.AutoMigrate(
-		&model.SystemConfig{},
-	)
+	AutoMigrate()
+
+	// 初始化管理员账户
+	if err := InitAdminUser(cfg, log); err != nil {
+		log.Errorf("初始化管理员账户失败: %v", err)
+		return err
+	}
 
 	return nil
 }

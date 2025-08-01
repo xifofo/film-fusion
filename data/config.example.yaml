@@ -1,6 +1,7 @@
 server:
   port: 5000
-  username: "admin"
+  # 仅首次配置时生效
+  username: ""
   password: ""
 
 log:
@@ -11,3 +12,8 @@ log:
   max_backups: 3
   max_age: 28           # days
   compress: true
+
+jwt:
+  secret: "your-secret-key"
+  expire_time: 24       # hours
+  issuer: "film-fusion"

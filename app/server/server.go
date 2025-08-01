@@ -6,6 +6,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/handler"
 	"film-fusion/app/logger"
+	"film-fusion/app/middleware"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -58,14 +59,31 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) setupRoutes() {
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
+	authHandler := handler.NewAuthHandler(s.Config)
 
 	// API路由组
 	api := s.gin.Group("/api/v1")
 
-	// 系统配置相关路由
-	config := api.Group("/config")
+	// 认证相关路由（不需要JWT验证）
+	auth := api.Group("/auth")
 	{
-		config.GET("/categories", systemConfigHandler.GetConfigCategories)
-		config.GET("/types", systemConfigHandler.GetConfigTypes)
+		auth.POST("/login", authHandler.Login)
+		auth.POST("/register", authHandler.Register)
+		auth.POST("/refresh", authHandler.RefreshToken)
+	}
+
+	// 需要JWT验证的路由
+	protected := api.Group("/")
+	protected.Use(middleware.JWTAuth(s.Config))
+	{
+		// 用户相关
+		protected.GET("/me", authHandler.Me)
+
+		// 系统配置相关路由
+		config := protected.Group("/config")
+		{
+			config.GET("/categories", systemConfigHandler.GetConfigCategories)
+			config.GET("/types", systemConfigHandler.GetConfigTypes)
+		}
 	}
 }

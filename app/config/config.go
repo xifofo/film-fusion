@@ -10,10 +10,13 @@ import (
 type Config struct {
 	Server ServerConfig `mapstructure:"server"`
 	Log    LogConfig    `mapstructure:"log"`
+	JWT    JWTConfig    `mapstructure:"jwt"`
 }
 
 type ServerConfig struct {
-	Port string `mapstructure:"port"`
+	Port     string `mapstructure:"port"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
 }
 
 type LogConfig struct {
@@ -24,6 +27,12 @@ type LogConfig struct {
 	MaxBackups int    `mapstructure:"max_backups"` // 备份数量
 	MaxAge     int    `mapstructure:"max_age"`     // 天数
 	Compress   bool   `mapstructure:"compress"`    // 是否压缩旧文件
+}
+
+type JWTConfig struct {
+	Secret     string `mapstructure:"secret"`      // JWT 密钥
+	ExpireTime int    `mapstructure:"expire_time"` // 过期时间（小时）
+	Issuer     string `mapstructure:"issuer"`      // 签发者
 }
 
 func Load() *Config {
@@ -64,14 +73,19 @@ func setDefaults() {
 	viper.SetDefault("log.max_age", 28)
 	viper.SetDefault("log.compress", true)
 
-	// 数据库默认配置
-	viper.SetDefault("database.path", "data/film-fusion.db")
+	// JWT默认配置
+	viper.SetDefault("jwt.secret", "your-secret-key-change-in-production")
+	viper.SetDefault("jwt.expire_time", 24) // 24小时
+	viper.SetDefault("jwt.issuer", "film-fusion")
 }
 
 // validateConfig 验证配置的有效性
 func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
 		return fmt.Errorf("服务器端口未设置")
+	}
+	if config.JWT.Secret == "" {
+		return fmt.Errorf("JWT密钥未设置")
 	}
 	return nil
 }
