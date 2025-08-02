@@ -70,6 +70,7 @@ func (s *Server) setupRoutes() {
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	authHandler := handler.NewAuthHandler(s.Config)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
+	cloudPathHandler := handler.NewCloudPathHandler()
 
 	// API路由组
 	api := s.gin.Group("/api/v1")
@@ -110,6 +111,24 @@ func (s *Server) setupRoutes() {
 			storage.POST("/:id/refresh", cloudStorageHandler.RefreshToken)
 			storage.POST("/:id/test", cloudStorageHandler.TestConnection)
 			storage.GET("/types", cloudStorageHandler.GetStorageTypes)
+		}
+
+		// 云盘路径监控相关路由
+		paths := protected.Group("/paths")
+		{
+			// 基础CRUD操作
+			paths.POST("/", cloudPathHandler.CreateCloudPath)
+			paths.GET("/", cloudPathHandler.GetCloudPaths)
+			paths.GET("/:id", cloudPathHandler.GetCloudPath)
+			paths.PUT("/:id", cloudPathHandler.UpdateCloudPath)
+			paths.DELETE("/:id", cloudPathHandler.DeleteCloudPath)
+
+			// 同步操作（通过webhook触发）
+			paths.POST("/:id/sync", cloudPathHandler.SyncCloudPath)
+			paths.GET("/:id/status", cloudPathHandler.GetSyncStatus)
+
+			// 批量操作
+			paths.POST("/batch", cloudPathHandler.BatchOperation)
 		}
 	}
 }

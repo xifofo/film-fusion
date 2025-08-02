@@ -8,5 +8,6 @@ func AutoMigrate() error {
 		&model.SystemConfig{},
 		&model.User{},
 		&model.CloudStorage{},
+		&model.CloudPath{},
 	)
 }
