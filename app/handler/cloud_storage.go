@@ -35,14 +35,6 @@ func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
 	}
 	req.UserID = userID.(uint)
 
-	// 检查是否设置为默认存储
-	if req.IsDefault {
-		// 取消其他默认存储
-		database.DB.Model(&model.CloudStorage{}).
-			Where("user_id = ? AND is_default = ?", req.UserID, true).
-			Update("is_default", false)
-	}
-
 	if err := database.DB.Create(&req).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建存储配置失败"})
 		return
@@ -155,14 +147,6 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 		return
 	}
 
-	// 检查是否设置为默认存储
-	if req.IsDefault && !storage.IsDefault {
-		// 取消其他默认存储
-		database.DB.Model(&model.CloudStorage{}).
-			Where("user_id = ? AND is_default = ? AND id != ?", userID.(uint), true, id).
-			Update("is_default", false)
-	}
-
 	// 更新字段
 	if err := database.DB.Model(&storage).Updates(req).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新存储配置失败"})
@@ -223,12 +207,10 @@ func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
 	// TODO: 这里需要根据不同的存储类型实现具体的令牌刷新逻辑
 	// 示例：根据存储类型调用相应的API刷新令牌
 	switch storage.StorageType {
-	case model.StorageType115:
+	case model.StorageType115Open:
 		// 调用115的令牌刷新API
 		// newAccessToken, newRefreshToken, expiresIn := refresh115Token(storage.RefreshToken)
 		// storage.UpdateTokens(newAccessToken, newRefreshToken, expiresIn)
-	case model.StorageTypeBaidu:
-		// 调用百度网盘的令牌刷新API
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的存储类型"})
 		return
@@ -287,7 +269,7 @@ func (h *CloudStorageHandler) TestConnection(c *gin.Context) {
 func (h *CloudStorageHandler) GetStorageTypes(c *gin.Context) {
 	types := []gin.H{
 		{
-			"type":        model.StorageType115,
+			"type":        model.StorageType115Open,
 			"name":        "115网盘 Open API",
 			"description": "115网盘存储 Open API",
 		},

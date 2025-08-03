@@ -100,7 +100,7 @@ func (s *TokenRefreshService) refreshStorageToken(storage *model.CloudStorage) {
 
 	// 根据存储类型调用相应的刷新方法
 	switch storage.StorageType {
-	case model.StorageType115:
+	case model.StorageType115Open:
 		newAccessToken, newRefreshToken, expiresIn, err = s.refresh115Token(storage)
 	default:
 		s.logger.Warnf("不支持的存储类型: %s", storage.StorageType)

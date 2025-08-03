@@ -73,7 +73,7 @@ func (s *Server) setupRoutes() {
 	cloudPathHandler := handler.NewCloudPathHandler()
 
 	// API路由组
-	api := s.gin.Group("/api/v1")
+	api := s.gin.Group("/api")
 
 	// 认证相关路由（不需要JWT验证）
 	auth := api.Group("/auth")
@@ -98,7 +98,7 @@ func (s *Server) setupRoutes() {
 		}
 
 		// 网盘存储相关路由
-		storage := protected.Group("/storage")
+		storage := protected.Group("/cloud-storage")
 		{
 			// 基础CRUD操作
 			storage.POST("/", cloudStorageHandler.CreateCloudStorage)

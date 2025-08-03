@@ -25,7 +25,6 @@ type CloudStorage struct {
 	ErrorMessage     string         `gorm:"type:text;comment:错误信息" json:"error_message"`
 	LastErrorAt      *time.Time     `gorm:"comment:最后错误时间" json:"last_error_at"`
 	Config           string         `gorm:"type:json;comment:额外配置信息" json:"config"`
-	IsDefault        bool           `gorm:"default:false;comment:是否默认存储" json:"is_default"`
 	SortOrder        int            `gorm:"default:0;comment:排序" json:"sort_order"`
 	CreatedAt        time.Time      `json:"created_at"`
 	UpdatedAt        time.Time      `json:"updated_at"`
@@ -42,12 +41,7 @@ func (CloudStorage) TableName() string {
 
 // StorageType 存储类型常量
 const (
-	StorageType115         = "115"         // 115网盘
-	StorageTypeBaidu       = "baidu"       // 百度网盘
-	StorageTypeAliyun      = "aliyun"      // 阿里云盘
-	StorageTypeTencent     = "tencent"     // 腾讯云盘
-	StorageTypeOneDrive    = "onedrive"    // OneDrive
-	StorageTypeGoogleDrive = "googledrive" // Google Drive
+	StorageType115Open = "115open" // 115网盘 OpenAPI
 )
 
 // StorageStatus 存储状态常量
