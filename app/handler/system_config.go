@@ -15,6 +15,24 @@ func NewSystemConfigHandler() *SystemConfigHandler {
 	return &SystemConfigHandler{}
 }
 
+// 创建成功响应
+func (h *SystemConfigHandler) success(c *gin.Context, data any, message string) {
+	c.JSON(http.StatusOK, ApiResponse{
+		Code:    0,
+		Message: message,
+		Data:    data,
+	})
+}
+
+// 创建错误响应
+func (h *SystemConfigHandler) error(c *gin.Context, statusCode int, errorCode int, message string) {
+	c.JSON(statusCode, ApiResponse{
+		Code:    errorCode,
+		Message: message,
+		Data:    nil,
+	})
+}
+
 // ConfigCategoryResponse 配置分类响应结构
 type ConfigCategoryResponse struct {
 	Key         string `json:"key"`
@@ -44,11 +62,7 @@ func (h *SystemConfigHandler) GetConfigCategories(c *gin.Context) {
 		},
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "success",
-		"data":    categories,
-	})
+	h.success(c, categories, "获取配置分类成功")
 }
 
 // GetConfigTypes 获取配置类型常量
@@ -76,9 +90,5 @@ func (h *SystemConfigHandler) GetConfigTypes(c *gin.Context) {
 		},
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code":    0,
-		"message": "success",
-		"data":    types,
-	})
+	h.success(c, types, "获取配置类型成功")
 }

@@ -19,25 +19,43 @@ func NewCloudPathHandler() *CloudPathHandler {
 	return &CloudPathHandler{}
 }
 
+// 创建成功响应
+func (h *CloudPathHandler) success(c *gin.Context, data any, message string) {
+	c.JSON(http.StatusOK, ApiResponse{
+		Code:    0,
+		Message: message,
+		Data:    data,
+	})
+}
+
+// 创建错误响应
+func (h *CloudPathHandler) error(c *gin.Context, statusCode int, errorCode int, message string) {
+	c.JSON(statusCode, ApiResponse{
+		Code:    errorCode,
+		Message: message,
+		Data:    nil,
+	})
+}
+
 // CreateCloudPath 创建云盘路径监控
 func (h *CloudPathHandler) CreateCloudPath(c *gin.Context) {
 	var req model.CloudPath
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
 	// 获取当前用户ID
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 	req.UserID = userID.(uint)
 
 	// 验证输入
 	if !model.IsValidLinkType(req.LinkType) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的链接类型"})
+		h.error(c, http.StatusBadRequest, 400, "无效的链接类型")
 		return
 	}
 
@@ -45,7 +63,7 @@ func (h *CloudPathHandler) CreateCloudPath(c *gin.Context) {
 	var cloudStorage model.CloudStorage
 	if err := database.DB.Where("id = ? AND user_id = ?", req.CloudStorageID, req.UserID).
 		First(&cloudStorage).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "云存储不存在或无权限"})
+		h.error(c, http.StatusBadRequest, 400, "云存储不存在或无权限")
 		return
 	}
 
@@ -53,26 +71,26 @@ func (h *CloudPathHandler) CreateCloudPath(c *gin.Context) {
 	var existing model.CloudPath
 	if err := database.DB.Where("user_id = ? AND cloud_storage_id = ? AND source_path = ?",
 		req.UserID, req.CloudStorageID, req.SourcePath).First(&existing).Error; err == nil {
-		c.JSON(http.StatusConflict, gin.H{"error": "该路径已存在监控"})
+		h.error(c, http.StatusConflict, 409, "该路径已存在监控")
 		return
 	}
 
 	if err := database.DB.Create(&req).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建路径监控失败"})
+		h.error(c, http.StatusInternalServerError, 500, "创建路径监控失败")
 		return
 	}
 
 	// 预加载关联数据
 	database.DB.Preload("CloudStorage").First(&req, req.ID)
 
-	c.JSON(http.StatusCreated, req)
+	h.success(c, req, "创建路径监控成功")
 }
 
 // GetCloudPaths 获取云盘路径列表
 func (h *CloudPathHandler) GetCloudPaths(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -117,23 +135,23 @@ func (h *CloudPathHandler) GetCloudPaths(c *gin.Context) {
 		Offset(offset).
 		Limit(pageSize).
 		Find(&paths).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径列表失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取路径列表失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data":      paths,
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
-	})
+	h.success(c, gin.H{
+		"list":     paths,
+		"total":    total,
+		"current":  page,
+		"pageSize": pageSize,
+	}, "获取路径列表成功")
 }
 
 // GetCloudPath 获取单个云盘路径
 func (h *CloudPathHandler) GetCloudPath(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -144,21 +162,21 @@ func (h *CloudPathHandler) GetCloudPath(c *gin.Context) {
 		Preload("CloudStorage").
 		First(&path).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+			h.error(c, http.StatusNotFound, 404, "路径不存在")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径信息失败"})
+			h.error(c, http.StatusInternalServerError, 500, "获取路径信息失败")
 		}
 		return
 	}
 
-	c.JSON(http.StatusOK, path)
+	h.success(c, path, "获取路径信息成功")
 }
 
 // UpdateCloudPath 更新云盘路径
 func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -168,22 +186,22 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&path).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+			h.error(c, http.StatusNotFound, 404, "路径不存在")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径信息失败"})
+			h.error(c, http.StatusInternalServerError, 500, "获取路径信息失败")
 		}
 		return
 	}
 
 	var req model.CloudPath
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
 	// 验证输入
 	if req.LinkType != "" && !model.IsValidLinkType(req.LinkType) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的链接类型"})
+		h.error(c, http.StatusBadRequest, 400, "无效的链接类型")
 		return
 	}
 
@@ -192,7 +210,7 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 		var cloudStorage model.CloudStorage
 		if err := database.DB.Where("id = ? AND user_id = ?", req.CloudStorageID, userID.(uint)).
 			First(&cloudStorage).Error; err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "云存储不存在或无权限"})
+			h.error(c, http.StatusBadRequest, 400, "云存储不存在或无权限")
 			return
 		}
 	}
@@ -220,21 +238,21 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	}
 
 	if err := database.DB.Model(&path).Updates(updates).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新路径失败"})
+		h.error(c, http.StatusInternalServerError, 500, "更新路径失败")
 		return
 	}
 
 	// 重新获取更新后的数据
 	database.DB.Where("id = ?", path.ID).Preload("CloudStorage").First(&path)
 
-	c.JSON(http.StatusOK, path)
+	h.success(c, path, "更新路径成功")
 }
 
 // DeleteCloudPath 删除云盘路径
 func (h *CloudPathHandler) DeleteCloudPath(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -244,27 +262,27 @@ func (h *CloudPathHandler) DeleteCloudPath(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&path).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+			h.error(c, http.StatusNotFound, 404, "路径不存在")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径信息失败"})
+			h.error(c, http.StatusInternalServerError, 500, "获取路径信息失败")
 		}
 		return
 	}
 
 	// 软删除
 	if err := database.DB.Delete(&path).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除路径失败"})
+		h.error(c, http.StatusInternalServerError, 500, "删除路径失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+	h.success(c, nil, "删除成功")
 }
 
 // SyncCloudPath 手动同步云盘路径
 func (h *CloudPathHandler) SyncCloudPath(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -275,30 +293,30 @@ func (h *CloudPathHandler) SyncCloudPath(c *gin.Context) {
 		Preload("CloudStorage").
 		First(&path).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+			h.error(c, http.StatusNotFound, 404, "路径不存在")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径信息失败"})
+			h.error(c, http.StatusInternalServerError, 500, "获取路径信息失败")
 		}
 		return
 	}
 
 	// 检查云存储是否可用
 	if !path.CloudStorage.IsAvailable() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "云存储不可用"})
+		h.error(c, http.StatusBadRequest, 400, "云存储不可用")
 		return
 	}
 
 	// TODO: 通过webhook触发同步
 	// 这里可以调用webhook或其他外部服务来处理同步
 
-	c.JSON(http.StatusOK, gin.H{"message": "同步请求已提交"})
+	h.success(c, nil, "同步请求已提交")
 }
 
 // GetSyncStatus 获取同步状态
 func (h *CloudPathHandler) GetSyncStatus(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -308,28 +326,30 @@ func (h *CloudPathHandler) GetSyncStatus(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&path).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "路径不存在"})
+			h.error(c, http.StatusNotFound, 404, "路径不存在")
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径信息失败"})
+			h.error(c, http.StatusInternalServerError, 500, "获取路径信息失败")
 		}
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	data := gin.H{
 		"id":          path.ID,
 		"source_path": path.SourcePath,
 		"local_path":  path.LocalPath,
 		"link_type":   path.LinkType,
 		"created_at":  path.CreatedAt,
 		"updated_at":  path.UpdatedAt,
-	})
+	}
+
+	h.success(c, data, "获取同步状态成功")
 }
 
 // BatchOperation 批量操作
 func (h *CloudPathHandler) BatchOperation(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -340,24 +360,24 @@ func (h *CloudPathHandler) BatchOperation(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
 	if len(req.IDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请选择要操作的路径"})
+		h.error(c, http.StatusBadRequest, 400, "请选择要操作的路径")
 		return
 	}
 
 	var paths []model.CloudPath
 	if err := database.DB.Where("id IN ? AND user_id = ?", req.IDs, userID.(uint)).
 		Find(&paths).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取路径列表失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取路径列表失败")
 		return
 	}
 
 	if len(paths) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "未找到任何路径"})
+		h.error(c, http.StatusNotFound, 404, "未找到任何路径")
 		return
 	}
 
@@ -385,19 +405,18 @@ func (h *CloudPathHandler) BatchOperation(c *gin.Context) {
 		}
 
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的操作"})
+		h.error(c, http.StatusBadRequest, 400, "不支持的操作")
 		return
 	}
 
 	result := gin.H{
 		"success_count": successCount,
 		"error_count":   errorCount,
-		"message":       "批量操作完成",
 	}
 
 	if len(errors) > 0 {
 		result["errors"] = errors
 	}
 
-	c.JSON(http.StatusOK, result)
+	h.success(c, result, "批量操作完成")
 }

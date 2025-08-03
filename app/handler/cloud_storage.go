@@ -19,35 +19,53 @@ func NewCloudStorageHandler() *CloudStorageHandler {
 	return &CloudStorageHandler{}
 }
 
+// 创建成功响应
+func (h *CloudStorageHandler) success(c *gin.Context, data any, message string) {
+	c.JSON(http.StatusOK, ApiResponse{
+		Code:    0,
+		Message: message,
+		Data:    data,
+	})
+}
+
+// 创建错误响应
+func (h *CloudStorageHandler) error(c *gin.Context, statusCode int, errorCode int, message string) {
+	c.JSON(statusCode, ApiResponse{
+		Code:    errorCode,
+		Message: message,
+		Data:    nil,
+	})
+}
+
 // CreateCloudStorage 创建网盘存储配置
 func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
 	var req model.CloudStorage
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
 	// 获取当前用户ID（假设从JWT中间件获取）
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 	req.UserID = userID.(uint)
 
 	if err := database.DB.Create(&req).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "创建存储配置失败")
 		return
 	}
 
-	c.JSON(http.StatusCreated, req)
+	h.success(c, req, "创建存储配置成功")
 }
 
 // GetCloudStorages 获取网盘存储列表
 func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -76,32 +94,29 @@ func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 		Offset(offset).
 		Limit(pageSize).
 		Find(&storages).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取存储列表失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取存储列表失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"code": 0,
-		"data": gin.H{
-			"list":     storages,
-			"total":    total,
-			"current":  page,
-			"pageSize": pageSize,
-		},
-	})
+	h.success(c, gin.H{
+		"list":     storages,
+		"total":    total,
+		"current":  page,
+		"pageSize": pageSize,
+	}, "获取存储列表成功")
 }
 
 // GetCloudStorage 获取单个网盘存储配置
 func (h *CloudStorageHandler) GetCloudStorage(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -109,27 +124,27 @@ func (h *CloudStorageHandler) GetCloudStorage(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&storage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "存储配置不存在"})
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, storage)
+	h.success(c, storage, "获取存储配置成功")
 }
 
 // UpdateCloudStorage 更新网盘存储配置
 func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -137,62 +152,62 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&storage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "存储配置不存在"})
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
 		return
 	}
 
 	var req model.CloudStorage
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
 	// 更新字段
 	if err := database.DB.Model(&storage).Updates(req).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "更新存储配置失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, storage)
+	h.success(c, storage, "更新存储配置成功")
 }
 
 // DeleteCloudStorage 删除网盘存储配置
 func (h *CloudStorageHandler) DeleteCloudStorage(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		Delete(&model.CloudStorage{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "删除存储配置失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+	h.success(c, nil, "删除成功")
 }
 
 // RefreshToken 刷新存储令牌
 func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -200,10 +215,10 @@ func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&storage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "存储配置不存在"})
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
 		return
 	}
 
@@ -215,7 +230,7 @@ func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
 		// newAccessToken, newRefreshToken, expiresIn := refresh115Token(storage.RefreshToken)
 		// storage.UpdateTokens(newAccessToken, newRefreshToken, expiresIn)
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "不支持的存储类型"})
+		h.error(c, http.StatusBadRequest, 400, "不支持的存储类型")
 		return
 	}
 
@@ -224,27 +239,24 @@ func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
 	storage.LastRefreshAt = &now
 
 	if err := database.DB.Save(&storage).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新令牌失败"})
+		h.error(c, http.StatusInternalServerError, 500, "更新令牌失败")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "令牌刷新成功",
-		"data":    storage,
-	})
+	h.success(c, storage, "令牌刷新成功")
 }
 
 // TestConnection 测试存储连接
 func (h *CloudStorageHandler) TestConnection(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的ID"})
+		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "用户未认证"})
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
@@ -252,20 +264,19 @@ func (h *CloudStorageHandler) TestConnection(c *gin.Context) {
 	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
 		First(&storage).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
-			c.JSON(http.StatusNotFound, gin.H{"error": "存储配置不存在"})
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取存储配置失败"})
+		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
 		return
 	}
 
 	// TODO: 实现具体的连接测试逻辑
 	// 这里应该根据存储类型调用相应的API测试连接
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "连接测试成功",
-		"status":  "success",
-	})
+	h.success(c, gin.H{
+		"status": "success",
+	}, "连接测试成功")
 }
 
 // GetStorageTypes 获取支持的存储类型
@@ -278,7 +289,5 @@ func (h *CloudStorageHandler) GetStorageTypes(c *gin.Context) {
 		},
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": types,
-	})
+	h.success(c, types, "获取存储类型成功")
 }
