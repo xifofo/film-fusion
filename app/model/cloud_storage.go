@@ -63,9 +63,26 @@ func (cs *CloudStorage) IsTokenExpired() bool {
 	return time.Now().Add(refreshTime).After(*cs.TokenExpiresAt)
 }
 
+// IsRecentlyRefreshed 检查是否最近已经刷新过（避免频繁刷新）
+func (cs *CloudStorage) IsRecentlyRefreshed() bool {
+	if cs.LastRefreshAt == nil {
+		return false
+	}
+
+	// 如果在最近10分钟内已经刷新过，则不再刷新
+	// 注意：这里不能直接使用 service 包的常量，避免循环导入
+	minRefreshInterval := 10 * time.Minute
+	return time.Since(*cs.LastRefreshAt) < minRefreshInterval
+}
+
 // NeedsRefresh 检查是否需要刷新令牌
 func (cs *CloudStorage) NeedsRefresh() bool {
 	if !cs.AutoRefresh {
+		return false
+	}
+
+	// 如果最近已经刷新过，则不需要再次刷新
+	if cs.IsRecentlyRefreshed() {
 		return false
 	}
 

@@ -71,6 +71,7 @@ func (s *Server) setupRoutes() {
 	authHandler := handler.NewAuthHandler(s.Config)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
+	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -111,6 +112,15 @@ func (s *Server) setupRoutes() {
 			storage.POST("/:id/refresh", cloudStorageHandler.RefreshToken)
 			storage.POST("/:id/test", cloudStorageHandler.TestConnection)
 			storage.GET("/types", cloudStorageHandler.GetStorageTypes)
+		}
+
+		// 115授权相关路由
+		auth115 := protected.Group("/auth/115")
+		{
+			auth115.POST("/qrcode", auth115Handler.GetQrCode)
+			auth115.POST("/status", auth115Handler.CheckStatus)
+			auth115.POST("/complete", auth115Handler.CompleteAuth)
+			auth115.GET("/sessions", auth115Handler.GetAuthSessions) // 调试用
 		}
 
 		// 云盘路径监控相关路由

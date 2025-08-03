@@ -81,10 +81,13 @@ func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"data":      storages,
-		"total":     total,
-		"page":      page,
-		"page_size": pageSize,
+		"code": 0,
+		"data": gin.H{
+			"list":     storages,
+			"total":    total,
+			"current":  page,
+			"pageSize": pageSize,
+		},
 	})
 }
 
