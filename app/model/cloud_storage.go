@@ -1,6 +1,7 @@
 package model
 
 import (
+	"log"
 	"time"
 
 	"gorm.io/gorm"
@@ -125,6 +126,7 @@ func (cs *CloudStorage) UpdateTokens(accessToken, refreshToken string, expiresIn
 		cs.RefreshToken = refreshToken
 	}
 
+	log.Printf("成功刷新115存储[%s]的令牌，新令牌过期时间: %d秒", cs.StorageName, expiresIn)
 	if expiresIn > 0 {
 		expiresAt := time.Now().Add(time.Second * time.Duration(expiresIn))
 		cs.TokenExpiresAt = &expiresAt

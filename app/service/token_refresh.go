@@ -1,11 +1,15 @@
 package service
 
 import (
+	"context"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"fmt"
 	"sync"
 	"time"
+
+	sdk115 "github.com/OpenListTeam/115-sdk-go"
 )
 
 const (
@@ -156,11 +160,52 @@ func (s *TokenRefreshService) refreshStorageToken(storage *model.CloudStorage) {
 
 // refresh115Token 刷新115网盘令牌
 func (s *TokenRefreshService) refresh115Token(storage *model.CloudStorage) (string, string, int64, error) {
-	// TODO: 实现115网盘令牌刷新逻辑
-	// 这里需要调用115开放平台的API进行令牌刷新
+	s.logger.Debugf("开始刷新115存储[%s]的令牌", storage.StorageName)
 
-	// 示例返回值
-	return "", "", 0, nil
+	// 验证必要的参数
+	if storage.RefreshToken == "" {
+		return "", "", 0, fmt.Errorf("刷新令牌为空，无法刷新")
+	}
+
+	// 创建115 SDK客户端，设置当前的访问令牌和刷新令牌
+	client := sdk115.New(
+		sdk115.WithAccessToken(storage.AccessToken),
+		sdk115.WithRefreshToken(storage.RefreshToken),
+	)
+
+	// 调用刷新令牌API，设置超时时间
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	s.logger.Debugf("正在调用115刷新令牌API，存储[%s]", storage.StorageName)
+	tokenResp, err := client.RefreshToken(ctx)
+	if err != nil {
+		// 检查是否是刷新令牌过期的错误
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", "", 0, fmt.Errorf("刷新令牌请求超时")
+		}
+		return "", "", 0, fmt.Errorf("调用115刷新令牌API失败: %w", err)
+	}
+
+	if tokenResp == nil {
+		return "", "", 0, fmt.Errorf("115刷新令牌响应为空")
+	}
+
+	// 验证返回的令牌
+	if tokenResp.AccessToken == "" {
+		return "", "", 0, fmt.Errorf("115返回的访问令牌为空")
+	}
+
+	// 如果没有返回新的刷新令牌，使用原来的刷新令牌
+	newRefreshToken := tokenResp.RefreshToken
+	if newRefreshToken == "" {
+		s.logger.Debugf("115未返回新的刷新令牌，继续使用原刷新令牌")
+		newRefreshToken = storage.RefreshToken
+	}
+
+	s.logger.Infof("成功刷新115存储[%s]的令牌，新令牌过期时间: %d秒", storage.StorageName, tokenResp.ExpiresIn)
+
+	return tokenResp.AccessToken, newRefreshToken, tokenResp.ExpiresIn, nil
 }
 
 // ManualRefresh 手动刷新指定存储的令牌
