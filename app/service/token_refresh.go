@@ -80,7 +80,7 @@ func (s *TokenRefreshService) checkAndRefreshTokens() {
 	var storages []model.CloudStorage
 
 	// 查找需要刷新的存储配置
-	err := database.DB.Where("auto_refresh = ? AND status = ?", true, model.StatusActive).
+	err := database.DB.Where("auto_refresh = ?", true).
 		Find(&storages).Error
 	if err != nil {
 		s.logger.Errorf("查询存储配置失败: %v", err)

@@ -74,7 +74,8 @@ type Auth115StatusResponse struct {
 
 // Auth115CompleteRequest 完成授权请求
 type Auth115CompleteRequest struct {
-	SessionID string `json:"session_id" binding:"required"`
+	CloudStorageId uint   `json:"cloud_storage_id"` // 云存储配置ID
+	SessionID      string `json:"session_id" binding:"required"`
 }
 
 // ApiResponse 统一的API响应格式
@@ -340,16 +341,25 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 		return
 	}
 
-	// 保存到云存储配置
-	cloudStorage := &model.CloudStorage{
-		UserID:       userID.(uint),
-		AppID:        session.ClientID,
-		StorageName:  session.Name,
-		StorageType:  model.StorageType115Open,
-		AccessToken:  token.AccessToken,
-		RefreshToken: token.RefreshToken,
-		Status:       model.StatusActive,
-		SortOrder:    0,
+	// 查找是否已存在相同的云存储配置
+	var cloudStorage model.CloudStorage
+	database.DB.Where("user_id = ? AND app_id = ? AND storage_type = ?",
+		userID.(uint), session.ClientID, model.StorageType115Open).First(&cloudStorage)
+
+	// 更新配置信息
+	now := time.Now()
+	cloudStorage.UserID = userID.(uint)
+	cloudStorage.AppID = session.ClientID
+	cloudStorage.StorageName = session.Name
+	cloudStorage.StorageType = model.StorageType115Open
+	cloudStorage.AccessToken = token.AccessToken
+	cloudStorage.RefreshToken = token.RefreshToken
+	cloudStorage.Status = model.StatusActive
+	cloudStorage.ErrorMessage = ""
+	cloudStorage.LastErrorAt = nil
+	cloudStorage.LastRefreshAt = &now
+	if cloudStorage.SortOrder == 0 && cloudStorage.ID == 0 {
+		cloudStorage.SortOrder = 0
 	}
 
 	// 计算过期时间
@@ -358,24 +368,37 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 		cloudStorage.TokenExpiresAt = &expiresAt
 	}
 
-	// 保存到数据库
-	if err := database.DB.Create(cloudStorage).Error; err != nil {
+	// 保存到数据库，GORM会根据ID自动判断是创建还是更新
+	if err := database.DB.Save(&cloudStorage).Error; err != nil {
 		h.logger.Errorf("保存云存储配置失败: %v", err)
 		h.error(c, http.StatusInternalServerError, 500, "保存配置失败")
 		return
 	}
 
+	isUpdate := cloudStorage.ID != 0 && cloudStorage.CreatedAt.Before(now.Add(-time.Second))
+	if isUpdate {
+		h.logger.Infof("用户 %d 成功更新115授权，存储配置ID: %d", userID.(uint), cloudStorage.ID)
+	} else {
+		h.logger.Infof("用户 %d 成功完成115授权，存储配置ID: %d", userID.(uint), cloudStorage.ID)
+	}
+
 	// 清理会话
 	delete(authSessions, req.SessionID)
 
-	h.logger.Infof("用户 %d 成功完成115授权，存储配置ID: %d", userID.(uint), cloudStorage.ID)
+	var successMessage string
+	if isUpdate {
+		successMessage = "授权更新完成，配置已更新"
+	} else {
+		successMessage = "授权完成，配置已保存"
+	}
 
 	h.success(c, gin.H{
 		"storage_id":    cloudStorage.ID,
 		"access_token":  maskToken(token.AccessToken),
 		"refresh_token": maskToken(token.RefreshToken),
 		"expires_in":    token.ExpiresIn,
-	}, "授权完成，配置已保存")
+		"is_update":     isUpdate,
+	}, successMessage)
 }
 
 // cleanExpiredSessions 清理过期会话

@@ -139,6 +139,18 @@ func (s *Server) setupRoutes() {
 
 			// 批量操作
 			paths.POST("/batch", cloudPathHandler.BatchOperation)
+
+			// 配置选项
+			paths.GET("/link-types", cloudPathHandler.GetLinkTypes)
+			paths.GET("/strm-content-types", cloudPathHandler.GetStrmContentTypes)
+
+			// 验证和统计
+			paths.POST("/validate", cloudPathHandler.ValidateCloudPath)
+			paths.GET("/statistics", cloudPathHandler.GetPathStatistics)
+
+			// 导入导出
+			paths.GET("/export", cloudPathHandler.ExportPaths)
+			paths.POST("/import", cloudPathHandler.ImportPaths)
 		}
 	}
 }
