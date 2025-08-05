@@ -59,6 +59,15 @@ func (h *CloudPathHandler) CreateCloudPath(c *gin.Context) {
 		return
 	}
 
+	// 验证源类型
+	if req.SourceType == "" {
+		req.SourceType = model.SourceTypeCloudDrive2 // 默认为 clouddrive2
+	}
+	if !model.IsValidSourceType(req.SourceType) {
+		h.error(c, http.StatusBadRequest, 400, "无效的源类型")
+		return
+	}
+
 	// 验证STRM内容类型（如果是STRM链接类型且提供了内容类型）
 	if req.LinkType == model.LinkTypeStrm && req.StrmContentType != "" {
 		if !model.IsValidStrmContentType(req.StrmContentType) {
@@ -77,9 +86,9 @@ func (h *CloudPathHandler) CreateCloudPath(c *gin.Context) {
 
 	// 检查源路径是否已存在
 	var existing model.CloudPath
-	if err := database.DB.Where("user_id = ? AND cloud_storage_id = ? AND source_path = ?",
-		req.UserID, req.CloudStorageID, req.SourcePath).First(&existing).Error; err == nil {
-		h.error(c, http.StatusConflict, 409, "该路径已存在监控")
+	if err := database.DB.Where("user_id = ? AND cloud_storage_id = ? AND source_path = ? AND source_type = ?",
+		req.UserID, req.CloudStorageID, req.SourcePath, req.SourceType).First(&existing).Error; err == nil {
+		h.error(c, http.StatusConflict, 409, "该路径在指定源类型下已存在监控")
 		return
 	}
 
@@ -117,6 +126,10 @@ func (h *CloudPathHandler) GetCloudPaths(c *gin.Context) {
 
 	if linkType := c.Query("link_type"); linkType != "" {
 		query = query.Where("link_type = ?", linkType)
+	}
+
+	if sourceType := c.Query("source_type"); sourceType != "" {
+		query = query.Where("source_type = ?", sourceType)
 	}
 
 	// 搜索
@@ -209,6 +222,7 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	var req struct {
 		CloudStorageID  uint   `json:"cloud_storage_id"`
 		SourcePath      string `json:"source_path"`
+		SourceType      string `json:"source_type"`
 		ContentPrefix   string `json:"content_prefix"`
 		LocalPath       string `json:"local_path"`
 		LinkType        string `json:"link_type"`
@@ -223,6 +237,12 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	// 验证输入
 	if req.LinkType != "" && !model.IsValidLinkType(req.LinkType) {
 		h.error(c, http.StatusBadRequest, 400, "无效的链接类型")
+		return
+	}
+
+	// 验证源类型
+	if req.SourceType != "" && !model.IsValidSourceType(req.SourceType) {
+		h.error(c, http.StatusBadRequest, 400, "无效的源类型")
 		return
 	}
 
@@ -261,6 +281,9 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	}
 	if req.SourcePath != "" {
 		updates["source_path"] = req.SourcePath
+	}
+	if req.SourceType != "" {
+		updates["source_type"] = req.SourceType
 	}
 	// 对于可以为空的字段，我们检查是否与当前值不同
 	if req.ContentPrefix != path.ContentPrefix {
@@ -524,6 +547,24 @@ func (h *CloudPathHandler) GetLinkTypes(c *gin.Context) {
 	h.success(c, linkTypes, "获取链接类型成功")
 }
 
+// GetSourceTypes 获取源类型列表
+func (h *CloudPathHandler) GetSourceTypes(c *gin.Context) {
+	sourceTypes := []gin.H{
+		{
+			"value": model.SourceTypeCloudDrive2,
+			"label": "CloudDrive2",
+			"desc":  "使用 CloudDrive2 作为数据源",
+		},
+		{
+			"value": model.SourceTypeMoviePilot2,
+			"label": "MoviePilot2",
+			"desc":  "使用 MoviePilot2 作为数据源",
+		},
+	}
+
+	h.success(c, sourceTypes, "获取源类型成功")
+}
+
 // GetStrmContentTypes 获取STRM内容类型列表
 func (h *CloudPathHandler) GetStrmContentTypes(c *gin.Context) {
 	contentTypes := []gin.H{
@@ -702,6 +743,7 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 		Paths []struct {
 			CloudStorageID  uint   `json:"cloud_storage_id"`
 			SourcePath      string `json:"source_path"`
+			SourceType      string `json:"source_type"`
 			ContentPrefix   string `json:"content_prefix"`
 			LocalPath       string `json:"local_path"`
 			LinkType        string `json:"link_type"`
@@ -736,6 +778,17 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			continue
 		}
 
+		// 验证源类型，如果为空则设置默认值
+		sourceType := pathData.SourceType
+		if sourceType == "" {
+			sourceType = model.SourceTypeCloudDrive2
+		}
+		if !model.IsValidSourceType(sourceType) {
+			errorCount++
+			errors = append(errors, "第"+strconv.Itoa(i+1)+"条: 无效的源类型")
+			continue
+		}
+
 		if pathData.LinkType == model.LinkTypeStrm && pathData.StrmContentType != "" {
 			if !model.IsValidStrmContentType(pathData.StrmContentType) {
 				errorCount++
@@ -756,10 +809,10 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 		// 检查源路径是否已存在
 		if !req.ReplaceExisting {
 			var existing model.CloudPath
-			if err := database.DB.Where("user_id = ? AND cloud_storage_id = ? AND source_path = ?",
-				userID.(uint), pathData.CloudStorageID, pathData.SourcePath).First(&existing).Error; err == nil {
+			if err := database.DB.Where("user_id = ? AND cloud_storage_id = ? AND source_path = ? AND source_type = ?",
+				userID.(uint), pathData.CloudStorageID, pathData.SourcePath, sourceType).First(&existing).Error; err == nil {
 				errorCount++
-				errors = append(errors, "第"+strconv.Itoa(i+1)+"条: 该路径已存在监控")
+				errors = append(errors, "第"+strconv.Itoa(i+1)+"条: 该路径在指定源类型下已存在监控")
 				continue
 			}
 		}
@@ -769,6 +822,7 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			UserID:          userID.(uint),
 			CloudStorageID:  pathData.CloudStorageID,
 			SourcePath:      pathData.SourcePath,
+			SourceType:      sourceType,
 			ContentPrefix:   pathData.ContentPrefix,
 			LocalPath:       pathData.LocalPath,
 			LinkType:        pathData.LinkType,

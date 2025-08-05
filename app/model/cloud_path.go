@@ -12,6 +12,7 @@ type CloudPath struct {
 	UserID          uint           `gorm:"not null;index;comment:所属用户ID" json:"user_id"`
 	CloudStorageID  uint           `gorm:"not null;index;comment:云存储ID" json:"cloud_storage_id"`
 	SourcePath      string         `gorm:"size:500;not null;comment:云盘源路径" json:"source_path"`
+	SourceType      string         `gorm:"size:20;not null;default:'clouddrive2';comment:源路径类型" json:"source_type"`
 	ContentPrefix   string         `gorm:"size:500;comment:STRM内容前缀" json:"content_prefix"`
 	LocalPath       string         `gorm:"size:500;comment:本地路径" json:"local_path"`
 	LinkType        string         `gorm:"size:20;not null;comment:链接类型(strm,symlink)" json:"link_type"`
@@ -37,6 +38,11 @@ const (
 	LinkTypeSymlink = "symlink" // 软链接
 )
 
+const (
+	SourceTypeCloudDrive2 = "clouddrive2"
+	SourceTypeMoviePilot2 = "moviepilot2"
+)
+
 // StrmContentType STRM文件内容类型常量
 const (
 	StrmContentTypeOpenlist = "openlist"
@@ -51,4 +57,9 @@ func IsValidLinkType(linkType string) bool {
 // IsValidStrmContentType 检查STRM文件内容类型是否有效
 func IsValidStrmContentType(contentType string) bool {
 	return contentType == StrmContentTypeOpenlist || contentType == StrmContentTypePath
+}
+
+// IsValidSourceType 检查源类型是否有效
+func IsValidSourceType(sourceType string) bool {
+	return sourceType == SourceTypeCloudDrive2 || sourceType == SourceTypeMoviePilot2
 }

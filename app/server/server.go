@@ -72,6 +72,7 @@ func (s *Server) setupRoutes() {
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
+	webhookHandler := handler.NewWebhookHandler(s.Logger)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -82,6 +83,14 @@ func (s *Server) setupRoutes() {
 		auth.POST("/login", authHandler.Login)
 		auth.POST("/register", authHandler.Register)
 		auth.POST("/refresh", authHandler.RefreshToken)
+	}
+
+	// Webhook 路由组（不需要JWT验证，供外部服务调用）
+	webhook := s.gin.Group("/webhook")
+	{
+		// clouddrive2 相关 webhook
+		webhook.POST("/clouddrive2/file_notify", webhookHandler.CloudDrive2FileNotify)
+		webhook.POST("/clouddrive2/mount_notify", webhookHandler.CloudDrive2MountNotify)
 	}
 
 	// 需要JWT验证的路由
@@ -142,6 +151,7 @@ func (s *Server) setupRoutes() {
 
 			// 配置选项
 			paths.GET("/link-types", cloudPathHandler.GetLinkTypes)
+			paths.GET("/source-types", cloudPathHandler.GetSourceTypes)
 			paths.GET("/strm-content-types", cloudPathHandler.GetStrmContentTypes)
 
 			// 验证和统计
