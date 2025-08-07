@@ -14,9 +14,10 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port     string `mapstructure:"port"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
+	Port                   string `mapstructure:"port"`
+	Username               string `mapstructure:"username"`
+	Password               string `mapstructure:"password"`
+	Download115Concurrency int    `mapstructure:"download_115_concurrency"`
 }
 
 type LogConfig struct {

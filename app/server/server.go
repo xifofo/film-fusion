@@ -20,11 +20,15 @@ type Server struct {
 	gin                 *gin.Engine
 	http                *http.Server
 	tokenRefreshService *service.TokenRefreshService
+	download115Service  *service.Download115Service
 }
 
 // NewServer 创建一个新的 Server 实例
 func New(cfg *config.Config, log *logger.Logger) *Server {
 	router := gin.Default()
+
+	// 创建115Open下载服务
+	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
 
 	s := &Server{
 		gin: router,
@@ -35,6 +39,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Config:              cfg,
 		Logger:              log,
 		tokenRefreshService: service.NewTokenRefreshService(log),
+		download115Service:  download115Service,
 	}
 
 	// 设置路由
@@ -50,10 +55,16 @@ func (s *Server) Start() error {
 	// 启动令牌刷新服务
 	s.tokenRefreshService.Start()
 
+	// 启动115Open下载服务
+	s.download115Service.StartWorkers()
+
 	return s.http.ListenAndServe()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	// 停止115Open下载服务
+	s.download115Service.StopWorkers()
+
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
 
@@ -72,7 +83,7 @@ func (s *Server) setupRoutes() {
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
-	webhookHandler := handler.NewWebhookHandler(s.Logger)
+	webhookHandler := handler.NewWebhookHandler(s.Logger, s.download115Service)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -90,7 +101,7 @@ func (s *Server) setupRoutes() {
 	{
 		// clouddrive2 相关 webhook
 		webhook.POST("/clouddrive2/file_notify", webhookHandler.CloudDrive2FileNotify)
-		webhook.POST("/clouddrive2/mount_notify", webhookHandler.CloudDrive2MountNotify)
+		// webhook.POST("/clouddrive2/mount_notify", webhookHandler.CloudDrive2MountNotify)
 	}
 
 	// 需要JWT验证的路由

@@ -1,5 +1,23 @@
 package handler
 
+// NewSuccessResponse 创建成功响应
+func NewSuccessResponse(message string, data any) ApiResponse {
+	return ApiResponse{
+		Code:    0,
+		Message: message,
+		Data:    data,
+	}
+}
+
+// NewErrorResponse 创建错误响应
+func NewErrorResponse(message string, detail string) ApiResponse {
+	return ApiResponse{
+		Code:    -1,
+		Message: message,
+		Data:    detail,
+	}
+}
+
 // ResponseHelper 响应辅助结构体
 type ResponseHelper struct{}
 

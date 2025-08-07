@@ -9,5 +9,6 @@ func AutoMigrate() error {
 		&model.User{},
 		&model.CloudStorage{},
 		&model.CloudPath{},
+		&model.Download115Queue{},
 	)
 }
