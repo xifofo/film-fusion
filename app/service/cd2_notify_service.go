@@ -36,12 +36,7 @@ func NewCD2NotifyService(log *logger.Logger, download115Svc *Download115Service)
 
 func (s *CD2NotifyService) ProcessFileNotify(dataItems []Cd2FileNotifyRequestData, cloudPaths []model.CloudPath) {
 	for _, data := range dataItems {
-		switch data.IsDir {
-		case "false":
-			s.HandleFileNotify(data, cloudPaths)
-		case "true":
-			s.logger.Debug("TODO ")
-		}
+		s.HandleFileNotify(data, cloudPaths)
 	}
 }
 
@@ -49,19 +44,42 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 	strmSvc := NewStrmService(s.logger, s.download115Svc)
 	for _, cloudPath := range cloudPaths {
 		// 如果 data.DestinationFile 和 data.SourceFile 都不是 cloudPath.SourcePath 的子路径就跳过
-		if !pathhelper.IsSubPath(data.SourceFile, cloudPath.SourcePath) {
+		if !pathhelper.IsSubPath(data.SourceFile, cloudPath.SourcePath) && !pathhelper.IsSubPath(data.DestinationFile, cloudPath.SourcePath) {
 			continue
 		}
 
-		// 创建 STRM 操作
-		if data.Action == "create" && cloudPath.LinkType == model.LinkTypeStrm {
-			strmSvc.CreateFile(data.SourceFile, cloudPath)
-			return
+		// STRM 相关操作
+		if cloudPath.LinkType == model.LinkTypeStrm {
+			if data.Action == "create" && data.IsDir == "false" {
+				strmSvc.CreateFile(data.SourceFile, cloudPath)
+				return
+			}
+
+			if data.Action == "rename" && data.IsDir == "false" {
+				strmSvc.RenameFile(data.SourceFile, data.DestinationFile, cloudPath)
+				return
+			}
+
+			if data.Action == "rename" && data.IsDir == "true" {
+				// 目录重命名，需要处理目录下的所有文件并删除原目录
+				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath)
+				return
+			}
+
+			if data.Action == "delete" {
+				strmSvc.DeleteStrm(data.SourceFile, cloudPath, data.IsDir == "true")
+				return
+			}
 		}
 
-		// TODO 创建软连接操作
+		// 软连接相关操作
+		if cloudPath.LinkType == model.LinkTypeSymlink {
+			if data.Action == "create" && data.IsDir == "false" {
+				s.logger.Debug("TODO 创建软连接操作")
+				return
+			}
+		}
 
 		return
 	}
-
 }

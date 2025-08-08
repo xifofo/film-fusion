@@ -164,6 +164,7 @@ func (s *Server) setupRoutes() {
 			paths.GET("/link-types", cloudPathHandler.GetLinkTypes)
 			paths.GET("/source-types", cloudPathHandler.GetSourceTypes)
 			paths.GET("/strm-content-types", cloudPathHandler.GetStrmContentTypes)
+			paths.GET("/path-types", cloudPathHandler.GetPathTypes)
 
 			// 验证和统计
 			paths.POST("/validate", cloudPathHandler.ValidateCloudPath)

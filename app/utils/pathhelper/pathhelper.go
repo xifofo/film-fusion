@@ -40,6 +40,10 @@ func ConvertToLinuxPath(windowsPath string) string {
 	return linuxPath
 }
 
+func ConvertToWindowsPath(path string) string {
+	return strings.ReplaceAll(path, "/", "\\")
+}
+
 // IsSubPath 检查 path 是否是 prefix 的子路径
 func IsSubPath(path, prefix string) bool {
 	// 确保路径以 / 结尾，避免部分匹配问题

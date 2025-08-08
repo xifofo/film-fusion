@@ -18,6 +18,7 @@ type CloudPath struct {
 	LinkType        string         `gorm:"size:20;not null;comment:链接类型(strm,symlink)" json:"link_type"`
 	FilterRules     string         `gorm:"type:json;comment:文件过滤规则,支持include和download类型" json:"filter_rules"`
 	StrmContentType string         `gorm:"size:50;comment:STRM文件内容类型" json:"strm_content_type"`
+	IsWindowsPath   bool           `gorm:"default:false;comment:是否为Windows路径" json:"is_windows_path"`
 	CreatedAt       time.Time      `json:"created_at"`
 	UpdatedAt       time.Time      `json:"updated_at"`
 	DeletedAt       gorm.DeletedAt `gorm:"index" json:"deleted_at"`
