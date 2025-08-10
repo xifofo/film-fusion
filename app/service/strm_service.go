@@ -268,19 +268,10 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		}
 	}
 
-	content := ""
+	content := filepath.Join(cloudPath.ContentPrefix, path)
 
-	if cloudPath.StrmContentType == model.StrmContentTypePath {
-		content = filepath.Join(cloudPath.ContentPrefix, path)
-
-		if cloudPath.IsWindowsPath {
-			content = pathhelper.ConvertToWindowsPath(content)
-		}
-	}
-
-	if content == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 的内容为空，无法创建 STRM 文件", cloudPath.ID)
-		return
+	if cloudPath.StrmContentType == model.StrmContentTypePath && cloudPath.IsWindowsPath {
+		content = pathhelper.ConvertToWindowsPath(content)
 	}
 
 	// 提前创建文件夹

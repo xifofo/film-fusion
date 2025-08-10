@@ -55,7 +55,6 @@ func (s *MoviePilot2NotifyService) ProcessNotify(data MoviePilot2NotifyRequestDa
 
 		s.HandleFileNotify(data.Data.Transferinfo, cloudPaths)
 	}
-
 }
 
 func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2NotifyRequestDataTransferinfo, cloudPaths []model.CloudPath) {
@@ -77,6 +76,7 @@ func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2Noti
 			if transferInfo.TargetItem.Storage == "u115" && transferInfo.TargetItem.Type == "file" {
 				// 创建 STRM 文件
 				strmSvc.CreateFile(transferInfo.TargetItem.Path, cloudPath)
+				// TODO Cache Pickcode 优化启播速度
 				return
 			}
 		}

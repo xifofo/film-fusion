@@ -8,9 +8,10 @@ import (
 )
 
 type Config struct {
-	Server ServerConfig `mapstructure:"server"`
-	Log    LogConfig    `mapstructure:"log"`
-	JWT    JWTConfig    `mapstructure:"jwt"`
+	Server      ServerConfig       `mapstructure:"server"`
+	Log         LogConfig          `mapstructure:"log"`
+	JWT         JWTConfig          `mapstructure:"jwt"`
+	FileWatcher FileWatcherConfigs `mapstructure:"file_watcher"`
 }
 
 type ServerConfig struct {
@@ -34,6 +35,24 @@ type JWTConfig struct {
 	Secret     string `mapstructure:"secret"`      // JWT 密钥
 	ExpireTime int    `mapstructure:"expire_time"` // 过期时间（小时）
 	Issuer     string `mapstructure:"issuer"`      // 签发者
+}
+
+// FileWatcherConfigs 保存文件监控配置
+type FileWatcherConfigs struct {
+	Enabled bool                `mapstructure:"enabled"` // 是否启用文件监控功能
+	Configs []FileWatcherConfig `mapstructure:"configs"` // 多个监控配置
+}
+
+// FileWatcherConfig 保存单个文件监控配置
+type FileWatcherConfig struct {
+	Name                 string   `mapstructure:"name"`                   // 监控配置名称
+	SourceDir            string   `mapstructure:"source_dir"`             // 监控的源目录
+	TargetDir            string   `mapstructure:"target_dir"`             // 目标复制目录
+	Extensions           []string `mapstructure:"extensions"`             // 监控的文件扩展名，空表示所有文件
+	Recursive            bool     `mapstructure:"recursive"`              // 是否递归监控子目录
+	CopyMode             string   `mapstructure:"copy_mode"`              // 复制模式: copy(复制), move(移动), link(硬链接)
+	CreateDirs           bool     `mapstructure:"create_dirs"`            // 是否自动创建目标目录
+	ProcessExistingFiles bool     `mapstructure:"process_existing_files"` // 是否在启动时处理已存在的文件
 }
 
 func Load() *Config {
