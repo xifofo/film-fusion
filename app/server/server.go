@@ -173,6 +173,9 @@ func (s *Server) setupRoutes() {
 			// 导入导出
 			paths.GET("/export", cloudPathHandler.ExportPaths)
 			paths.POST("/import", cloudPathHandler.ImportPaths)
+
+			// STRM 内容替换
+			paths.POST("/:id/strm/replace", cloudPathHandler.ReplaceStrmContent)
 		}
 	}
 }
