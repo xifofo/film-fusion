@@ -150,9 +150,10 @@ func (h *CloudPathHandler) GetCloudPaths(c *gin.Context) {
 
 	// 按Windows路径类型过滤
 	if isWindowsPath := c.Query("is_windows_path"); isWindowsPath != "" {
-		if isWindowsPath == "true" {
+		switch isWindowsPath {
+		case "true":
 			query = query.Where("is_windows_path = ?", true)
-		} else if isWindowsPath == "false" {
+		case "false":
 			query = query.Where("is_windows_path = ?", false)
 		}
 	}

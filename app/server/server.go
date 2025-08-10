@@ -102,6 +102,9 @@ func (s *Server) setupRoutes() {
 		// clouddrive2 相关 webhook
 		webhook.POST("/clouddrive2/file_notify", webhookHandler.CloudDrive2FileNotify)
 		// webhook.POST("/clouddrive2/mount_notify", webhookHandler.CloudDrive2MountNotify)
+
+		// movie-pilot v2 webhook
+		webhook.Any("/movie-pilot/v2", webhookHandler.MoviePilotV2Webhook)
 	}
 
 	// 需要JWT验证的路由

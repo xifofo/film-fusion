@@ -17,14 +17,16 @@ type StrmService struct {
 	logger         *logger.Logger
 	sdk115Open     *sdk115.Client
 	download115Svc *Download115Service
+	removeFirstDir bool
 }
 
 // NewStrmService 创建新的 StrmService
-func NewStrmService(log *logger.Logger, download115Svc *Download115Service) *StrmService {
+func NewStrmService(log *logger.Logger, download115Svc *Download115Service, removeFirstDir bool) *StrmService {
 	return &StrmService{
 		logger:         log,
 		sdk115Open:     sdk115.New(),
 		download115Svc: download115Svc,
+		removeFirstDir: removeFirstDir,
 	}
 }
 
@@ -231,8 +233,10 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 
 	// 如果匹配中下载的后缀直接调用 115Open API 下载
 	if pathhelper.IsFileMatchedByFilter(fileExt, cloudPath.FilterRules, "download") {
-		// TODO 这里暂时只支持 CD2 的 path, 得支持其他路径
-		sourceCloudPath := filepath.Join("/", pathhelper.RemoveFirstDir(path))
+		sourceCloudPath := filepath.Join("/", path)
+		if s.removeFirstDir {
+			sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(path))
+		}
 
 		// 不重复下载
 		if _, err := os.Stat(savePath); err == nil {
