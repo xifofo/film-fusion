@@ -17,16 +17,14 @@ type StrmService struct {
 	logger         *logger.Logger
 	sdk115Open     *sdk115.Client
 	download115Svc *Download115Service
-	removeFirstDir bool
 }
 
 // NewStrmService 创建新的 StrmService
-func NewStrmService(log *logger.Logger, download115Svc *Download115Service, removeFirstDir bool) *StrmService {
+func NewStrmService(log *logger.Logger, download115Svc *Download115Service) *StrmService {
 	return &StrmService{
 		logger:         log,
 		sdk115Open:     sdk115.New(),
 		download115Svc: download115Svc,
-		removeFirstDir: removeFirstDir,
 	}
 }
 
@@ -139,8 +137,11 @@ func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.Clou
 	// 设置访问令牌
 	s.sdk115Open.SetAccessToken(cloudPath.CloudStorage.AccessToken)
 
+	sourceCloudPath := filepath.Join("/", dirPath)
 	// 转换路径为云盘路径
-	sourceCloudPath := filepath.Join("/", pathhelper.RemoveFirstDir(dirPath))
+	if cloudPath.SourceType == model.SourceTypeCloudDrive2 {
+		sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(dirPath))
+	}
 
 	// 获取目录信息
 	folderInfo, err := s.sdk115Open.GetFolderInfoByPath(context.Background(), sourceCloudPath)
@@ -234,7 +235,8 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	// 如果匹配中下载的后缀直接调用 115Open API 下载
 	if pathhelper.IsFileMatchedByFilter(fileExt, cloudPath.FilterRules, "download") {
 		sourceCloudPath := filepath.Join("/", path)
-		if s.removeFirstDir {
+
+		if cloudPath.SourceType == model.SourceTypeCloudDrive2 {
 			sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(path))
 		}
 

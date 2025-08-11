@@ -65,7 +65,7 @@ func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2Noti
 
 	// 处理文件通知逻辑
 	// 单文件完成通知：不移除首级目录
-	strmSvc := NewStrmService(s.logger, s.download115Svc, false)
+	strmSvc := NewStrmService(s.logger, s.download115Svc)
 	symlinkSvc := NewSymlinkService(s.logger)
 
 	for _, cloudPath := range cloudPaths {

@@ -41,7 +41,7 @@ func (s *CD2NotifyService) ProcessFileNotify(dataItems []Cd2FileNotifyRequestDat
 }
 
 func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloudPaths []model.CloudPath) {
-	strmSvc := NewStrmService(s.logger, s.download115Svc, true)
+	strmSvc := NewStrmService(s.logger, s.download115Svc)
 	symlinkSvc := NewSymlinkService(s.logger)
 	for _, cloudPath := range cloudPaths {
 		// 如果 data.DestinationFile 和 data.SourceFile 都不是 cloudPath.SourcePath 的子路径就跳过
