@@ -10,5 +10,6 @@ func AutoMigrate() error {
 		&model.CloudStorage{},
 		&model.CloudPath{},
 		&model.Download115Queue{},
+		&model.PickcodeCache{},
 	)
 }

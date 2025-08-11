@@ -93,6 +93,7 @@ func (s *Server) setupRoutes() {
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.download115Service)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
+	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -195,6 +196,24 @@ func (s *Server) setupRoutes() {
 		{
 			// 根据 115 目录树与 world 文件生成 STRM 或软链接
 			strm.POST("/gen/115-directory-tree", strmHandler.GenStrmWith115DirectoryTree)
+		}
+
+		// Pickcode 缓存相关路由
+		pickcode := protected.Group("/pickcode-cache")
+		{
+			// 基础CRUD操作
+			pickcode.GET("/", pickcodeCacheHandler.GetPickcodeCaches)
+			pickcode.GET("/:id", pickcodeCacheHandler.GetPickcodeCache)
+			pickcode.POST("/", pickcodeCacheHandler.CreatePickcodeCache)
+			pickcode.PUT("/:id", pickcodeCacheHandler.UpdatePickcodeCache)
+			pickcode.DELETE("/:id", pickcodeCacheHandler.DeletePickcodeCache)
+
+			// 批量操作
+			pickcode.POST("/batch/delete", pickcodeCacheHandler.BatchDeletePickcodeCaches)
+			pickcode.DELETE("/clear", pickcodeCacheHandler.ClearPickcodeCaches)
+
+			// 统计信息
+			pickcode.GET("/stats", pickcodeCacheHandler.GetPickcodeCacheStats)
 		}
 	}
 }
