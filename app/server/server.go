@@ -190,10 +190,10 @@ func (s *Server) setupRoutes() {
 			paths.POST("/:id/strm/replace", cloudPathHandler.ReplaceStrmContent)
 		}
 
-		// STRM 相关路由
+		// STRM/软链接 相关路由
 		strm := protected.Group("/strm")
 		{
-			// 新增：根据 115 目录树与 world 文件生成 STRM
+			// 根据 115 目录树与 world 文件生成 STRM 或软链接
 			strm.POST("/gen/115-directory-tree", strmHandler.GenStrmWith115DirectoryTree)
 		}
 	}

@@ -66,6 +66,7 @@ func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2Noti
 	// 处理文件通知逻辑
 	// 单文件完成通知：不移除首级目录
 	strmSvc := NewStrmService(s.logger, s.download115Svc, false)
+	symlinkSvc := NewSymlinkService(s.logger)
 
 	for _, cloudPath := range cloudPaths {
 		if !pathhelper.IsSubPath(transferInfo.TargetItem.Path, cloudPath.SourcePath) {
@@ -77,6 +78,16 @@ func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2Noti
 				// 创建 STRM 文件
 				strmSvc.CreateFile(transferInfo.TargetItem.Path, cloudPath)
 				// TODO Cache Pickcode 优化启播速度
+				return
+			}
+		}
+
+		// 软链接相关操作
+		if cloudPath.LinkType == model.LinkTypeSymlink {
+			if transferInfo.TargetItem.Storage == "u115" && transferInfo.TargetItem.Type == "file" {
+				if err := symlinkSvc.CreateFile(transferInfo.TargetItem.Path, cloudPath); err != nil {
+					s.logger.Errorf("创建软链接失败: %v", err)
+				}
 				return
 			}
 		}

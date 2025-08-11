@@ -42,6 +42,7 @@ func (s *CD2NotifyService) ProcessFileNotify(dataItems []Cd2FileNotifyRequestDat
 
 func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloudPaths []model.CloudPath) {
 	strmSvc := NewStrmService(s.logger, s.download115Svc, true)
+	symlinkSvc := NewSymlinkService(s.logger)
 	for _, cloudPath := range cloudPaths {
 		// 如果 data.DestinationFile 和 data.SourceFile 都不是 cloudPath.SourcePath 的子路径就跳过
 		if !pathhelper.IsSubPath(data.SourceFile, cloudPath.SourcePath) && !pathhelper.IsSubPath(data.DestinationFile, cloudPath.SourcePath) {
@@ -75,7 +76,24 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 		// 软连接相关操作
 		if cloudPath.LinkType == model.LinkTypeSymlink {
 			if data.Action == "create" && data.IsDir == "false" {
-				s.logger.Debug("TODO 创建软连接操作")
+				if err := symlinkSvc.CreateFile(data.SourceFile, cloudPath); err != nil {
+					s.logger.Errorf("创建软链接失败: %v", err)
+				}
+				return
+			}
+
+			if data.Action == "rename" && data.IsDir == "false" {
+				symlinkSvc.RenameFile(data.SourceFile, data.DestinationFile, cloudPath)
+				return
+			}
+
+			if data.Action == "rename" && data.IsDir == "true" {
+				symlinkSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath)
+				return
+			}
+
+			if data.Action == "delete" {
+				symlinkSvc.DeleteLink(data.SourceFile, cloudPath, data.IsDir == "true")
 				return
 			}
 		}

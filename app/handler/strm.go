@@ -53,7 +53,8 @@ func (h *StrmHandler) error(c *gin.Context, statusCode int, errorCode int, messa
 // - cloud_storage_id / CloudStorageID
 // - content_prefix / ContentPrefix
 // - save_local_path / saveLocalPath
-// 具体的 STRM 生成逻辑将由你自行实现，这里仅做参数解析与占位。
+// - link_type / LinkType (strm 或 symlink)
+// 具体的生成逻辑将根据 link_type 决定创建 STRM 还是软链接。
 func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 	// 验证用户
 	userIDVal, exists := c.Get("user_id")
@@ -111,6 +112,21 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 		return
 	}
 
+	// 新增：获取链接类型参数
+	linkType := c.PostForm("link_type")
+	if linkType == "" {
+		linkType = c.PostForm("LinkType")
+	}
+	if linkType == "" {
+		linkType = model.LinkTypeStrm // 默认为 STRM
+	}
+
+	// 验证链接类型
+	if !model.IsValidLinkType(linkType) {
+		h.error(c, http.StatusBadRequest, 400, "无效的链接类型，支持: strm, symlink")
+		return
+	}
+
 	// 校验云存储归属与可用性
 	var storage model.CloudStorage
 	if err := database.DB.Where("id = ? AND user_id = ?", cloudStorageID, userID).First(&storage).Error; err != nil {
@@ -144,20 +160,20 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 	worldBase := filepath.Base(worldPath)
 
 	// 异步执行生成逻辑，并在完成后删除临时文件
-	go func(worldPath string, storage model.CloudStorage, contentPrefix, saveLocalPath, filterRules string) {
+	go func(worldPath string, storage model.CloudStorage, contentPrefix, saveLocalPath, filterRules, linkType string) {
 		defer func() {
 			if err := os.Remove(worldPath); err != nil {
 				h.logger.Warnf("删除临时 world 文件失败: %v", err)
 			}
 		}()
 
-		result, genErr := h.generateStrmFrom115DirectoryTree(worldPath, storage, contentPrefix, saveLocalPath, filterRules)
+		result, genErr := h.generateLinksFrom115DirectoryTree(worldPath, storage, contentPrefix, saveLocalPath, filterRules, linkType)
 		if genErr != nil {
-			h.logger.Errorf("STRM 生成失败: %v", genErr)
+			h.logger.Errorf("链接生成失败: %v", genErr)
 			return
 		}
-		h.logger.Infof("STRM 生成完成: %v", result)
-	}(worldPath, storage, contentPrefix, saveLocalPath, filterRules)
+		h.logger.Infof("链接生成完成: %v", result)
+	}(worldPath, storage, contentPrefix, saveLocalPath, filterRules, linkType)
 
 	// 立即返回接受状态
 	h.success(c, gin.H{
@@ -165,11 +181,12 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 		"cloud_storage_id": cloudStorageID,
 		"content_prefix":   contentPrefix,
 		"save_local_path":  saveLocalPath,
+		"link_type":        linkType,
 		"status":           "accepted",
 	}, "任务已提交，后台处理")
 }
 
-func (h *StrmHandler) generateStrmFrom115DirectoryTree(worldFilePath string, storage model.CloudStorage, contentPrefix, saveLocalPath, filterRules string) (map[string]any, error) {
+func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, storage model.CloudStorage, contentPrefix, saveLocalPath, filterRules, linkType string) (map[string]any, error) {
 	// 读取并按 UTF-16(含BOM优先) -> UTF-8 解码；若失败则按 UTF-8 原样读取
 	decoded, err := readFileUTF16(worldFilePath)
 	if err != nil {
@@ -201,8 +218,18 @@ func (h *StrmHandler) generateStrmFrom115DirectoryTree(worldFilePath string, sto
 	includeSpecified := len(ruleSet.Include) > 0
 	downloadSpecified := len(ruleSet.Download) > 0
 
+	// 初始化服务
+	var symlinkSvc *service.SymlinkService
+	if linkType == model.LinkTypeSymlink {
+		symlinkSvc = service.NewSymlinkService(h.logger)
+		// 验证 contentPrefix 对于软链接是否有效
+		if err := symlinkSvc.ValidateContentPrefix(contentPrefix); err != nil {
+			return nil, fmt.Errorf("ContentPrefix 验证失败: %w", err)
+		}
+	}
+
 	// 计数与采样
-	var createdDirs, createdStrm, skipped, queuedDownload int
+	var createdDirs, createdStrm, createdSymlinks, skipped, queuedDownload int
 	errs := []string{}
 	sampleCreated := []string{}
 	const sampleMax = 20
@@ -229,7 +256,7 @@ func (h *StrmHandler) generateStrmFrom115DirectoryTree(worldFilePath string, sto
 			continue
 		}
 
-		// 1) 命中 download 规则 -> 不生成 STRM，加入 115 下载队列（此处预留实现）
+		// 1) 命中 download 规则 -> 不生成 STRM/软链接，加入 115 下载队列
 		if downloadSpecified && pathhelper.IsFileMatchedByFilter(localPath, filterRules, "download") {
 
 			if _, err := os.Stat(localPath); err == nil {
@@ -256,39 +283,63 @@ func (h *StrmHandler) generateStrmFrom115DirectoryTree(worldFilePath string, sto
 			continue
 		}
 
-		// 2) 仅当命中 include 规则时才生成 STRM
+		// 2) 仅当命中 include 规则时才生成 STRM/软链接
 		if !(includeSpecified && pathhelper.IsFileMatchedByFilter(localPath, filterRules, "include")) {
 			skipped++
 			continue
 		}
 
-		// 文件 -> 生成 .strm
+		// 确保父目录存在
 		if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
 			errs = append(errs, fmt.Sprintf("创建父目录失败: %s -> %v", localPath, err))
 			continue
 		}
 
-		strmPath := strings.TrimSuffix(localPath, ext) + ".strm"
-		content := buildStrmContent(contentPrefix, p)
+		// 根据链接类型进行不同处理
+		if linkType == model.LinkTypeSymlink {
+			// 创建软链接
+			// 构造虚拟 CloudPath 用于软链接创建
+			virtualCloudPath := model.CloudPath{
+				LocalPath:     saveBase,
+				ContentPrefix: contentPrefix,
+				FilterRules:   filterRules,
+				LinkType:      model.LinkTypeSymlink,
+				IsWindowsPath: false, // 目录树生成通常为Linux路径
+			}
 
-		// 覆盖写入 .strm
-		if writeErr := os.WriteFile(strmPath, []byte(content), 0o777); writeErr != nil {
-			errs = append(errs, fmt.Sprintf("写入 STRM 失败: %s -> %v", strmPath, writeErr))
-			continue
-		}
+			if createErr := symlinkSvc.CreateFile(p, virtualCloudPath); createErr != nil {
+				errs = append(errs, fmt.Sprintf("创建软链接失败: %s -> %v", p, createErr))
+				continue
+			}
 
-		createdStrm++
-		if len(sampleCreated) < sampleMax {
-			sampleCreated = append(sampleCreated, strings.TrimPrefix(strmPath, saveBase+string(filepath.Separator)))
+			createdSymlinks++
+			if len(sampleCreated) < sampleMax {
+				sampleCreated = append(sampleCreated, p)
+			}
+
+		} else {
+			// 创建 STRM 文件
+			strmPath := strings.TrimSuffix(localPath, ext) + ".strm"
+			content := buildStrmContent(contentPrefix, p)
+
+			// 覆盖写入 .strm
+			if writeErr := os.WriteFile(strmPath, []byte(content), 0o777); writeErr != nil {
+				errs = append(errs, fmt.Sprintf("写入 STRM 失败: %s -> %v", strmPath, writeErr))
+				continue
+			}
+
+			createdStrm++
+			if len(sampleCreated) < sampleMax {
+				sampleCreated = append(sampleCreated, strings.TrimPrefix(strmPath, saveBase+string(filepath.Separator)))
+			}
 		}
 	}
 
-	return map[string]any{
+	result := map[string]any{
 		"status":          "generated",
 		"file":            filepath.Base(worldFilePath),
 		"total_paths":     len(paths),
 		"created_dirs":    createdDirs,
-		"created_strm":    createdStrm,
 		"queued_download": queuedDownload,
 		"skipped":         skipped,
 		"sample_created":  sampleCreated,
@@ -297,7 +348,16 @@ func (h *StrmHandler) generateStrmFrom115DirectoryTree(worldFilePath string, sto
 		"save_local":      saveBase,
 		"storage_id":      storage.ID,
 		"storage_type":    storage.StorageType,
-	}, nil
+		"link_type":       linkType,
+	}
+
+	if linkType == model.LinkTypeSymlink {
+		result["created_symlinks"] = createdSymlinks
+	} else {
+		result["created_strm"] = createdStrm
+	}
+
+	return result, nil
 }
 
 // readFileUTF16 以 UTF-16（小端，遵循 BOM）解码为 UTF-8 字节
