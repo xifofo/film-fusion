@@ -92,6 +92,7 @@ func (s *Server) setupRoutes() {
 	cloudPathHandler := handler.NewCloudPathHandler()
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.download115Service)
+	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -187,6 +188,13 @@ func (s *Server) setupRoutes() {
 
 			// STRM 内容替换
 			paths.POST("/:id/strm/replace", cloudPathHandler.ReplaceStrmContent)
+		}
+
+		// STRM 相关路由
+		strm := protected.Group("/strm")
+		{
+			// 新增：根据 115 目录树与 world 文件生成 STRM
+			strm.POST("/gen/115-directory-tree", strmHandler.GenStrmWith115DirectoryTree)
 		}
 	}
 }

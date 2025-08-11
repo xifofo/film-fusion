@@ -130,7 +130,7 @@ func (s *Download115Service) StopWorkers() {
 
 // processQueue 处理下载队列
 func (s *Download115Service) processQueue() {
-	ticker := time.NewTicker(time.Second * 2) // 每2秒检查一次队列
+	ticker := time.NewTicker(time.Second * 5) // 每5秒检查一次队列
 	defer ticker.Stop()
 
 	for {
