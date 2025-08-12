@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"film-fusion/app/config"
 	"film-fusion/app/database"
@@ -12,7 +14,9 @@ import (
 	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
@@ -24,7 +28,25 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"gorm.io/gorm"
+	"resty.dev/v3"
 )
+
+// SimpleStartInfo 播放开始信息结构体
+type SimpleStartInfo struct {
+	ItemId string `json:"ItemId"`
+}
+
+// SimpleEmbyItemResponse Emby项目响应结构体
+type SimpleEmbyItemResponse struct {
+	Id          string `json:"Id"`
+	SeasonId    string `json:"SeasonId"`
+	IndexNumber int    `json:"IndexNumber"`
+}
+
+// SimpleEmbyItemResponseList Emby项目列表响应结构体
+type SimpleEmbyItemResponseList struct {
+	Items []SimpleEmbyItemResponse `json:"Items"`
+}
 
 // EmbyProxyHandler Emby代理处理器
 type EmbyProxyHandler struct {
@@ -176,9 +198,41 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 // handlePlaying 处理播放会话请求
 func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
 	h.logger.Debug("处理播放会话请求")
-	// TODO: 实现播放会话的特殊处理逻辑
-	// 这里可以添加播放状态的特殊处理
-	h.proxy.ServeHTTP(c.Writer, c.Request)
+
+	// 创建记录器来存储响应内容
+	recorder := httptest.NewRecorder()
+
+	var startInfo SimpleStartInfo
+
+	// 使用 io.Copy 复制请求正文到 recorder
+	io.Copy(recorder, c.Request.Body)
+
+	// 将请求正文指针重置到开头
+	c.Request.Body = io.NopCloser(bytes.NewReader(recorder.Body.Bytes()))
+
+	if err := json.Unmarshal(recorder.Body.Bytes(), &startInfo); err == nil {
+		err := h.GETPlaybackInfo(startInfo.ItemId)
+		if err != nil {
+			h.logger.Warnf("补充媒体信息失败了: %v", err)
+		}
+
+		// 使用 goroutine 获取下一集的媒体信息
+		go func() {
+			h.GetNextMediaInfo(startInfo.ItemId)
+		}()
+	}
+
+	// 代理请求
+	h.proxy.ServeHTTP(recorder, c.Request)
+
+	// 将记录器的响应写回给客户端
+	for key, values := range recorder.Header() {
+		for _, value := range values {
+			c.Header(key, value)
+		}
+	}
+	c.Status(recorder.Code)
+	c.Writer.Write(recorder.Body.Bytes())
 }
 
 // proxyPlay 代理播放请求，返回重定向URL和是否跳过标志
@@ -359,4 +413,110 @@ func (h *EmbyProxyHandler) fetchPickcodeFromAPI(matchedPath, accessToken string)
 	}
 
 	return folderInfo.PickCode, nil
+}
+
+// GETPlaybackInfo 获取播放信息，使用新的emby客户端方法
+func (h *EmbyProxyHandler) GETPlaybackInfo(itemID string) error {
+	h.logger.Debugf("获取播放信息，ItemId: %s", itemID)
+
+	// 创建emby客户端
+	embyClient := embyhelper.New(h.config)
+
+	// 使用新的GetPlaybackInfo方法获取媒体源信息
+	mediaSources, err := embyClient.GetPlaybackInfo(itemID)
+	if err != nil {
+		return fmt.Errorf("获取播放信息失败: %w", err)
+	}
+
+	// 检查是否有媒体源
+	if len(mediaSources) == 0 {
+		return fmt.Errorf("MediaSources not found or empty")
+	}
+
+	// 记录成功获取的信息
+	h.logger.Infof("媒体播放信息获取成功: ItemID=%s, MediaSources数量=%d", itemID, len(mediaSources))
+
+	return nil
+}
+
+// GetNextMediaInfo 获取下一集媒体信息
+func (h *EmbyProxyHandler) GetNextMediaInfo(itemId string) {
+	h.logger.Debugf("获取下一集媒体信息，ItemId: %s", itemId)
+
+	if !h.config.Emby.AddNextMediaInfo {
+		return
+	}
+
+	if h.config.Emby.AdminUserID == "" {
+		h.logger.Error("获取下一集的媒体信息失败，因为 admin_user_id 未设置")
+		return
+	}
+
+	// 这里实现获取下一集媒体信息的逻辑
+	// 可以根据具体需求来实现，比如获取剧集的下一集信息
+
+	defer func() {
+		if r := recover(); r != nil {
+			h.logger.Errorf("获取下一集媒体信息时发生panic: %v", r)
+		}
+	}()
+
+	// 获取当前播放详情获取 SeasonId
+	client := resty.New()
+	defer client.Close()
+
+	res, err := client.R().
+		SetQueryParams(map[string]string{
+			"api_key": h.config.Emby.APIKey,
+		}).
+		SetResult(&SimpleEmbyItemResponse{}).
+		Get(fmt.Sprintf("%s/Users/%s/Items/%s", h.config.Emby.URL, h.config.Emby.AdminUserID, itemId))
+
+	if err != nil {
+		h.logger.Errorf("获取下一集的媒体信息失败，因为 %s", err)
+		return
+	}
+
+	if res.StatusCode() != 200 {
+		h.logger.Errorf("获取下一集的媒体信息失败，因为 %s", res.String())
+		return
+	}
+
+	response := res.Result().(*SimpleEmbyItemResponse)
+
+	// 请求所有集数
+	responseList := &SimpleEmbyItemResponseList{}
+	res, err = client.R().
+		SetQueryParams(map[string]string{
+			"api_key":   h.config.Emby.APIKey,
+			"ParentId":  response.SeasonId,
+			"Recursive": "true",
+			"IsFolder":  "false",
+		}).
+		SetResult(responseList).
+		Get(fmt.Sprintf("%s/Users/%s/Items", h.config.Emby.URL, h.config.Emby.AdminUserID))
+
+	if err != nil {
+		h.logger.Errorf("获取下一集的媒体信息失败，因为 %s", err)
+		return
+	}
+
+	if res.StatusCode() != 200 {
+		h.logger.Errorf("获取下一集的媒体信息失败，因为 %s", res.String())
+		return
+	}
+
+	// 根据 IndexNumber 去获取下一集，并补充媒体信息, 可能存在最后一集没有下一集的情况
+	if response.IndexNumber >= len(responseList.Items) {
+		return
+	}
+
+	nextItem := responseList.Items[response.IndexNumber]
+
+	err = h.GETPlaybackInfo(nextItem.Id)
+	if err != nil {
+		h.logger.Warnf("补充媒体信息失败了: %v", err)
+	}
+
+	h.logger.Infof("成功获取下一集媒体信息，ItemId: %s", itemId)
 }
