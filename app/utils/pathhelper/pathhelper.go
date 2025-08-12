@@ -34,6 +34,16 @@ func RemoveFirstDir(path string) string {
 	return ""
 }
 
+func EnsureLeadingSlash(path string) string {
+	path = ConvertToLinuxPath(path)
+
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path // 不是以 / 开头，加上 /
+	}
+
+	return path
+}
+
 func ConvertToLinuxPath(windowsPath string) string {
 	// 将所有的反斜杠转换成正斜杠
 	linuxPath := strings.ReplaceAll(RemoveDriveLetter(windowsPath), "\\", "/")

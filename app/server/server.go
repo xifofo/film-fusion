@@ -23,6 +23,7 @@ type Server struct {
 	tokenRefreshService *service.TokenRefreshService
 	download115Service  *service.Download115Service
 	fileWatcher         *filewatcher.FileWatcherManager
+	embyProxyServer     *EmbyProxyServer
 }
 
 // NewServer 创建一个新的 Server 实例
@@ -50,6 +51,17 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	// 初始化并启动文件监控器
 	s.setupFileWatcher()
 
+	// 开启一个 Emby 代理服务
+	if cfg.Emby.Enabled {
+		s.Logger.Info("Emby服务已启用，正在创建代理服务器...")
+		embyProxyServer := NewEmbyProxyServer(cfg, log)
+		if embyProxyServer != nil {
+			s.embyProxyServer = embyProxyServer
+		} else {
+			s.Logger.Error("创建Emby代理服务器失败")
+		}
+	}
+
 	return s
 }
 
@@ -63,6 +75,13 @@ func (s *Server) Start() error {
 	// 启动115Open下载服务
 	s.download115Service.StartWorkers()
 
+	// 启动Emby代理服务器（如果启用）
+	if s.embyProxyServer != nil {
+		if err := s.embyProxyServer.Start(); err != nil {
+			s.Logger.Errorf("启动Emby代理服务器失败: %v", err)
+		}
+	}
+
 	return s.http.ListenAndServe()
 }
 
@@ -72,6 +91,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
+
+	// 停止Emby代理服务器
+	if s.embyProxyServer != nil {
+		if err := s.embyProxyServer.Stop(ctx); err != nil {
+			s.Logger.Errorf("停止Emby代理服务器失败: %v", err)
+		}
+	}
 
 	// 停止文件监控管理器
 	s.fileWatcher.Stop()

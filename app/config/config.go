@@ -12,6 +12,7 @@ type Config struct {
 	Log         LogConfig          `mapstructure:"log"`
 	JWT         JWTConfig          `mapstructure:"jwt"`
 	FileWatcher FileWatcherConfigs `mapstructure:"file_watcher"`
+	Emby        EmbyConfig         `mapstructure:"emby"`
 }
 
 type ServerConfig struct {
@@ -53,6 +54,16 @@ type FileWatcherConfig struct {
 	CopyMode             string   `mapstructure:"copy_mode"`              // 复制模式: copy(复制), move(移动), link(硬链接)
 	CreateDirs           bool     `mapstructure:"create_dirs"`            // 是否自动创建目标目录
 	ProcessExistingFiles bool     `mapstructure:"process_existing_files"` // 是否在启动时处理已存在的文件
+}
+
+type EmbyConfig struct {
+	Enabled          bool   `mapstructure:"enabled"`             // 是否启用 EMBY 服务
+	URL              string `mapstructure:"url"`                 // EMBY 服务器地址
+	APIKey           string `mapstructure:"api_key"`             // EMBY API 密钥
+	AdminUserID      string `mapstructure:"admin_user_id"`       // EMBY 管理员用户 ID
+	CacheTime        int    `mapstructure:"cache_time"`          // API 请求超时时间（秒）
+	AddNextMediaInfo bool   `mapstructure:"add_next_media_info"` // 是否添加下一部媒体信息
+	RunProxyPort     int    `mapstructure:"run_proxy_port"`      // 运行 Emby 代理端口
 }
 
 func Load() *Config {
