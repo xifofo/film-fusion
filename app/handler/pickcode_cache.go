@@ -112,6 +112,38 @@ func (h *PickcodeCacheHandler) CreatePickcodeCache(c *gin.Context) {
 	h.success(c, req, "创建缓存记录成功")
 }
 
+// CreatePickcodeCacheIfNotExists 创建 pickcode 缓存（如果不存在）
+func (h *PickcodeCacheHandler) CreatePickcodeCacheIfNotExists(c *gin.Context) {
+	var req struct {
+		FilePath string `json:"file_path" binding:"required"`
+		Pickcode string `json:"pickcode" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "请求参数错误: "+err.Error())
+		return
+	}
+
+	// 使用静态方法创建缓存，如果存在则跳过
+	cache, created, err := model.CreateIfNotExistsStatic(database.DB, req.FilePath, req.Pickcode)
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "创建缓存记录失败: "+err.Error())
+		return
+	}
+
+	if created {
+		h.success(c, gin.H{
+			"cache":   cache,
+			"created": true,
+		}, "创建缓存记录成功")
+	} else {
+		h.success(c, gin.H{
+			"cache":   cache,
+			"created": false,
+		}, "缓存记录已存在，跳过创建")
+	}
+}
+
 // UpdatePickcodeCache 更新 pickcode 缓存
 func (h *PickcodeCacheHandler) UpdatePickcodeCache(c *gin.Context) {
 	id := c.Param("id")
