@@ -11,5 +11,6 @@ func AutoMigrate() error {
 		&model.CloudPath{},
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
+		&model.Match302{},
 	)
 }

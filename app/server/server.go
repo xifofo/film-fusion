@@ -94,6 +94,7 @@ func (s *Server) setupRoutes() {
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.download115Service)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
+	match302Handler := handler.NewMatch302Handler()
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -214,6 +215,23 @@ func (s *Server) setupRoutes() {
 
 			// 统计信息
 			pickcode.GET("/stats", pickcodeCacheHandler.GetPickcodeCacheStats)
+		}
+
+		// Match302 匹配配置相关路由
+		match302 := protected.Group("/match-302")
+		{
+			// 基础CRUD操作
+			match302.GET("/", match302Handler.GetMatch302s)
+			match302.GET("/:id", match302Handler.GetMatch302)
+			match302.POST("/", match302Handler.CreateMatch302)
+			match302.PUT("/:id", match302Handler.UpdateMatch302)
+			match302.DELETE("/:id", match302Handler.DeleteMatch302)
+
+			// 批量操作
+			match302.POST("/batch/delete", match302Handler.BatchDeleteMatch302s)
+
+			// 统计信息
+			match302.GET("/stats", match302Handler.GetMatch302Stats)
 		}
 	}
 }
