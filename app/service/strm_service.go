@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/pathhelper"
@@ -55,7 +56,7 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 
 	// 处理 115OPEN API 创建 STRM 文件
 	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
-		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath)
+		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath, "")
 		return nil
 	}
 
@@ -88,7 +89,7 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Clou
 
 	// 处理 115OPEN API 创建 STRM 文件
 	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
-		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath)
+		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath, "")
 		// 不能 Return --- 因为可能需要删除原来的文件
 	}
 
@@ -212,7 +213,7 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 				s.logger.Debugf("处理文件: %s", filePath)
 
 				// 为符合过滤规则的文件创建STRM文件或下载
-				s.CreateStrmOrDownloadWith115OpenAPI(filePath, cloudPath)
+				s.CreateStrmOrDownloadWith115OpenAPI(filePath, cloudPath, file.Pc)
 			}
 		}
 
@@ -226,7 +227,7 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 	}
 }
 
-func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath) {
+func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath, pickcode string) {
 	savePath := filepath.Join(cloudPath.LocalPath, path)
 	fileExt := strings.ToLower(filepath.Ext(savePath))
 
@@ -287,6 +288,12 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	if err != nil {
 		s.logger.Errorf("创建 STRM 文件失败: %v", err)
 		return
+	}
+
+	// 尽可能的缓存 pickcode
+	if pickcode != "" {
+		// 缓存 pickcode
+		model.CreateIfNotExistsStatic(database.DB, strmFilePath, pickcode)
 	}
 
 	s.logger.Debugf("创建 STRM 文件到: %s", strmFilePath)
