@@ -90,7 +90,14 @@ emby:
 
 ### Webhook 集成
 配置第三方服务的 Webhook 地址：
-- **CloudDrive2**: `POST http://your-server:9000/api/webhook/cd2`
+#### **CloudDrive2**
+添加 webhook 并找到 base_url 改成自己部署的地址，把 enabled 改成 true
+```
+base_url = "http://xxx.xxx.xxx.xxx:8095/webhook/clouddrive2"
+# Whether the webhook is enabled
+enabled = true
+```
+
 - **MoviePilot2**: `POST http://your-server:9000/api/webhook/mp2`
 
 ## 🛠️ 常用命令
@@ -137,12 +144,6 @@ sudo netstat -tlnp | grep 9000
 2. **使用强密钥** - 设置复杂的JWT密钥
 3. **启用HTTPS** - 使用反向代理配置SSL
 4. **定期备份** - 备份配置文件和数据库
-
-## 🤝 支持与反馈
-
-- **🏠 项目主页**: https://github.com/xifofo/film-fusion
-- **🐛 问题反馈**: [GitHub Issues](https://github.com/xifofo/film-fusion/issues)
-- **💡 功能建议**: [GitHub Discussions](https://github.com/xifofo/film-fusion/discussions)
 
 ## 📄 开源协议
 

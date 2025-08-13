@@ -293,7 +293,7 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	// 尽可能的缓存 pickcode
 	if pickcode != "" && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
 		// 缓存 pickcode
-		model.CreateIfNotExistsStatic(database.DB, pathhelper.RemoveFirstDir(path), pickcode)
+		model.CreateIfNotExistsStatic(database.DB, filepath.Join("/", pathhelper.RemoveFirstDir(path)), pickcode)
 	}
 
 	s.logger.Debugf("创建 STRM 文件到: %s", strmFilePath)

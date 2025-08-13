@@ -367,7 +367,7 @@ func (h *EmbyProxyHandler) getDownloadURL(matchedPath, accessToken, userAgent st
 
 	// 如果没有缓存或 pickcode 为空，则获取新的 pickcode
 	if errors.Is(err, gorm.ErrRecordNotFound) || pickcodeCache.Pickcode == "" {
-		h.logger.Debugf("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", matchedPath)
+		h.logger.Infof("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", matchedPath)
 
 		pickcode, err := h.fetchPickcodeFromAPI(matchedPath, accessToken)
 		if err != nil {
