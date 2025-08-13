@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // DB 全局数据库实例
@@ -23,7 +24,9 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 	}
 
 	// 打开数据库连接
-	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+		Logger: gormlogger.Default.LogMode(gormlogger.Silent), // 静默模式，避免过多日志
+	})
 	if err != nil {
 		log.Errorf("连接数据库失败: %v", err)
 		return err

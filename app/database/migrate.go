@@ -20,6 +20,7 @@ func AutoMigrate() error {
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
 		&model.Match302{},
+		&model.MediaTask{},
 	)
 }
 

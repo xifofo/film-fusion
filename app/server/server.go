@@ -9,6 +9,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/middleware"
 	"film-fusion/app/service"
+	"film-fusion/app/utils/embyhelper"
 	"net/http"
 	"strings"
 
@@ -25,6 +26,7 @@ type Server struct {
 	download115Service  *service.Download115Service
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
+	taskQueue           *service.PersistentTaskQueue
 }
 
 // NewServer 创建一个新的 Server 实例
@@ -33,6 +35,27 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	// 创建115Open下载服务
 	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
+
+	embyClient := embyhelper.New(cfg)
+
+	// 创建回调函数包装器
+	playbackCallback := func(itemID string, cfg *config.Config) error {
+		_, err := embyClient.GetPlaybackInfo(itemID)
+		return err
+	}
+
+	taskQueue := service.NewPersistentTaskQueue(cfg, log, playbackCallback)
+
+	if taskQueue != nil {
+		log.Info("✅ 任务队列初始化成功")
+
+		// 获取队列状态
+		if status, err := taskQueue.GetQueueStatus(); err == nil {
+			log.Infof("📊 当前任务队列状态: %+v", status)
+		}
+	} else {
+		log.Error("❌ 任务队列初始化失败")
+	}
 
 	s := &Server{
 		gin: router,
@@ -44,6 +67,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Logger:              log,
 		tokenRefreshService: service.NewTokenRefreshService(log),
 		download115Service:  download115Service,
+		taskQueue:           taskQueue,
 	}
 
 	// 设置路由
@@ -100,6 +124,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	s.taskQueue.Stop()
+
 	// 停止文件监控管理器
 	s.fileWatcher.Stop()
 
@@ -138,7 +164,7 @@ func (s *Server) setupRoutes() {
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
-	webhookHandler := handler.NewWebhookHandler(s.Logger, s.download115Service)
+	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
@@ -163,6 +189,9 @@ func (s *Server) setupRoutes() {
 
 		// movie-pilot v2 webhook
 		webhook.Any("/movie-pilot/v2", webhookHandler.MoviePilotV2Webhook)
+
+		// Emby webhook
+		webhook.POST("/emby", webhookHandler.HandleEmbyWebhook)
 	}
 
 	// 需要JWT验证的路由

@@ -20,6 +20,7 @@ type ServerConfig struct {
 	Username               string `mapstructure:"username"`
 	Password               string `mapstructure:"password"`
 	Download115Concurrency int    `mapstructure:"download_115_concurrency"`
+	ProcessNewMedia        bool   `mapstructure:"process_new_media"` // 是否处理新增媒体事件
 }
 
 type LogConfig struct {
@@ -94,6 +95,7 @@ func Load() *Config {
 // setDefaults 设置默认配置
 func setDefaults() {
 	viper.SetDefault("server.port", "5000")
+	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
 
 	// 日志默认配置
 	viper.SetDefault("log.level", "info")
