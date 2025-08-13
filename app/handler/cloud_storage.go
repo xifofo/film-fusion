@@ -90,7 +90,7 @@ func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 	var total int64
 	query.Model(&model.CloudStorage{}).Count(&total)
 
-	if err := query.Order("is_default DESC, sort_order ASC, created_at DESC").
+	if err := query.Order("sort_order ASC, created_at DESC").
 		Offset(offset).
 		Limit(pageSize).
 		Find(&storages).Error; err != nil {

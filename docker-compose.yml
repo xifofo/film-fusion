@@ -1,6 +1,6 @@
 services:
   film-fusion:
-    image: "kumayi/film-fusion:latest"
+    image: "kumayi/film-fusion:v2.0.0"
     container_name: "film-fusion"
     restart: unless-stopped
     ports:
@@ -12,7 +12,7 @@ services:
       # 配置和数据目录
       - ./data:/app/data
       # 下载目录（可选，如果使用文件监控功能）
-      - /path/to/downloads:/mnt/downloads
+      # - /path/to/downloads:/mnt/downloads
       # CloudDrive2挂载目录（可选）
       # - /mnt/clouddrive:/mnt/clouddrive:ro
     environment:
