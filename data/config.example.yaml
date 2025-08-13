@@ -3,7 +3,7 @@ server:
   username: "admin"
   password: ""
   download_115_concurrency: 1  # 115Open下载并发数
-  process_new_media: true      # 是否处理新增媒体事件（通过webhook）
+  process_new_media: false     # 是否处理新增媒体事件（通过webhook）
 
 emby:
   enabled: true
