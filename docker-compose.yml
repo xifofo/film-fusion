@@ -1,0 +1,11 @@
+services:
+  film-fusion:
+    image: "kumayi/film-fusion:latest"
+    container_name: "film-fusion"
+    restart: unless-stopped
+    ports:
+      - "9080:9080"
+      - "9096:9096"
+    volumes:
+      - ./data:/app/data
+      - /path/to/media:/mnt/user/media
