@@ -39,4 +39,4 @@ COPY --from=builder /app/film-fusion .
 COPY --from=builder /app/dist ./dist
 
 # 设置容器启动时运行的命令
-CMD ["./film-fusion"]
+CMD ["./film-fusion", "server"]

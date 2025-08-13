@@ -10,6 +10,7 @@ import (
 	"film-fusion/app/middleware"
 	"film-fusion/app/service"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -111,6 +112,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // setupRoutes 设置API路由
 func (s *Server) setupRoutes() {
+	// 加载HTML模板
+	s.gin.LoadHTMLGlob("dist/*.html")
+
+	// 前端路由处理 - 对于所有非API路径，返回index.html让前端路由处理
+	s.gin.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		// 跳过API和webhook路径
+		if strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/webhook") {
+			c.JSON(404, gin.H{"error": "API路径不存在"})
+			return
+		}
+		// 如果是静态文件请求（有文件扩展名），尝试服务静态文件
+		if strings.Contains(path, ".") {
+			c.File("./dist" + path)
+			return
+		}
+		// 返回前端入口文件
+		c.HTML(200, "index.html", nil)
+	})
+
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	authHandler := handler.NewAuthHandler(s.Config)

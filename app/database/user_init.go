@@ -16,30 +16,52 @@ func InitAdminUser(cfg *config.Config, log *logger.Logger) error {
 		return fmt.Errorf("管理员账户配置不能为空，请在配置文件中设置 username 和 password")
 	}
 
-	// 检查管理员用户是否已存在
+	// 首先查找是否已存在管理员用户（不管用户名是什么）
 	var existingAdmin model.User
-	result := DB.Where("username = ? AND is_admin = ?", cfg.Server.Username, true).First(&existingAdmin)
+	result := DB.Where("is_admin = ?", true).First(&existingAdmin)
 
 	if result.Error == nil {
-		// 管理员已存在，检查密码是否需要更新
+		// 管理员用户已存在，检查是否需要更新用户名和密码
+		needUpdate := false
+
+		// 检查用户名是否需要更新
+		if existingAdmin.Username != cfg.Server.Username {
+			// 检查新用户名是否已被其他用户使用
+			var conflictUser model.User
+			conflictResult := DB.Where("username = ? AND id != ?", cfg.Server.Username, existingAdmin.ID).First(&conflictUser)
+			if conflictResult.Error == nil {
+				return fmt.Errorf("用户名 '%s' 已被其他用户使用，无法更新管理员用户名", cfg.Server.Username)
+			}
+
+			oldUsername := existingAdmin.Username
+			existingAdmin.Username = cfg.Server.Username
+			needUpdate = true
+			log.Infof("管理员用户名从 '%s' 更新为 '%s'", oldUsername, cfg.Server.Username)
+		}
+
+		// 检查密码是否需要更新
 		if !utils.VerifyPassword(cfg.Server.Password, existingAdmin.Password) {
-			// 密码已变更，更新数据库中的密码
 			expectedHash, err := utils.HashPassword(cfg.Server.Password)
 			if err != nil {
 				return fmt.Errorf("哈希密码失败: %v", err)
 			}
 			existingAdmin.Password = expectedHash
-			if err := DB.Save(&existingAdmin).Error; err != nil {
-				return fmt.Errorf("更新管理员密码失败: %v", err)
-			}
+			needUpdate = true
 			log.Infof("管理员 '%s' 密码已更新", cfg.Server.Username)
+		}
+
+		// 如果需要更新，保存到数据库
+		if needUpdate {
+			if err := DB.Save(&existingAdmin).Error; err != nil {
+				return fmt.Errorf("更新管理员账户失败: %v", err)
+			}
 		} else {
-			log.Infof("管理员 '%s' 已存在，无需初始化", cfg.Server.Username)
+			log.Infof("管理员 '%s' 已存在，无需更新", cfg.Server.Username)
 		}
 		return nil
 	}
 
-	// 创建新的管理员用户
+	// 不存在管理员用户，创建新的管理员用户
 	hashedPassword, err := utils.HashPassword(cfg.Server.Password)
 	if err != nil {
 		return fmt.Errorf("哈希密码失败: %v", err)

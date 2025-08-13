@@ -2,3 +2,4 @@
 !/data/config.example.yaml
 film-fusion
 /dist/*
+.DS_Store

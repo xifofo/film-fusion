@@ -7,6 +7,7 @@ toolchain go1.23.11
 require (
 	github.com/OpenListTeam/115-sdk-go v0.2.2
 	github.com/fsnotify/fsnotify v1.8.0
+	github.com/gin-contrib/static v1.1.5
 	github.com/gin-gonic/gin v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/patrickmn/go-cache v2.1.0+incompatible
