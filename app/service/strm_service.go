@@ -113,7 +113,7 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 		return
 	}
 
-	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
+	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(processPath, cloudPath.SourcePath) {
 		s.WalkDirWith115OpenAPI(processPath, cloudPath)
 	}
 
@@ -291,9 +291,9 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	}
 
 	// 尽可能的缓存 pickcode
-	if pickcode != "" {
+	if pickcode != "" && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
 		// 缓存 pickcode
-		model.CreateIfNotExistsStatic(database.DB, strmFilePath, pickcode)
+		model.CreateIfNotExistsStatic(database.DB, pathhelper.RemoveFirstDir(path), pickcode)
 	}
 
 	s.logger.Debugf("创建 STRM 文件到: %s", strmFilePath)
