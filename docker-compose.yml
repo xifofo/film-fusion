@@ -4,8 +4,27 @@ services:
     container_name: "film-fusion"
     restart: unless-stopped
     ports:
-      - "9080:9080"
-      - "9096:9096"
+      # Web 管理界面和 API 端口
+      - "9000:9000"
+      # Emby 代理端口（用于直链播放）
+      - "8097:8097"
     volumes:
+      # 配置和数据目录
       - ./data:/app/data
-      - /path/to/media:/mnt/user/media
+      # 下载目录（可选，如果使用文件监控功能）
+      - /path/to/downloads:/mnt/downloads
+      # CloudDrive2挂载目录（可选）
+      # - /mnt/clouddrive:/mnt/clouddrive:ro
+    environment:
+      # 设置时区
+      - TZ=Asia/Shanghai
+      # 运行模式（生产环境）
+      - GIN_MODE=release
+    # 网络配置（可选）
+    # networks:
+    #   - film-fusion-network
+
+# 网络配置（可选）
+networks:
+  default:
+    name: film-fusion-network

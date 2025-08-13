@@ -1,11 +1,23 @@
 server:
-  port: 5000
-  # 仅首次配置时生效
-  username: ""
+  port: 9000
+  username: "admin"
   password: ""
+  download_115_concurrency: 1  # 115Open下载并发数
+
+emby:
+  enabled: true
+  url: "http://127.0.0.1:8096"
+  # Emby 代理端口
+  run_proxy_port: 8097
+  api_key: ""
+  cache_time: 30 # 缓存直链时间，单位：分钟
+  # EMBY 管理员用户 ID, add_next_media_info 为 false 时可不配置
+  admin_user_id: ""
+  # 播放时提前获取下一集的媒体信息，提高播放速度，需要配置 admin_user_id
+  add_next_media_info: true
 
 log:
-  level: debug          # debug, info, warn, error, fatal
+  level: info           # debug, info, warn, error, fatal
   format: json          # json, text
   output: file          # stdout, file
   max_size: 100         # MB
@@ -14,6 +26,19 @@ log:
   compress: true
 
 jwt:
-  secret: "your-secret-key"
-  expire_time: 24       # hours
+  secret: "film-fusion-secret-key"
+  expire_time: 240       # hours
   issuer: "film-fusion"
+
+# 文件监控配置
+file_watcher:
+  enabled: false # 是否启用文件监控功能
+  configs: # 多个监控配置，可以监控不同的目录
+    - name: "download-to-115" # 监控配置名称（用于日志标识）
+      source_dir: "/temp" # 监控的源目录
+      target_dir: "/temp2" # 目标复制目录
+      extensions: [".mp4", ".mkv", ".avi", ".m4v", ".mov", ".wmv", ".flv", ".mpg", ".mpeg", ".rm", ".rmvb", ".vob", ".ts", ".tp", ".ass", ".srt"] # 只监控视频文件
+      recursive: true # 是否递归监控子目录
+      copy_mode: "copy" # 复制模式：copy(复制), move(移动), link(硬链接)
+      create_dirs: true # 是否自动创建目标目录
+      process_existing_files: false # 是否在启动时处理已存在的文件
