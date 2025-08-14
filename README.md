@@ -98,7 +98,15 @@ base_url = "http://xxx.xxx.xxx.xxx:8095/webhook/clouddrive2"
 enabled = true
 ```
 
-- **MoviePilot2**: `POST http://your-server:9000/api/webhook/mp2`
+#### **MoviePilot2**:
+添加 webhook 插件 选择 `POST` 填入以下链接
+`http://xxx.xxx.xxx.xxx:8095/webhook/movie-pilot/v2`
+
+#### EMBY 入库补充 媒体信息
+EMBY 通知添加 webhook 勾选 新媒体已添加，填入链接
+
+`http://xxx.xxx.xxx.xxx:8095/webhook/emby`
+
 
 ## 🛠️ 常用命令
 
