@@ -51,6 +51,11 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 
 		// STRM 相关操作
 		if cloudPath.LinkType == model.LinkTypeStrm {
+			if data.Action == "create" && data.IsDir == "true" {
+				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, false)
+				return
+			}
+
 			if data.Action == "create" && data.IsDir == "false" {
 				strmSvc.CreateFile(data.SourceFile, cloudPath)
 				return
@@ -63,7 +68,7 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 
 			if data.Action == "rename" && data.IsDir == "true" {
 				// 目录重命名，需要处理目录下的所有文件并删除原目录
-				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath)
+				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, true)
 				return
 			}
 
@@ -87,8 +92,13 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 				return
 			}
 
+			if data.Action == "create" && data.IsDir == "true" {
+				symlinkSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, false)
+				return
+			}
+
 			if data.Action == "rename" && data.IsDir == "true" {
-				symlinkSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath)
+				symlinkSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, true)
 				return
 			}
 

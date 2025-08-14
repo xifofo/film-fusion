@@ -100,7 +100,7 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Clou
 	}
 }
 
-func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath) {
+func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath, isDeleteOriginal bool) {
 	var processPath string
 	if cloudPath.IsWindowsPath {
 		processPath = pathhelper.ConvertToLinuxPath(path)
@@ -118,7 +118,7 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
-	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
+	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) && isDeleteOriginal {
 		savePath := filepath.Join(cloudPath.LocalPath, originalPath)
 		s.DeleteAction(savePath, true)
 	}

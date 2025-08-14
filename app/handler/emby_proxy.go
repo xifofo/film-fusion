@@ -19,7 +19,6 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -407,7 +406,7 @@ func (h *EmbyProxyHandler) getDownloadURL(matchedPath, accessToken, userAgent st
 func (h *EmbyProxyHandler) fetchPickcodeFromAPI(matchedPath, accessToken string) (string, error) {
 	h.sdk115Open.SetAccessToken(accessToken)
 
-	folderInfo, err := h.sdk115Open.GetFolderInfoByPath(context.Background(), filepath.Join("/", matchedPath))
+	folderInfo, err := h.sdk115Open.GetFolderInfoByPath(context.Background(), pathhelper.EnsureLeadingSlash(matchedPath))
 	if err != nil {
 		return "", fmt.Errorf("获取115Open文件夹信息失败: %w", err)
 	}

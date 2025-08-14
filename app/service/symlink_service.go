@@ -1,22 +1,30 @@
 package service
 
 import (
+	"context"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/pathhelper"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+
+	sdk115 "github.com/OpenListTeam/115-sdk-go"
 )
 
 // SymlinkService 软链接处理服务
 type SymlinkService struct {
-	logger *logger.Logger
+	logger     *logger.Logger
+	sdk115Open *sdk115.Client
 }
 
 // NewSymlinkService 创建新的 SymlinkService
 func NewSymlinkService(log *logger.Logger) *SymlinkService {
-	return &SymlinkService{logger: log}
+	return &SymlinkService{
+		logger:     log,
+		sdk115Open: sdk115.New(),
+	}
 }
 
 // CreateFile 针对单个文件创建软链接
@@ -68,12 +76,21 @@ func (s *SymlinkService) CreateFile(path string, cloudPath model.CloudPath) erro
 		}
 	}
 
-	// 规范化：避免 targetPath 或 linkPath 出现 \ 分隔符
-	targetPath = strings.ReplaceAll(targetPath, "\\", "/")
-	linkPath = strings.ReplaceAll(linkPath, "\\", "/")
+	// 规范化路径：根据运行环境使用正确的路径分隔符
+	targetPath = s.normalizePath(targetPath)
+	linkPath = s.normalizePath(linkPath)
 
 	if err := os.Symlink(targetPath, linkPath); err != nil {
-		s.logger.Errorf("创建软链接失败: %s -> %s, 错误: %v", linkPath, targetPath, err)
+		// 在 Windows 系统上提供更详细的错误信息
+		if runtime.GOOS == "windows" {
+			s.logger.Errorf("创建软链接失败: %s -> %s, 错误: %v", linkPath, targetPath, err)
+			s.logger.Errorf("提示：在 Windows 系统上创建软链接需要以下条件之一：")
+			s.logger.Errorf("1. 以管理员权限运行程序")
+			s.logger.Errorf("2. 启用 Windows 开发者模式")
+			s.logger.Errorf("3. 设置本地策略允许创建符号链接")
+		} else {
+			s.logger.Errorf("创建软链接失败: %s -> %s, 错误: %v", linkPath, targetPath, err)
+		}
 		return err
 	}
 
@@ -95,12 +112,21 @@ func (s *SymlinkService) RenameFile(originalPath, path string, cloudPath model.C
 }
 
 // RenameDir 目录重命名时批量更新软链接
-func (s *SymlinkService) RenameDir(originalPath, path string, cloudPath model.CloudPath) {
-	s.logger.Debugf("目录重命名软链接处理: %s -> %s", originalPath, path)
+func (s *SymlinkService) RenameDir(originalPath, path string, cloudPath model.CloudPath, isDeleteOriginal bool) {
+	var processPath string
+	if cloudPath.IsWindowsPath {
+		processPath = pathhelper.ConvertToLinuxPath(path)
+	} else {
+		processPath = path
+	}
+
+	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(processPath, cloudPath.SourcePath) {
+		s.WalkDirWith115OpenAPI(processPath, cloudPath)
+	}
 
 	// 目录重命名比较复杂，需要遍历目录下所有文件重新创建软链接
 	// 这里先删除原目录对应的所有软链接
-	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
+	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) && isDeleteOriginal {
 		s.deleteDirectoryLinks(originalPath, cloudPath)
 	}
 
@@ -136,7 +162,7 @@ func (s *SymlinkService) deleteFileLink(path string, cloudPath model.CloudPath) 
 	}
 
 	linkPath := filepath.Join(cloudPath.LocalPath, processPath)
-	linkPath = strings.ReplaceAll(linkPath, "\\", "/")
+	linkPath = s.normalizePath(linkPath)
 
 	// 检查是否存在且为软链接
 	if fi, err := os.Lstat(linkPath); err == nil {
@@ -160,7 +186,7 @@ func (s *SymlinkService) deleteDirectoryLinks(path string, cloudPath model.Cloud
 	}
 
 	linkDirPath := filepath.Join(cloudPath.LocalPath, processPath)
-	linkDirPath = strings.ReplaceAll(linkDirPath, "\\", "/")
+	linkDirPath = s.normalizePath(linkDirPath)
 
 	// 递归删除目录下的所有内容（但只删除软链接，保留其他文件）
 	err := filepath.Walk(linkDirPath, func(walkPath string, info os.FileInfo, err error) error {
@@ -189,80 +215,129 @@ func (s *SymlinkService) deleteDirectoryLinks(path string, cloudPath model.Cloud
 	}
 }
 
-// WalkDirAndCreateLinks 批量遍历目录创建软链接（类似 STRM 的批量生成）
-func (s *SymlinkService) WalkDirAndCreateLinks(dirPath string, cloudPath model.CloudPath) error {
+// WalkDirWith115OpenAPI 使用115 Open API递归遍历目录创建软链接
+// 该方法会：
+// 1. 使用115 SDK获取指定目录下的所有文件和子目录
+// 2. 对符合过滤规则的文件调用 pathhelper.IsFileMatchedByFilter() 进行过滤
+// 3. 为通过过滤的文件创建软链接
+// 4. 对子目录进行递归遍历
+//
+// 参数：
+//   - dirPath: 要遍历的目录路径
+//   - cloudPath: 云盘路径配置信息，包含过滤规则等
+func (s *SymlinkService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.CloudPath) error {
+	// 设置访问令牌
+	s.sdk115Open.SetAccessToken(cloudPath.CloudStorage.AccessToken)
+
 	processPath := dirPath
 	if cloudPath.IsWindowsPath {
 		processPath = pathhelper.ConvertToLinuxPath(dirPath)
 	}
 
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过批量软链接创建", cloudPath.ID)
-		return nil
+	sourceCloudPath := filepath.Join("/", processPath)
+	// 转换路径为云盘路径
+	if cloudPath.SourceType == model.SourceTypeCloudDrive2 {
+		sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(processPath))
 	}
 
-	// 构建源目录路径（ContentPrefix + 路径）
-	sourceDir := filepath.Join(cloudPath.ContentPrefix, processPath)
-	sourceDir = strings.ReplaceAll(sourceDir, "\\", "/")
-
-	s.logger.Infof("开始批量创建软链接，源目录: %s", sourceDir)
-
-	// 统计信息
-	var createdCount, skippedCount, errorCount int
-
-	// 递归遍历源目录
-	err := filepath.Walk(sourceDir, func(walkPath string, info os.FileInfo, err error) error {
-		if err != nil {
-			s.logger.Errorf("遍历目录时出错: %s -> %v", walkPath, err)
-			errorCount++
-			return nil // 继续处理其他文件
-		}
-
-		// 跳过目录，只处理文件
-		if info.IsDir() {
-			return nil
-		}
-
-		// 计算相对路径
-		relPath, err := filepath.Rel(cloudPath.ContentPrefix, walkPath)
-		if err != nil {
-			s.logger.Errorf("计算相对路径失败: %s -> %v", walkPath, err)
-			errorCount++
-			return nil
-		}
-
-		// 统一路径分隔符
-		relPath = strings.ReplaceAll(relPath, "\\", "/")
-
-		// 检查过滤规则
-		if cloudPath.FilterRules != "" {
-			if !pathhelper.IsFileMatchedByFilter(relPath, cloudPath.FilterRules, "include") {
-				skippedCount++
-				return nil
-			}
-			if pathhelper.IsFileMatchedByFilter(relPath, cloudPath.FilterRules, "download") {
-				skippedCount++
-				return nil
-			}
-		}
-
-		// 创建软链接
-		if createErr := s.CreateFile(relPath, cloudPath); createErr != nil {
-			errorCount++
-		} else {
-			createdCount++
-		}
-
-		return nil
-	})
-
+	// 获取目录信息
+	folderInfo, err := s.sdk115Open.GetFolderInfoByPath(context.Background(), pathhelper.ConvertToLinuxPath(sourceCloudPath))
 	if err != nil {
-		s.logger.Errorf("批量创建软链接失败: %v", err)
+		s.logger.Errorf("获取115Open目录信息失败: %s, 错误: %v", sourceCloudPath, err)
 		return err
 	}
 
+	s.logger.Infof("开始使用115Open API批量创建软链接，目录: %s (CID: %s)", sourceCloudPath, folderInfo.FileID)
+
+	// 递归遍历目录
+	var createdCount, skippedCount, errorCount int
+	s.walkDir115(folderInfo.FileID, processPath, cloudPath, 0, &createdCount, &skippedCount, &errorCount)
+
 	s.logger.Infof("批量创建软链接完成，创建: %d, 跳过: %d, 错误: %d", createdCount, skippedCount, errorCount)
 	return nil
+}
+
+// walkDir115 递归遍历115目录的内部实现
+// 该方法处理分页获取文件列表，并对每个文件/目录进行相应处理
+//
+// 参数：
+//   - cid: 115目录的ID (从GetFolderInfoByPath获取的FileID)
+//   - currentPath: 当前遍历的路径
+//   - cloudPath: 云盘路径配置信息
+//   - depth: 当前递归深度，用于防止无限递归
+//   - createdCount, skippedCount, errorCount: 统计信息指针
+func (s *SymlinkService) walkDir115(cid, currentPath string, cloudPath model.CloudPath, depth int, createdCount, skippedCount, errorCount *int) {
+	// 防止无限递归
+	maxDepth := 50
+	if depth >= maxDepth {
+		s.logger.Warnf("达到最大递归深度 %d，停止遍历: %s", maxDepth, currentPath)
+		return
+	}
+
+	// 获取当前目录下的文件列表
+	req := &sdk115.GetFilesReq{
+		CID:     cid,
+		ShowDir: true, // 显示目录
+		Stdir:   1,    // 显示文件夹
+		Limit:   1150, // 一次获取1150个文件
+		Offset:  0,
+	}
+
+	for {
+		resp, err := s.sdk115Open.GetFiles(context.Background(), req)
+		if err != nil {
+			s.logger.Errorf("获取115Open目录文件列表失败: CID=%s, 错误: %v", cid, err)
+			return
+		}
+
+		s.logger.Debugf("获取到 %d 个文件/目录, CID: %s", len(resp.Data), cid)
+
+		// 处理每个文件/目录
+		for _, file := range resp.Data {
+			filePath := filepath.Join(currentPath, file.Fn)
+
+			// 如果是目录 (Fc == "0")
+			if file.Fc == "0" {
+				s.logger.Debugf("发现目录: %s", filePath)
+				// 递归处理子目录
+				s.walkDir115(file.Fid, filePath, cloudPath, depth+1, createdCount, skippedCount, errorCount)
+			} else {
+				// 如果是文件 (Fc == "1")
+				s.logger.Debugf("处理文件: %s", filePath)
+
+				// 检查过滤规则
+				if cloudPath.FilterRules != "" {
+					// include 未命中 -> 跳过
+					if !pathhelper.IsFileMatchedByFilter(filePath, cloudPath.FilterRules, "include") {
+						s.logger.Debugf("文件 %s 未命中 include 规则，跳过软链接", filePath)
+						*skippedCount++
+						continue
+					}
+					// 命中 download -> 跳过（不生成软链）
+					if pathhelper.IsFileMatchedByFilter(filePath, cloudPath.FilterRules, "download") {
+						s.logger.Debugf("文件 %s 命中 download 规则，跳过软链接", filePath)
+						*skippedCount++
+						continue
+					}
+				}
+
+				// 创建软链接
+				if createErr := s.CreateFile(filePath, cloudPath); createErr != nil {
+					*errorCount++
+				} else {
+					*createdCount++
+				}
+			}
+		}
+
+		// 检查是否还有更多文件
+		if req.Offset+req.Limit >= resp.Count {
+			break
+		}
+
+		// 继续获取下一批文件
+		req.Offset += req.Limit
+	}
 }
 
 // CheckAndRepairLinks 检查并修复损坏的软链接
@@ -309,7 +384,13 @@ func (s *SymlinkService) CheckAndRepairLinks(cloudPath model.CloudPath) error {
 				return nil
 			}
 
-			relPath = strings.ReplaceAll(relPath, "\\", "/")
+			// 根据配置转换路径格式：如果是 Windows 路径配置，转换为 Linux 风格用于内部处理
+			if cloudPath.IsWindowsPath {
+				relPath = pathhelper.ConvertToLinuxPath(relPath)
+			} else {
+				// 统一使用正斜杠进行内部处理
+				relPath = strings.ReplaceAll(relPath, "\\", "/")
+			}
 
 			// 删除损坏的链接
 			if rmErr := os.Remove(walkPath); rmErr != nil {
@@ -361,5 +442,49 @@ func (s *SymlinkService) ValidateContentPrefix(contentPrefix string) error {
 	os.Remove(testFile)
 
 	s.logger.Debugf("ContentPrefix 验证通过: %s", contentPrefix)
+	return nil
+}
+
+// normalizePath 根据运行环境规范化路径分隔符
+func (s *SymlinkService) normalizePath(path string) string {
+	if runtime.GOOS == "windows" {
+		// Windows 系统：使用反斜杠分隔符
+		return strings.ReplaceAll(path, "/", "\\")
+	}
+	// Unix-like 系统：使用正斜杠分隔符
+	return strings.ReplaceAll(path, "\\", "/")
+}
+
+// CheckSymlinkSupport 检查当前系统是否支持创建软链接
+func (s *SymlinkService) CheckSymlinkSupport() error {
+	// 创建临时文件用于测试
+	tempDir := os.TempDir()
+	testTarget := filepath.Join(tempDir, "filmfusion_symlink_test_target")
+	testLink := filepath.Join(tempDir, "filmfusion_symlink_test_link")
+
+	// 清理可能存在的测试文件
+	os.Remove(testTarget)
+	os.Remove(testLink)
+
+	// 创建测试目标文件
+	if err := os.WriteFile(testTarget, []byte("test"), 0644); err != nil {
+		return err
+	}
+	defer os.Remove(testTarget)
+
+	// 尝试创建软链接
+	if err := os.Symlink(testTarget, testLink); err != nil {
+		if runtime.GOOS == "windows" {
+			s.logger.Warnf("Windows 系统软链接支持检查失败: %v", err)
+			s.logger.Warnf("请确保满足以下条件之一：")
+			s.logger.Warnf("1. 以管理员权限运行程序")
+			s.logger.Warnf("2. 启用 Windows 开发者模式 (设置 -> 更新和安全 -> 开发者选项)")
+			s.logger.Warnf("3. 在本地安全策略中启用 '创建符号链接' 权限")
+		}
+		return err
+	}
+	defer os.Remove(testLink)
+
+	s.logger.Infof("系统软链接支持检查通过")
 	return nil
 }
