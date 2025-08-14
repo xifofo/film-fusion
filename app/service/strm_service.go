@@ -85,7 +85,18 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Clou
 	}
 }
 
-func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath, isDeleteOriginal bool) {
+func (s *StrmService) CreateDir(path string, cloudPath model.CloudPath) {
+	if cloudPath.LocalPath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
+		return
+	}
+
+	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(path, cloudPath.SourcePath) {
+		s.WalkDirWith115OpenAPI(path, cloudPath)
+	}
+}
+
+func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath) {
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return
@@ -96,7 +107,7 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
-	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) && isDeleteOriginal {
+	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
 		savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, originalPath)
 		s.DeleteAction(savePath, true)
 	}

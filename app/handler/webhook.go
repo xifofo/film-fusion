@@ -51,6 +51,9 @@ func (h *WebhookHandler) CloudDrive2FileNotify(c *gin.Context) {
 		return
 	}
 
+	jsonData, _ := json.Marshal(requestBody)
+	h.logger.Debugf("记录 CD2 Webhook 数据: %s", jsonData)
+
 	go h.cd2NotifySvc.ProcessFileNotify(requestBody.Data, cloudPaths)
 
 	c.JSON(http.StatusOK, gin.H{

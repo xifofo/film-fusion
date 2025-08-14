@@ -45,6 +45,7 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 	for _, cloudPath := range cloudPaths {
 		// 如果 data.DestinationFile 和 data.SourceFile 都不是 cloudPath.SourcePath 的子路径就跳过
 		if !pathhelper.IsSubPath(data.SourceFile, cloudPath.SourcePath) && !pathhelper.IsSubPath(data.DestinationFile, cloudPath.SourcePath) {
+			s.logger.Debugf("%s 和 %s 不是 %s 的子路径", data.SourceFile, data.DestinationFile, cloudPath.SourcePath)
 			continue
 		}
 
@@ -52,7 +53,7 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 		if cloudPath.LinkType == model.LinkTypeStrm {
 			// 一般复制操作会触发
 			if data.Action == "create" && data.IsDir == "true" {
-				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, false)
+				strmSvc.CreateDir(data.SourceFile, cloudPath)
 				return
 			}
 
@@ -68,7 +69,7 @@ func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloud
 
 			if data.Action == "rename" && data.IsDir == "true" {
 				// 目录重命名，需要处理目录下的所有文件并删除原目录
-				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath, true)
+				strmSvc.RenameDir(data.SourceFile, data.DestinationFile, cloudPath)
 				return
 			}
 
