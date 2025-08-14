@@ -262,10 +262,6 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 
 	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, path)
 
-	if cloudPath.StrmContentType == model.StrmContentTypePath && cloudPath.IsWindowsPath {
-		content = pathhelper.ConvertToWindowsPath(content)
-	}
-
 	// 提前创建文件夹
 	err := os.MkdirAll(filepath.Dir(savePath), 0755)
 	if err != nil {

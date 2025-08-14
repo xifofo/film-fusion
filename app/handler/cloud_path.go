@@ -148,16 +148,6 @@ func (h *CloudPathHandler) GetCloudPaths(c *gin.Context) {
 		query = query.Where("strm_content_type = ?", strmContentType)
 	}
 
-	// 按Windows路径类型过滤
-	if isWindowsPath := c.Query("is_windows_path"); isWindowsPath != "" {
-		switch isWindowsPath {
-		case "true":
-			query = query.Where("is_windows_path = ?", true)
-		case "false":
-			query = query.Where("is_windows_path = ?", false)
-		}
-	}
-
 	var total int64
 	query.Model(&model.CloudPath{}).Count(&total)
 
@@ -242,7 +232,6 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 		LinkType        string `json:"link_type"`
 		FilterRules     string `json:"filter_rules"`
 		StrmContentType string `json:"strm_content_type"`
-		IsWindowsPath   *bool  `json:"is_windows_path"` // 使用指针类型以便区分零值和未设置
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
@@ -315,9 +304,6 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	}
 	if req.StrmContentType != path.StrmContentType {
 		updates["strm_content_type"] = req.StrmContentType
-	}
-	if req.IsWindowsPath != nil {
-		updates["is_windows_path"] = *req.IsWindowsPath
 	}
 
 	if err := database.DB.Model(&path).Updates(updates).Error; err != nil {
@@ -424,7 +410,6 @@ func (h *CloudPathHandler) GetSyncStatus(c *gin.Context) {
 		"link_type":         path.LinkType,
 		"filter_rules":      path.FilterRules,
 		"strm_content_type": path.StrmContentType,
-		"is_windows_path":   path.IsWindowsPath,
 		"created_at":        path.CreatedAt,
 		"updated_at":        path.UpdatedAt,
 	}
@@ -520,10 +505,6 @@ func (h *CloudPathHandler) BatchOperation(c *gin.Context) {
 
 		if filterRules, exists := req.Data["filter_rules"]; exists {
 			updates["filter_rules"] = filterRules
-		}
-
-		if isWindowsPath, exists := req.Data["is_windows_path"]; exists {
-			updates["is_windows_path"] = isWindowsPath
 		}
 
 		for _, path := range paths {
@@ -783,7 +764,6 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			LinkType        string `json:"link_type"`
 			FilterRules     string `json:"filter_rules"`
 			StrmContentType string `json:"strm_content_type"`
-			IsWindowsPath   bool   `json:"is_windows_path"`
 		} `json:"paths"`
 		ReplaceExisting bool `json:"replace_existing"`
 	}
@@ -863,7 +843,6 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			LinkType:        pathData.LinkType,
 			FilterRules:     pathData.FilterRules,
 			StrmContentType: pathData.StrmContentType,
-			IsWindowsPath:   pathData.IsWindowsPath,
 		}
 
 		if err := database.DB.Create(&newPath).Error; err != nil {
