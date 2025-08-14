@@ -53,8 +53,8 @@ func (h *StrmHandler) error(c *gin.Context, statusCode int, errorCode int, messa
 // - cloud_storage_id / CloudStorageID
 // - content_prefix / ContentPrefix
 // - save_local_path / saveLocalPath
-// - link_type / LinkType (strm 或 symlink)
-// 具体的生成逻辑将根据 link_type 决定创建 STRM 还是软链接。
+// - link_type / LinkType (目前只支持 strm)
+// 生成 STRM 文件。
 func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 	// 验证用户
 	userIDVal, exists := c.Get("user_id")
@@ -123,7 +123,7 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 
 	// 验证链接类型
 	if !model.IsValidLinkType(linkType) {
-		h.error(c, http.StatusBadRequest, 400, "无效的链接类型，支持: strm, symlink")
+		h.error(c, http.StatusBadRequest, 400, "无效的链接类型，支持: strm")
 		return
 	}
 
@@ -218,18 +218,8 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 	includeSpecified := len(ruleSet.Include) > 0
 	downloadSpecified := len(ruleSet.Download) > 0
 
-	// 初始化服务
-	var symlinkSvc *service.SymlinkService
-	if linkType == model.LinkTypeSymlink {
-		symlinkSvc = service.NewSymlinkService(h.logger)
-		// 验证 contentPrefix 对于软链接是否有效
-		if err := symlinkSvc.ValidateContentPrefix(contentPrefix); err != nil {
-			return nil, fmt.Errorf("ContentPrefix 验证失败: %w", err)
-		}
-	}
-
 	// 计数与采样
-	var createdDirs, createdStrm, createdSymlinks, skipped, queuedDownload int
+	var createdDirs, createdStrm, skipped, queuedDownload int
 	errs := []string{}
 	sampleCreated := []string{}
 	const sampleMax = 20
@@ -256,7 +246,7 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 			continue
 		}
 
-		// 1) 命中 download 规则 -> 不生成 STRM/软链接，加入 115 下载队列
+		// 1) 命中 download 规则 -> 不生成 STRM，加入 115 下载队列
 		if downloadSpecified && pathhelper.IsFileMatchedByFilter(localPath, filterRules, "download") {
 
 			if _, err := os.Stat(localPath); err == nil {
@@ -283,7 +273,7 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 			continue
 		}
 
-		// 2) 仅当命中 include 规则时才生成 STRM/软链接
+		// 2) 仅当命中 include 规则时才生成 STRM
 		if !(includeSpecified && pathhelper.IsFileMatchedByFilter(localPath, filterRules, "include")) {
 			skipped++
 			continue
@@ -295,43 +285,19 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 			continue
 		}
 
-		// 根据链接类型进行不同处理
-		if linkType == model.LinkTypeSymlink {
-			// 创建软链接
-			// 构造虚拟 CloudPath 用于软链接创建
-			virtualCloudPath := model.CloudPath{
-				LocalPath:     saveBase,
-				ContentPrefix: contentPrefix,
-				FilterRules:   filterRules,
-				LinkType:      model.LinkTypeSymlink,
-				IsWindowsPath: false, // 目录树生成通常为Linux路径
-			}
+		// 创建 STRM 文件
+		strmPath := strings.TrimSuffix(localPath, ext) + ".strm"
+		content := buildStrmContent(contentPrefix, p)
 
-			if createErr := symlinkSvc.CreateFile(p, virtualCloudPath); createErr != nil {
-				errs = append(errs, fmt.Sprintf("创建软链接失败: %s -> %v", p, createErr))
-				continue
-			}
+		// 覆盖写入 .strm
+		if writeErr := os.WriteFile(strmPath, []byte(content), 0o777); writeErr != nil {
+			errs = append(errs, fmt.Sprintf("写入 STRM 失败: %s -> %v", strmPath, writeErr))
+			continue
+		}
 
-			createdSymlinks++
-			if len(sampleCreated) < sampleMax {
-				sampleCreated = append(sampleCreated, p)
-			}
-
-		} else {
-			// 创建 STRM 文件
-			strmPath := strings.TrimSuffix(localPath, ext) + ".strm"
-			content := buildStrmContent(contentPrefix, p)
-
-			// 覆盖写入 .strm
-			if writeErr := os.WriteFile(strmPath, []byte(content), 0o777); writeErr != nil {
-				errs = append(errs, fmt.Sprintf("写入 STRM 失败: %s -> %v", strmPath, writeErr))
-				continue
-			}
-
-			createdStrm++
-			if len(sampleCreated) < sampleMax {
-				sampleCreated = append(sampleCreated, strings.TrimPrefix(strmPath, saveBase+string(filepath.Separator)))
-			}
+		createdStrm++
+		if len(sampleCreated) < sampleMax {
+			sampleCreated = append(sampleCreated, strings.TrimPrefix(strmPath, saveBase+string(filepath.Separator)))
 		}
 	}
 
@@ -351,11 +317,7 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 		"link_type":       linkType,
 	}
 
-	if linkType == model.LinkTypeSymlink {
-		result["created_symlinks"] = createdSymlinks
-	} else {
-		result["created_strm"] = createdStrm
-	}
+	result["created_strm"] = createdStrm
 
 	return result, nil
 }

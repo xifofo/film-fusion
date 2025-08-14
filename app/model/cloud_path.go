@@ -15,7 +15,7 @@ type CloudPath struct {
 	SourceType      string         `gorm:"size:20;not null;default:'clouddrive2';comment:源路径类型" json:"source_type"`
 	ContentPrefix   string         `gorm:"size:500;comment:STRM内容前缀" json:"content_prefix"`
 	LocalPath       string         `gorm:"size:500;comment:本地路径" json:"local_path"`
-	LinkType        string         `gorm:"size:20;not null;comment:链接类型(strm,symlink)" json:"link_type"`
+	LinkType        string         `gorm:"size:20;not null;comment:链接类型(strm)" json:"link_type"`
 	FilterRules     string         `gorm:"type:json;comment:文件过滤规则,支持include和download类型" json:"filter_rules"`
 	StrmContentType string         `gorm:"size:50;comment:STRM文件内容类型" json:"strm_content_type"`
 	IsWindowsPath   bool           `gorm:"default:false;comment:是否为Windows路径" json:"is_windows_path"`
@@ -35,8 +35,7 @@ func (CloudPath) TableName() string {
 
 // LinkType 链接类型常量
 const (
-	LinkTypeStrm    = "strm"    // STRM文件
-	LinkTypeSymlink = "symlink" // 软链接
+	LinkTypeStrm = "strm" // STRM文件
 )
 
 const (
@@ -52,7 +51,7 @@ const (
 
 // IsValidLinkType 检查链接类型是否有效
 func IsValidLinkType(linkType string) bool {
-	return linkType == LinkTypeStrm || linkType == LinkTypeSymlink
+	return linkType == LinkTypeStrm
 }
 
 // IsValidStrmContentType 检查STRM文件内容类型是否有效

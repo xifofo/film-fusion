@@ -30,14 +30,6 @@ func NewStrmService(log *logger.Logger, download115Svc *Download115Service) *Str
 }
 
 func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
-	// 根据 IsWindowsPath 字段决定是否转换路径
-	var processPath string
-	if cloudPath.IsWindowsPath {
-		processPath = pathhelper.ConvertToLinuxPath(path)
-	} else {
-		processPath = path
-	}
-
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return nil
@@ -46,17 +38,17 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 	// 判断是否在 include 过滤规则中
 	if cloudPath.FilterRules != "" {
 		// 获取文件扩展名
-		fileExt := strings.ToLower(filepath.Ext(processPath))
+		fileExt := strings.ToLower(filepath.Ext(path))
 
 		if !pathhelper.IsFileInAnyFilterRules(fileExt, cloudPath.FilterRules) {
-			s.logger.Debugf("文件 %s 不在 include 过滤规则中，跳过处理", processPath)
+			s.logger.Debugf("文件 %s 不在 include 过滤规则中，跳过处理", path)
 			return nil
 		}
 	}
 
 	// 处理 115OPEN API 创建 STRM 文件
 	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
-		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath, "")
+		s.CreateStrmOrDownloadWith115OpenAPI(path, cloudPath, "")
 		return nil
 	}
 
@@ -64,13 +56,6 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 }
 
 func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.CloudPath) {
-	var processPath string
-	if cloudPath.IsWindowsPath {
-		processPath = pathhelper.ConvertToLinuxPath(path)
-	} else {
-		processPath = path
-	}
-
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return
@@ -79,47 +64,40 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Clou
 	// 判断是否在 include 过滤规则中
 	if cloudPath.FilterRules != "" {
 		// 获取文件扩展名
-		fileExt := strings.ToLower(filepath.Ext(processPath))
+		fileExt := strings.ToLower(filepath.Ext(path))
 
 		if !pathhelper.IsFileInAnyFilterRules(fileExt, cloudPath.FilterRules) {
-			s.logger.Debugf("文件 %s 不在 include 过滤规则中，跳过处理", processPath)
+			s.logger.Debugf("文件 %s 不在 include 过滤规则中，跳过处理", path)
 			return
 		}
 	}
 
 	// 处理 115OPEN API 创建 STRM 文件
 	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
-		s.CreateStrmOrDownloadWith115OpenAPI(processPath, cloudPath, "")
+		s.CreateStrmOrDownloadWith115OpenAPI(path, cloudPath, "")
 		// 不能 Return --- 因为可能需要删除原来的文件
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
 	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
-		savePath := filepath.Join(cloudPath.LocalPath, originalPath)
+		savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, originalPath)
 		s.DeleteAction(savePath, false)
 	}
 }
 
 func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath, isDeleteOriginal bool) {
-	var processPath string
-	if cloudPath.IsWindowsPath {
-		processPath = pathhelper.ConvertToLinuxPath(path)
-	} else {
-		processPath = path
-	}
-
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
-	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(processPath, cloudPath.SourcePath) {
-		s.WalkDirWith115OpenAPI(processPath, cloudPath)
+	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(path, cloudPath.SourcePath) {
+		s.WalkDirWith115OpenAPI(path, cloudPath)
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
 	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) && isDeleteOriginal {
-		savePath := filepath.Join(cloudPath.LocalPath, originalPath)
+		savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, originalPath)
 		s.DeleteAction(savePath, true)
 	}
 }
@@ -138,10 +116,10 @@ func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.Clou
 	// 设置访问令牌
 	s.sdk115Open.SetAccessToken(cloudPath.CloudStorage.AccessToken)
 
-	sourceCloudPath := filepath.Join("/", dirPath)
+	sourceCloudPath := pathhelper.EnsureLeadingSlash(dirPath)
 	// 转换路径为云盘路径
 	if cloudPath.SourceType == model.SourceTypeCloudDrive2 {
-		sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(dirPath))
+		sourceCloudPath = pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(dirPath))
 	}
 
 	// 获取目录信息
@@ -228,17 +206,17 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 }
 
 func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath, pickcode string) {
-	savePath := filepath.Join(cloudPath.LocalPath, path)
+	savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, path)
 	fileExt := strings.ToLower(filepath.Ext(savePath))
 
 	fullPathName := savePath[:len(savePath)-len(fileExt)]
 
 	// 如果匹配中下载的后缀直接调用 115Open API 下载
 	if pathhelper.IsFileMatchedByFilter(fileExt, cloudPath.FilterRules, "download") {
-		sourceCloudPath := filepath.Join("/", path)
+		sourceCloudPath := pathhelper.EnsureLeadingSlash(path)
 
 		if cloudPath.SourceType == model.SourceTypeCloudDrive2 {
-			sourceCloudPath = filepath.Join("/", pathhelper.RemoveFirstDir(path))
+			sourceCloudPath = pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(path))
 		}
 
 		// 不重复下载
@@ -271,7 +249,7 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		}
 	}
 
-	content := filepath.Join(cloudPath.ContentPrefix, path)
+	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, path)
 
 	if cloudPath.StrmContentType == model.StrmContentTypePath && cloudPath.IsWindowsPath {
 		content = pathhelper.ConvertToWindowsPath(content)
@@ -293,7 +271,7 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	// 尽可能的缓存 pickcode
 	if pickcode != "" && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
 		// 缓存 pickcode
-		model.CreateIfNotExistsStatic(database.DB, filepath.Join("/", pathhelper.RemoveFirstDir(path)), pickcode)
+		model.CreateIfNotExistsStatic(database.DB, pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(path)), pickcode)
 	}
 
 	s.logger.Debugf("创建 STRM 文件到: %s", strmFilePath)
@@ -312,7 +290,7 @@ func (s *StrmService) DeleteStrm(path string, cloudPath model.CloudPath, isDir b
 		return
 	}
 
-	savePath := filepath.Join(cloudPath.LocalPath, path)
+	savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, path)
 	s.DeleteAction(savePath, isDir)
 }
 

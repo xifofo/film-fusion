@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -46,16 +47,34 @@ func EnsureLeadingSlash(path string) string {
 
 func ConvertToLinuxPath(windowsPath string) string {
 	// 将所有的反斜杠转换成正斜杠
-	linuxPath := strings.ReplaceAll(RemoveDriveLetter(windowsPath), "\\", "/")
-	return linuxPath
+	return strings.ReplaceAll(RemoveDriveLetter(windowsPath), "\\", "/")
 }
 
 func ConvertToWindowsPath(path string) string {
 	return strings.ReplaceAll(path, "/", "\\")
 }
 
+func SafeFilePathJoin(basePath, relativePath string) string {
+	if runtime.GOOS == "windows" {
+		// Windows 系统：使用反斜杠分隔符
+		basePath = ConvertToWindowsPath(basePath)
+		relativePath = ConvertToWindowsPath(relativePath)
+	} else {
+		// Unix-like 系统：使用正斜杠分隔符
+		basePath = ConvertToLinuxPath(basePath)
+		relativePath = ConvertToLinuxPath(relativePath)
+	}
+
+	// 使用 filepath.Join 进行路径拼接
+	return filepath.Join(basePath, relativePath)
+}
+
 // IsSubPath 检查 path 是否是 prefix 的子路径
 func IsSubPath(path, prefix string) bool {
+	// 一律转成 Linux 路径格式在进行比较
+	path = EnsureLeadingSlash(path)
+	prefix = EnsureLeadingSlash(prefix)
+
 	// 确保路径以 / 结尾，避免部分匹配问题
 	if !strings.HasSuffix(path, "/") {
 		path += "/"

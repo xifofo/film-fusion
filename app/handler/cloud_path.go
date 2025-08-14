@@ -560,11 +560,6 @@ func (h *CloudPathHandler) GetLinkTypes(c *gin.Context) {
 			"label": "STRM文件",
 			"desc":  "创建STRM文件链接到云盘资源",
 		},
-		{
-			"value": model.LinkTypeSymlink,
-			"label": "软链接",
-			"desc":  "创建软链接指向云盘挂载路径",
-		},
 	}
 
 	h.success(c, linkTypes, "获取链接类型成功")
@@ -697,7 +692,6 @@ func (h *CloudPathHandler) GetPathStatistics(c *gin.Context) {
 	var stats struct {
 		TotalPaths      int64             `json:"total_paths"`
 		StrmPaths       int64             `json:"strm_paths"`
-		SymlinkPaths    int64             `json:"symlink_paths"`
 		ByStorageType   []gin.H           `json:"by_storage_type"`
 		RecentlyCreated []model.CloudPath `json:"recently_created"`
 	}
@@ -707,7 +701,6 @@ func (h *CloudPathHandler) GetPathStatistics(c *gin.Context) {
 
 	// 按链接类型统计
 	database.DB.Model(&model.CloudPath{}).Where("user_id = ? AND link_type = ?", userID.(uint), model.LinkTypeStrm).Count(&stats.StrmPaths)
-	database.DB.Model(&model.CloudPath{}).Where("user_id = ? AND link_type = ?", userID.(uint), model.LinkTypeSymlink).Count(&stats.SymlinkPaths)
 
 	// 按存储类型统计
 	var storageStats []struct {
