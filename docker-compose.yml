@@ -1,6 +1,6 @@
 services:
   film-fusion:
-    image: "kumayi/film-fusion:v2.0.0"
+    image: "kumayi/film-fusion:v2.0.1"
     container_name: "film-fusion"
     restart: unless-stopped
     ports:
