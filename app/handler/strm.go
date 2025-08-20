@@ -167,12 +167,11 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 			}
 		}()
 
-		result, genErr := h.generateLinksFrom115DirectoryTree(worldPath, storage, contentPrefix, saveLocalPath, filterRules, linkType)
+		_, genErr := h.generateLinksFrom115DirectoryTree(worldPath, storage, contentPrefix, saveLocalPath, filterRules, linkType)
 		if genErr != nil {
 			h.logger.Errorf("链接生成失败: %v", genErr)
 			return
 		}
-		h.logger.Infof("链接生成完成: %v", result)
 	}(worldPath, storage, contentPrefix, saveLocalPath, filterRules, linkType)
 
 	// 立即返回接受状态
@@ -393,34 +392,17 @@ func removeLeadingHyphen(str string) string {
 
 // buildStrmContent 根据前缀与相对路径构造 STRM 内容，自动进行 Windows/Unix 兼容
 func buildStrmContent(prefix, rel string) string {
-	// 统一 rel 为以 "/" 分隔
-	rel = "/" + strings.TrimLeft(strings.ReplaceAll(rel, "\\", "/"), "/")
-
-	if prefix == "" {
-		// 无前缀，直接返回相对路径（保持 "/" 风格）
-		return rel
-	}
-
-	// 清理前缀结尾与分隔符
-	p := strings.TrimRight(prefix, "/\\ ")
+	rel = pathhelper.EnsureLeadingSlash(rel)
 
 	// 判断前缀是否 Windows 风格
-	if isWindowsPrefix(p) {
-		// Windows: 使用反斜杠
-		// 将 rel 的 "/" 转为 "\\"
-		winRel := strings.ReplaceAll(rel, "/", "\\")
-		// 若前缀本身不以分隔符结尾，拼接一个
-		if !strings.HasSuffix(p, "\\") && !strings.HasSuffix(p, "/") {
-			return p + "\\" + strings.TrimLeft(winRel, "\\")
-		}
-		return p + winRel
+	if isWindowsPrefix(prefix) {
+		winPrefix := pathhelper.ConvertToWindowsPath(prefix)
+		winRel := strings.TrimLeft(pathhelper.ConvertToWindowsPath(rel), "\\")
+		return filepath.Join(winPrefix, winRel)
 	}
 
 	// Unix 风格
-	if !strings.HasSuffix(p, "/") {
-		return p + rel
-	}
-	return p + strings.TrimLeft(rel, "/")
+	return filepath.Join(pathhelper.EnsureLeadingSlash(prefix), strings.TrimLeft(rel, "/"))
 }
 
 // isWindowsPrefix 粗略判断前缀是否为 Windows 路径
