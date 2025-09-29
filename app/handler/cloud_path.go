@@ -224,14 +224,15 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	}
 
 	var req struct {
-		CloudStorageID  uint   `json:"cloud_storage_id"`
-		SourcePath      string `json:"source_path"`
-		SourceType      string `json:"source_type"`
-		ContentPrefix   string `json:"content_prefix"`
-		LocalPath       string `json:"local_path"`
-		LinkType        string `json:"link_type"`
-		FilterRules     string `json:"filter_rules"`
-		StrmContentType string `json:"strm_content_type"`
+		CloudStorageID   uint   `json:"cloud_storage_id"`
+		SourcePath       string `json:"source_path"`
+		SourceType       string `json:"source_type"`
+		ContentPrefix    string `json:"content_prefix"`
+		ContentEncodeURI *bool  `json:"content_encode_uri"`
+		LocalPath        string `json:"local_path"`
+		LinkType         string `json:"link_type"`
+		FilterRules      string `json:"filter_rules"`
+		StrmContentType  string `json:"strm_content_type"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
@@ -292,6 +293,10 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	// 对于可以为空的字段，我们检查是否与当前值不同
 	if req.ContentPrefix != path.ContentPrefix {
 		updates["content_prefix"] = req.ContentPrefix
+	}
+	// 处理 ContentEncodeURI 字段，使用指针类型以区分零值和未设置
+	if req.ContentEncodeURI != nil {
+		updates["content_encode_uri"] = *req.ContentEncodeURI
 	}
 	if req.LocalPath != "" {
 		updates["local_path"] = req.LocalPath
@@ -501,6 +506,10 @@ func (h *CloudPathHandler) BatchOperation(c *gin.Context) {
 
 		if contentPrefix, exists := req.Data["content_prefix"]; exists {
 			updates["content_prefix"] = contentPrefix
+		}
+
+		if contentEncodeURI, exists := req.Data["content_encode_uri"]; exists {
+			updates["content_encode_uri"] = contentEncodeURI
 		}
 
 		if filterRules, exists := req.Data["filter_rules"]; exists {

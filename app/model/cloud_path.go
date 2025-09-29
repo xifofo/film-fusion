@@ -14,6 +14,7 @@ type CloudPath struct {
 	SourcePath      string         `gorm:"size:500;not null;comment:云盘源路径" json:"source_path"`
 	SourceType      string         `gorm:"size:20;not null;default:'clouddrive2';comment:源路径类型" json:"source_type"`
 	ContentPrefix   string         `gorm:"size:500;comment:STRM内容前缀" json:"content_prefix"`
+	ContentEncodeURI bool          `gorm:"default:false;comment:是否对内容进行URI编码" json:"content_encode_uri"`
 	LocalPath       string         `gorm:"size:500;comment:本地路径" json:"local_path"`
 	LinkType        string         `gorm:"size:20;not null;comment:链接类型(strm)" json:"link_type"`
 	FilterRules     string         `gorm:"type:json;comment:文件过滤规则,支持include和download类型" json:"filter_rules"`

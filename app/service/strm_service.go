@@ -6,6 +6,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/pathhelper"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -261,6 +262,11 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	}
 
 	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, path)
+
+	// 如果启用了 URI 编码，对内容进行编码
+	if cloudPath.ContentEncodeURI {
+		content = url.QueryEscape(content)
+	}
 
 	// 提前创建文件夹
 	err := os.MkdirAll(filepath.Dir(savePath), 0755)
