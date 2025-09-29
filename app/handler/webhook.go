@@ -71,6 +71,9 @@ func (h *WebhookHandler) MoviePilotV2Webhook(c *gin.Context) {
 		return
 	}
 
+	jsonData, _ := json.Marshal(requestBody)
+	h.logger.Debugf("MoviePilot V2 Webhook 请求体: %s", string(jsonData))
+
 	var cloudPaths []model.CloudPath
 	err := database.DB.Where("source_type = ?", model.SourceTypeMoviePilot2).Preload("CloudStorage").Find(&cloudPaths).Error
 
