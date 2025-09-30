@@ -2,6 +2,7 @@ package model
 
 import (
 	"film-fusion/app/utils/pathhelper"
+	"net/url"
 	"strings"
 )
 
@@ -27,8 +28,14 @@ func (Match302) TableName() string {
 // 返回:
 //   - string: 转换后的路径
 func (m *Match302) GetMatchedPath(targetPath string) string {
+	// 首先进行解码
+	decodedTargetPath, err := url.PathUnescape(targetPath)
+	if err != nil {
+		return targetPath
+	}
+
 	normalizedSource := pathhelper.EnsureLeadingSlash(m.SourcePath)
-	normalizedTarget := pathhelper.EnsureLeadingSlash(targetPath)
+	normalizedTarget := pathhelper.EnsureLeadingSlash(decodedTargetPath)
 	normalizedTargetPath := pathhelper.EnsureLeadingSlash(m.TargetPath)
 
 	// sourcePath 是 targetPath 的子路径 - 需要在 targetPath 基础上添加 sourcePath 到 targetPath 的映射

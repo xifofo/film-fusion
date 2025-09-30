@@ -261,12 +261,18 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		}
 	}
 
-	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, path)
-
+	nextPath := path
 	// 如果启用了 URI 编码，对内容进行编码
 	if cloudPath.ContentEncodeURI {
-		content = url.QueryEscape(content)
+		// 对路径进行URL编码，但保留路径分隔符
+		pathParts := strings.Split(nextPath, "/")
+		for i, part := range pathParts {
+			pathParts[i] = url.PathEscape(part)
+		}
+		nextPath = strings.Join(pathParts, "/")
 	}
+
+	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, nextPath)
 
 	// 提前创建文件夹
 	err := os.MkdirAll(filepath.Dir(savePath), 0755)
