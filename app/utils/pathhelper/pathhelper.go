@@ -55,6 +55,17 @@ func ConvertToWindowsPath(path string) string {
 }
 
 func SafeFilePathJoin(basePath, relativePath string) string {
+	// 检查是否为URL，如果是URL则使用字符串拼接
+	if strings.HasPrefix(basePath, "http://") || strings.HasPrefix(basePath, "https://") {
+		// 确保basePath以/结尾
+		if !strings.HasSuffix(basePath, "/") {
+			basePath += "/"
+		}
+		// 移除relativePath开头的/
+		relativePath = strings.TrimPrefix(relativePath, "/")
+		return basePath + relativePath
+	}
+
 	if runtime.GOOS == "windows" {
 		// Windows 系统：使用反斜杠分隔符
 		basePath = ConvertToWindowsPath(basePath)
