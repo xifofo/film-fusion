@@ -56,12 +56,24 @@ func DownloadFromURL(url, savePath string, config *DownloadConfig) (*DownloadRes
 		return nil, fmt.Errorf("创建HTTP请求失败: %w", err)
 	}
 
-	// 设置User-Agent
+	// 设置请求头
 	req.Header.Set("User-Agent", config.UserAgent)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Encoding", "identity") // 禁用压缩，避免 Content-Length 不匹配
+	req.Header.Set("Connection", "keep-alive")
 
-	// 创建HTTP客户端
+	// 创建HTTP客户端，确保跟随重定向
 	client := &http.Client{
 		Timeout: config.Timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// 允许最多 10 次重定向
+			if len(via) >= 10 {
+				return fmt.Errorf("重定向次数过多")
+			}
+			// 保持原始请求头
+			req.Header.Set("User-Agent", config.UserAgent)
+			return nil
+		},
 	}
 
 	// 发送请求
@@ -73,7 +85,9 @@ func DownloadFromURL(url, savePath string, config *DownloadConfig) (*DownloadRes
 
 	// 检查响应状态码
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP请求失败，状态码: %d", resp.StatusCode)
+		// 读取错误响应体用于调试
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("HTTP请求失败，状态码: %d, 响应: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// 获取文件大小（如果有Content-Length头）
@@ -106,34 +120,10 @@ func DownloadFromURL(url, savePath string, config *DownloadConfig) (*DownloadRes
 	// 记录下载开始时间
 	startTime := time.Now()
 
-	// 设置缓冲区大小
-	buf := make([]byte, config.BufferSize)
-	var written int64
-
-	// 将文件内容写入文件
-	for {
-		// 读取数据
-		n, readErr := resp.Body.Read(buf)
-
-		// 如果读取到数据，先写入文件
-		if n > 0 {
-			writeN, writeErr := file.Write(buf[:n])
-			if writeErr != nil {
-				return nil, fmt.Errorf("写入文件内容失败: %w", writeErr)
-			}
-			if writeN != n {
-				return nil, fmt.Errorf("写入字节数不匹配: 期望 %d, 实际 %d", n, writeN)
-			}
-			written += int64(n)
-		}
-
-		// 检查读取错误
-		if readErr == io.EOF {
-			break // 读取完毕
-		}
-		if readErr != nil {
-			return nil, fmt.Errorf("读取文件内容失败: %w", readErr)
-		}
+	// 使用 io.Copy 进行可靠的数据传输
+	written, err := io.Copy(file, resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("写入文件内容失败: %w", err)
 	}
 
 	// 强制刷新数据到磁盘
