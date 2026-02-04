@@ -24,6 +24,7 @@ type Server struct {
 	http                *http.Server
 	tokenRefreshService *service.TokenRefreshService
 	download115Service  *service.Download115Service
+	moviePilotService   *service.MoviePilotService
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
 	taskQueue           *service.PersistentTaskQueue
@@ -35,6 +36,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	// 创建115Open下载服务
 	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
+	moviePilotService := service.NewMoviePilotService(cfg, log)
 
 	embyClient := embyhelper.New(cfg)
 
@@ -67,6 +69,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Logger:              log,
 		tokenRefreshService: service.NewTokenRefreshService(log),
 		download115Service:  download115Service,
+		moviePilotService:   moviePilotService,
 		taskQueue:           taskQueue,
 	}
 
@@ -100,6 +103,9 @@ func (s *Server) Start() error {
 	// 启动115Open下载服务
 	s.download115Service.StartWorkers()
 
+	// 启动 MoviePilot 令牌刷新服务
+	s.moviePilotService.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -116,6 +122,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
+
+	// 停止 MoviePilot 令牌刷新服务
+	s.moviePilotService.Stop()
 
 	// 停止Emby代理服务器
 	if s.embyProxyServer != nil {
@@ -168,6 +177,7 @@ func (s *Server) setupRoutes() {
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
+	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -273,6 +283,12 @@ func (s *Server) setupRoutes() {
 		{
 			// 根据 115 目录树与 world 文件生成 STRM 文件
 			strm.POST("/gen/115-directory-tree", strmHandler.GenStrmWith115DirectoryTree)
+		}
+
+		// 整理文件相关路由
+		organize := protected.Group("/organize")
+		{
+			organize.POST("/115", organizeHandler.Organize115)
 		}
 
 		// Pickcode 缓存相关路由

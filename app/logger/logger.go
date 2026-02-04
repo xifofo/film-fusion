@@ -147,11 +147,13 @@ func (l *Logger) dailyRotateRoutine(ctx context.Context, lumberjackLogger *lumbe
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(sleepDuration):
+		case <-time.After(sleepDuration + time.Second): // 增加 1 秒缓冲确保跨过凌晨
 			// 创建新的日志文件
-			newDate := time.Now().Format("2006-01-02")
+			newDate := nextDay.Format("2006-01-02")
 			newLogFileName := filepath.Join(logDir, newDate+".log")
 			lumberjackLogger.Filename = newLogFileName
+			// 强制关闭当前文件，以便下次写入时打开新文件
+			_ = lumberjackLogger.Close()
 		}
 	}
 }

@@ -17,6 +17,7 @@ type CloudStorage struct {
 	AppSecret        string         `gorm:"size:200;comment:应用密钥" json:"app_secret"`
 	AccessToken      string         `gorm:"type:text;comment:访问令牌" json:"access_token"`
 	RefreshToken     string         `gorm:"type:text;comment:刷新令牌" json:"refresh_token"`
+	Cookie           string         `gorm:"type:text;comment:Cookie信息" json:"cookie"`
 	TokenExpiresAt   *time.Time     `gorm:"comment:令牌过期时间" json:"token_expires_at"`
 	RefreshExpiresAt *time.Time     `gorm:"comment:刷新令牌过期时间" json:"refresh_expires_at"`
 	LastRefreshAt    *time.Time     `gorm:"comment:最后刷新时间" json:"last_refresh_at"`

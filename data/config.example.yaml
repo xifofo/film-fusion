@@ -5,6 +5,11 @@ server:
   download_115_concurrency: 1  # 115Open下载并发数
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
 
+moviepilot:
+  api: "http://127.0.0.1:3001" 
+  username: ""
+  password: ""
+
 emby:
   enabled: true
   url: "http://127.0.0.1:8096"

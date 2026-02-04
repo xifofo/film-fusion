@@ -13,6 +13,7 @@ type Config struct {
 	JWT         JWTConfig          `mapstructure:"jwt"`
 	FileWatcher FileWatcherConfigs `mapstructure:"file_watcher"`
 	Emby        EmbyConfig         `mapstructure:"emby"`
+	MoviePilot  MoviePilotConfig   `mapstructure:"moviepilot"`
 }
 
 type ServerConfig struct {
@@ -67,6 +68,12 @@ type EmbyConfig struct {
 	RunProxyPort     int    `mapstructure:"run_proxy_port"`      // 运行 Emby 代理端口
 }
 
+type MoviePilotConfig struct {
+	API      string `mapstructure:"api"`      // MoviePilot API 地址
+	Username string `mapstructure:"username"` // MoviePilot 用户名
+	Password string `mapstructure:"password"` // MoviePilot 密码
+}
+
 func Load() *Config {
 	setDefaults()
 
@@ -96,6 +103,11 @@ func Load() *Config {
 func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
+
+	// MoviePilot 默认配置
+	viper.SetDefault("moviepilot.api", "http://127.0.0.1:3001")
+	viper.SetDefault("moviepilot.username", "")
+	viper.SetDefault("moviepilot.password", "")
 
 	// 日志默认配置
 	viper.SetDefault("log.level", "info")

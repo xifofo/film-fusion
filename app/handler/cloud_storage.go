@@ -159,15 +159,77 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 		return
 	}
 
-	var req model.CloudStorage
+	var req struct {
+		StorageName      *string    `json:"storage_name"`
+		AppID            *string    `json:"app_id"`
+		AppSecret        *string    `json:"app_secret"`
+		AccessToken      *string    `json:"access_token"`
+		RefreshToken     *string    `json:"refresh_token"`
+		Cookie           *string    `json:"cookie"`
+		TokenExpiresAt   *time.Time `json:"token_expires_at"`
+		RefreshExpiresAt *time.Time `json:"refresh_expires_at"`
+		AutoRefresh      *bool      `json:"auto_refresh"`
+		RefreshBeforeMin *int       `json:"refresh_before_min"`
+		Status           *string    `json:"status"`
+		Config           *string    `json:"config"`
+		SortOrder        *int       `json:"sort_order"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
+	// 构建更新数据
+	updates := make(map[string]interface{})
+	if req.StorageName != nil {
+		updates["storage_name"] = *req.StorageName
+	}
+	if req.AppID != nil {
+		updates["app_id"] = *req.AppID
+	}
+	if req.AppSecret != nil {
+		updates["app_secret"] = *req.AppSecret
+	}
+	if req.AccessToken != nil {
+		updates["access_token"] = *req.AccessToken
+	}
+	if req.RefreshToken != nil {
+		updates["refresh_token"] = *req.RefreshToken
+	}
+	if req.Cookie != nil {
+		updates["cookie"] = *req.Cookie
+	}
+	if req.TokenExpiresAt != nil {
+		updates["token_expires_at"] = *req.TokenExpiresAt
+	}
+	if req.RefreshExpiresAt != nil {
+		updates["refresh_expires_at"] = *req.RefreshExpiresAt
+	}
+	if req.AutoRefresh != nil {
+		updates["auto_refresh"] = *req.AutoRefresh
+	}
+	if req.RefreshBeforeMin != nil {
+		updates["refresh_before_min"] = *req.RefreshBeforeMin
+	}
+	if req.Status != nil {
+		updates["status"] = *req.Status
+	}
+	if req.Config != nil {
+		updates["config"] = *req.Config
+	}
+	if req.SortOrder != nil {
+		updates["sort_order"] = *req.SortOrder
+	}
+
 	// 更新字段
-	if err := database.DB.Model(&storage).Updates(req).Error; err != nil {
+	if err := database.DB.Model(&storage).Updates(updates).Error; err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "更新存储配置失败")
+		return
+	}
+
+	// 重新查询更新后的数据
+	if err := database.DB.Where("id = ?", id).First(&storage).Error; err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "获取更新后的数据失败")
 		return
 	}
 
