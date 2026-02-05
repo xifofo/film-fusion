@@ -172,12 +172,13 @@ func (s *Server) setupRoutes() {
 	authHandler := handler.NewAuthHandler(s.Config)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
+	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
-	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService)
+	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -278,6 +279,16 @@ func (s *Server) setupRoutes() {
 			paths.POST("/:id/strm/replace", cloudPathHandler.ReplaceStrmContent)
 		}
 
+		// 云盘目录配置相关路由
+		directories := protected.Group("/directories")
+		{
+			directories.POST("/", cloudDirectoryHandler.CreateCloudDirectory)
+			directories.GET("/", cloudDirectoryHandler.GetCloudDirectories)
+			directories.GET("/:id", cloudDirectoryHandler.GetCloudDirectory)
+			directories.PUT("/:id", cloudDirectoryHandler.UpdateCloudDirectory)
+			directories.DELETE("/:id", cloudDirectoryHandler.DeleteCloudDirectory)
+		}
+
 		// STRM 相关路由
 		strm := protected.Group("/strm")
 		{
@@ -289,6 +300,7 @@ func (s *Server) setupRoutes() {
 		organize := protected.Group("/organize")
 		{
 			organize.POST("/115", organizeHandler.Organize115)
+			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
 		}
 
 		// Pickcode 缓存相关路由

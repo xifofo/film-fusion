@@ -234,6 +234,8 @@ type MoviePilotMediaInfo struct {
 	MediaType           string
 	Title               string
 	Year                string
+	Category            string
+	TitleYear           string
 	GenreIDs            []string
 	OriginalLanguages   []string
 	OriginCountries     []string
@@ -280,7 +282,10 @@ func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map
 }
 
 func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transferName, originalName string) string {
-	folderName := strings.TrimSpace(transferName)
+	folderName := strings.TrimSpace(info.TitleYear)
+	if folderName == "" {
+		folderName = strings.TrimSpace(transferName)
+	}
 	if folderName == "" {
 		folderName = strings.TrimSpace(info.Title)
 		if folderName == "" {
@@ -289,7 +294,7 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 		if info.Year != "" && !strings.Contains(folderName, info.Year) {
 			folderName = fmt.Sprintf("%s (%s)", folderName, info.Year)
 		}
-	} else {
+	} else if folderName == strings.TrimSpace(transferName) {
 		folderName = strings.TrimSuffix(folderName, path.Ext(folderName))
 	}
 
@@ -485,13 +490,55 @@ func unwrapDataMap(body []byte) map[string]any {
 
 func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {
 	info := MoviePilotMediaInfo{}
-	info.MediaType = strings.ToLower(extractString(data, "media_type", "mediaType", "type", "category"))
-	info.Title = extractString(data, "title", "name", "original_title", "originalTitle")
-	info.Year = extractYear(data)
-	info.GenreIDs = extractStringSlice(data, "genre_ids", "genreIds", "genres")
-	info.OriginalLanguages = extractStringSlice(data, "original_language", "originalLanguage", "languages")
-	info.OriginCountries = extractStringSlice(data, "origin_country", "originCountry", "origin_countries")
-	info.ProductionCountries = extractStringSlice(data, "production_countries", "productionCountries")
+
+	base := data
+	if raw, ok := data["media_info"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			base = m
+		}
+	}
+
+	info.MediaType = strings.ToLower(extractString(base, "media_type", "mediaType", "type", "category"))
+	if info.MediaType == "" {
+		info.MediaType = strings.ToLower(extractString(data, "media_type", "mediaType", "type", "category"))
+	}
+
+	info.Category = extractString(base, "category", "category_name")
+	if info.Category == "" {
+		info.Category = extractString(data, "category", "category_name")
+	}
+
+	info.Title = extractString(base, "title", "name", "original_title", "originalTitle")
+	if info.Title == "" {
+		info.Title = extractString(data, "title", "name", "original_title", "originalTitle")
+	}
+
+	info.TitleYear = extractString(base, "title_year", "titleYear")
+	if info.TitleYear == "" {
+		info.TitleYear = extractString(data, "title_year", "titleYear")
+	}
+
+	info.Year = extractYear(base)
+	if info.Year == "" {
+		info.Year = extractYear(data)
+	}
+
+	info.GenreIDs = extractStringSlice(base, "genre_ids", "genreIds", "genres")
+	if len(info.GenreIDs) == 0 {
+		info.GenreIDs = extractStringSlice(data, "genre_ids", "genreIds", "genres")
+	}
+	info.OriginalLanguages = extractStringSlice(base, "original_language", "originalLanguage", "languages")
+	if len(info.OriginalLanguages) == 0 {
+		info.OriginalLanguages = extractStringSlice(data, "original_language", "originalLanguage", "languages")
+	}
+	info.OriginCountries = extractStringSlice(base, "origin_country", "originCountry", "origin_countries")
+	if len(info.OriginCountries) == 0 {
+		info.OriginCountries = extractStringSlice(data, "origin_country", "originCountry", "origin_countries")
+	}
+	info.ProductionCountries = extractStringSlice(base, "production_countries", "productionCountries")
+	if len(info.ProductionCountries) == 0 {
+		info.ProductionCountries = extractStringSlice(data, "production_countries", "productionCountries")
+	}
 	return info
 }
 

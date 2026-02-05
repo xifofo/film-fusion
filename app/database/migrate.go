@@ -17,6 +17,7 @@ func AutoMigrate() error {
 		&model.User{},
 		&model.CloudStorage{},
 		&model.CloudPath{},
+		&model.CloudDirectory{},
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
 		&model.Match302{},
