@@ -383,6 +383,9 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
+	if !req.DryRun {
+		h.cachePickcodeCaches(results)
+	}
 
 	h.success(c, gin.H{
 		"cloud_directory_id": req.CloudDirectoryID,
@@ -760,6 +763,31 @@ func isSubtitleFile(name string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (h *OrganizeHandler) cachePickcodeCaches(items []Organize115ItemResult) {
+	if len(items) == 0 {
+		return
+	}
+	created := 0
+	for _, item := range items {
+		targetPath := strings.TrimSpace(item.TargetPath)
+		if targetPath == "" || strings.TrimSpace(item.PickCode) == "" {
+			continue
+		}
+		filePath := pathhelper.EnsureLeadingSlash(targetPath)
+		_, isCreated, err := model.CreateIfNotExistsStatic(database.DB, filePath, item.PickCode)
+		if err != nil {
+			h.logger.Warnf("缓存 pickcode 失败: %s, err=%v", filePath, err)
+			continue
+		}
+		if isCreated {
+			created++
+		}
+	}
+	if created > 0 {
+		h.logger.Infof("缓存 pickcode 完成: 新增 %d 条", created)
 	}
 }
 
