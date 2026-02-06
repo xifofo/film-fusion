@@ -236,11 +236,13 @@ type MoviePilotMediaInfo struct {
 	Year                string
 	Category            string
 	TitleYear           string
+	TmdbID              string
 	GenreIDs            []string
 	OriginalLanguages   []string
 	OriginCountries     []string
 	ProductionCountries []string
 	BeginSeason         int
+	HasBeginSeason      bool
 }
 
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
@@ -254,7 +256,7 @@ func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo,
 
 	dataMap := unwrapDataMap(body)
 	info := parseMediaInfo(dataMap)
-	info.BeginSeason = extractBeginSeason(dataMap)
+	info.BeginSeason, info.HasBeginSeason = extractBeginSeason(dataMap)
 	return info, dataMap, nil
 }
 
@@ -311,7 +313,7 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 	if strings.TrimSpace(category) != "" {
 		basePath = path.Join("/", category, folderName)
 	}
-	if info.BeginSeason > 0 {
+	if info.HasBeginSeason {
 		basePath = path.Join(basePath, fmt.Sprintf("Season %02d", info.BeginSeason))
 	}
 
@@ -523,6 +525,10 @@ func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {
 	if info.TitleYear == "" {
 		info.TitleYear = extractString(data, "title_year", "titleYear")
 	}
+	info.TmdbID = extractString(base, "tmdb_id", "tmdbId")
+	if info.TmdbID == "" {
+		info.TmdbID = extractString(data, "tmdb_id", "tmdbId")
+	}
 
 	info.Year = extractYear(base)
 	if info.Year == "" {
@@ -599,21 +605,74 @@ func extractInt64(data map[string]any, keys ...string) int64 {
 	return 0
 }
 
-func extractBeginSeason(data map[string]any) int {
+func extractBeginSeason(data map[string]any) (int, bool) {
 	if data == nil {
-		return 0
+		return 0, false
+	}
+	if seasonEpisode := extractSeasonEpisode(data); seasonEpisode != "" {
+		if season, ok := parseSeasonFromEpisode(seasonEpisode); ok {
+			return season, true
+		}
 	}
 	if raw, ok := data["meta_info"]; ok {
 		if meta, ok := raw.(map[string]any); ok {
-			if val := extractInt64(meta, "begin_season", "beginSeason"); val > 0 {
-				return int(val)
+			if val := extractInt64(meta, "begin_season", "beginSeason"); val >= 0 {
+				return int(val), true
 			}
 		}
 	}
-	if val := extractInt64(data, "begin_season", "beginSeason"); val > 0 {
-		return int(val)
+	if val := extractInt64(data, "begin_season", "beginSeason"); val >= 0 {
+		return int(val), true
 	}
-	return 0
+	return 0, false
+}
+
+func extractSeasonEpisode(data map[string]any) string {
+	if data == nil {
+		return ""
+	}
+	if raw, ok := data["media_info"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			if val := extractString(m, "season_episode", "seasonEpisode"); val != "" {
+				return val
+			}
+		}
+	}
+	if val := extractString(data, "season_episode", "seasonEpisode"); val != "" {
+		return val
+	}
+	if raw, ok := data["meta_info"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			if val := extractString(m, "season_episode", "seasonEpisode"); val != "" {
+				return val
+			}
+		}
+	}
+	return ""
+}
+
+func parseSeasonFromEpisode(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] != 'S' && value[i] != 's' {
+			continue
+		}
+		j := i + 1
+		for j < len(value) && value[j] >= '0' && value[j] <= '9' {
+			j++
+		}
+		if j == i+1 {
+			continue
+		}
+		season, err := strconv.Atoi(value[i+1 : j])
+		if err == nil {
+			return season, true
+		}
+	}
+	return 0, false
 }
 
 func extractStringSlice(data map[string]any, keys ...string) []string {

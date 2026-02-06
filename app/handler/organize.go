@@ -183,6 +183,10 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			info, _, recErr := h.moviePilotSvc.RecognizeFile(file.Fn)
 			if recErr != nil {
 				item.Error = recErr.Error()
+				continue
+			}
+			if strings.TrimSpace(info.TmdbID) == "" {
+				continue
 			}
 
 			transferName, _, transErr := h.moviePilotSvc.TransferName(file.Fn, ext)
@@ -319,6 +323,10 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 			info, _, recErr := h.moviePilotSvc.RecognizeFile(file.Name)
 			if recErr != nil {
 				item.Error = recErr.Error()
+				continue
+			}
+			if strings.TrimSpace(info.TmdbID) == "" {
+				continue
 			}
 
 			transferName, _, transErr := h.moviePilotSvc.TransferName(file.Name, ext)
