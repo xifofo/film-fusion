@@ -173,6 +173,7 @@ func (s *Server) setupRoutes() {
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
+	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
@@ -287,6 +288,12 @@ func (s *Server) setupRoutes() {
 			directories.GET("/:id", cloudDirectoryHandler.GetCloudDirectory)
 			directories.PUT("/:id", cloudDirectoryHandler.UpdateCloudDirectory)
 			directories.DELETE("/:id", cloudDirectoryHandler.DeleteCloudDirectory)
+		}
+
+		// 115 Cookie 相关接口
+		web115 := protected.Group("/115-cookie")
+		{
+			web115.POST("/dirs", web115CookieHandler.ListDirectories)
 		}
 
 		// STRM 相关路由

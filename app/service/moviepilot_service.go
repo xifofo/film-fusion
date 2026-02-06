@@ -240,6 +240,7 @@ type MoviePilotMediaInfo struct {
 	OriginalLanguages   []string
 	OriginCountries     []string
 	ProductionCountries []string
+	BeginSeason         int
 }
 
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
@@ -253,6 +254,7 @@ func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo,
 
 	dataMap := unwrapDataMap(body)
 	info := parseMediaInfo(dataMap)
+	info.BeginSeason = extractBeginSeason(dataMap)
 	return info, dataMap, nil
 }
 
@@ -305,11 +307,15 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 		fileName = fileName + path.Ext(originalName)
 	}
 
-	if strings.TrimSpace(category) == "" {
-		return path.Join("/", folderName, fileName)
+	basePath := path.Join("/", folderName)
+	if strings.TrimSpace(category) != "" {
+		basePath = path.Join("/", category, folderName)
+	}
+	if info.BeginSeason > 0 {
+		basePath = path.Join(basePath, fmt.Sprintf("Season %02d", info.BeginSeason))
 	}
 
-	return path.Join("/", category, folderName, fileName)
+	return path.Join(basePath, fileName)
 }
 
 func SelectMoviePilotCategory(mediaType string, info MoviePilotMediaInfo, cfg MoviePilotCategoryConfig) string {
@@ -589,6 +595,23 @@ func extractInt64(data map[string]any, keys ...string) int64 {
 				}
 			}
 		}
+	}
+	return 0
+}
+
+func extractBeginSeason(data map[string]any) int {
+	if data == nil {
+		return 0
+	}
+	if raw, ok := data["meta_info"]; ok {
+		if meta, ok := raw.(map[string]any); ok {
+			if val := extractInt64(meta, "begin_season", "beginSeason"); val > 0 {
+				return int(val)
+			}
+		}
+	}
+	if val := extractInt64(data, "begin_season", "beginSeason"); val > 0 {
+		return int(val)
 	}
 	return 0
 }

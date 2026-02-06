@@ -15,10 +15,10 @@ type Web115Service struct {
 }
 
 type Web115File struct {
-	FileID   string
-	Name     string
-	PickCode string
-	IsFile   bool
+	FileID   string `json:"file_id"`
+	Name     string `json:"name"`
+	PickCode string `json:"pick_code"`
+	IsFile   bool   `json:"is_file"`
 }
 
 type Web115ListResult struct {
@@ -82,6 +82,68 @@ func (s *Web115Service) GetFilesWithClient(client *driver.Pan115Client, cid stri
 			Name:     file.Name,
 			PickCode: file.PickCode,
 			IsFile:   !file.IsDirectory,
+		})
+	}
+
+	return Web115ListResult{
+		Items: items,
+		Total: int64(result.Count),
+		Raw:   []byte(resp.String()),
+	}, nil
+}
+
+func (s *Web115Service) GetDirectories(cookie, cid string, offset, limit int) (Web115ListResult, error) {
+	cookie = normalizeCookie(cookie)
+	if cookie == "" {
+		return Web115ListResult{}, fmt.Errorf("115 Cookie 为空")
+	}
+
+	client, err := s.NewClient(cookie)
+	if err != nil {
+		return Web115ListResult{}, err
+	}
+
+	return s.GetDirectoriesWithClient(client, cid, offset, limit)
+}
+
+func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, cid string, offset, limit int) (Web115ListResult, error) {
+	if limit <= 0 || limit > int(driver.MaxDirPageLimit) {
+		limit = int(driver.MaxDirPageLimit)
+	}
+
+	req := client.NewRequest().ForceContentType("application/json;charset=UTF-8")
+	params := map[string]string{
+		"aid":           "1",
+		"cid":           cid,
+		"offset":        strconv.Itoa(offset),
+		"limit":         strconv.Itoa(limit),
+		"type":          "0",
+		"nf":            "1",
+		"fc_mix":        "0",
+		"natsort":       "1",
+		"count_folders": "1",
+		"format":        "json",
+		"custom_order":  "0",
+	}
+
+	result := driver.FileListResp{}
+	req.SetQueryParams(params).SetResult(&result)
+	resp, err := req.Get(driver.ApiFileList)
+	if err = driver.CheckErr(err, &result, resp); err != nil {
+		return Web115ListResult{}, err
+	}
+
+	items := make([]Web115File, 0, len(result.Files))
+	for _, fileInfo := range result.Files {
+		file := (&driver.File{}).From(&fileInfo)
+		if !file.IsDirectory {
+			continue
+		}
+		items = append(items, Web115File{
+			FileID:   file.FileID,
+			Name:     file.Name,
+			PickCode: file.PickCode,
+			IsFile:   false,
 		})
 	}
 

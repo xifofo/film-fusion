@@ -281,6 +281,8 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "115 目录ID为空")
 		return
 	}
+	includeExts := parseExtensions(dir.IncludeExtensions)
+	excludeExts := parseExtensions(dir.ExcludeExtensions)
 
 	for {
 		listResp, err := h.web115Svc.GetFilesWithClient(webClient, folderID, offset, limit)
@@ -295,6 +297,9 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 
 		for _, file := range listResp.Items {
 			if !file.IsFile {
+				continue
+			}
+			if !shouldProcessFileByExtensions(file.Name, includeExts, excludeExts) {
 				continue
 			}
 
@@ -752,4 +757,76 @@ func isSubtitleFile(name string) bool {
 	default:
 		return false
 	}
+}
+
+func parseExtensions(raw string) []string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" || strings.EqualFold(cleaned, "null") {
+		return nil
+	}
+	var list []string
+	if strings.HasPrefix(cleaned, "[") {
+		if err := json.Unmarshal([]byte(cleaned), &list); err == nil {
+			return normalizeExtensions(list)
+		}
+	}
+	var single string
+	if err := json.Unmarshal([]byte(cleaned), &single); err == nil {
+		return normalizeExtensions([]string{single})
+	}
+	parts := strings.FieldsFunc(cleaned, func(r rune) bool {
+		switch r {
+		case ',', ';', '|', ' ', '\t', '\n', '\r':
+			return true
+		default:
+			return false
+		}
+	})
+	return normalizeExtensions(parts)
+}
+
+func normalizeExtensions(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		v = strings.TrimSpace(strings.ToLower(strings.TrimPrefix(v, ".")))
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func shouldProcessFileByExtensions(name string, includeExts, excludeExts []string) bool {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(strings.TrimSpace(name)), "."))
+	if ext == "" {
+		return len(includeExts) == 0
+	}
+	if len(includeExts) > 0 && !containsString(includeExts, ext) {
+		return false
+	}
+	if len(excludeExts) > 0 && containsString(excludeExts, ext) {
+		return false
+	}
+	return true
+}
+
+func containsString(values []string, target string) bool {
+	for _, v := range values {
+		if v == target {
+			return true
+		}
+	}
+	return false
 }
