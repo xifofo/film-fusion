@@ -283,6 +283,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 	}
 	includeExts := parseExtensions(dir.IncludeExtensions)
 	excludeExts := parseExtensions(dir.ExcludeExtensions)
+	minSizeMB := dir.ExcludeSmallerThanMB
 
 	for {
 		listResp, err := h.web115Svc.GetFilesWithClient(webClient, folderID, offset, limit)
@@ -300,6 +301,9 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 				continue
 			}
 			if !shouldProcessFileByExtensions(file.Name, includeExts, excludeExts) {
+				continue
+			}
+			if !shouldProcessFileBySize(file.Name, file.Size, minSizeMB) {
 				continue
 			}
 
@@ -820,6 +824,17 @@ func shouldProcessFileByExtensions(name string, includeExts, excludeExts []strin
 		return false
 	}
 	return true
+}
+
+func shouldProcessFileBySize(name string, sizeBytes int64, minMB int) bool {
+	if minMB <= 0 {
+		return true
+	}
+	if isSubtitleFile(name) {
+		return true
+	}
+	minBytes := int64(minMB) * 1024 * 1024
+	return sizeBytes >= minBytes
 }
 
 func containsString(values []string, target string) bool {

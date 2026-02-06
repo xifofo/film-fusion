@@ -19,6 +19,7 @@ type Web115File struct {
 	Name     string `json:"name"`
 	PickCode string `json:"pick_code"`
 	IsFile   bool   `json:"is_file"`
+	Size     int64  `json:"size"`
 }
 
 type Web115ListResult struct {
@@ -82,6 +83,7 @@ func (s *Web115Service) GetFilesWithClient(client *driver.Pan115Client, cid stri
 			Name:     file.Name,
 			PickCode: file.PickCode,
 			IsFile:   !file.IsDirectory,
+			Size:     file.Size,
 		})
 	}
 
@@ -144,6 +146,7 @@ func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, ci
 			Name:     file.Name,
 			PickCode: file.PickCode,
 			IsFile:   false,
+			Size:     file.Size,
 		})
 	}
 
