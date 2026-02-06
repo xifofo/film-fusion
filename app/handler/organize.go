@@ -671,6 +671,13 @@ func (h *OrganizeHandler) generateStrmFiles(dir model.CloudDirectory, items *[]O
 		if strings.TrimSpace(item.TargetPath) == "" {
 			continue
 		}
+		name := item.RenameTo
+		if strings.TrimSpace(name) == "" {
+			name = item.FileName
+		}
+		if isSubtitleFile(name) {
+			continue
+		}
 		strmPath, content := buildStrmInfo(savePath, contentPrefix, item.TargetPath, encodeURI)
 		item.StrmPath = strmPath
 		item.StrmContent = content
@@ -757,9 +764,36 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 }
 
 func isSubtitleFile(name string) bool {
-	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(name)))
-	switch ext {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
+	lowerName := strings.ToLower(name)
+	ext := filepath.Ext(lowerName)
+	if isSubtitleExt(ext) {
+		return true
+	}
+	if isCompressionExt(ext) {
+		base := strings.TrimSuffix(lowerName, ext)
+		if isSubtitleExt(filepath.Ext(base)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSubtitleExt(ext string) bool {
+	switch strings.ToLower(ext) {
 	case ".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCompressionExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".gz", ".zip", ".rar", ".7z":
 		return true
 	default:
 		return false
