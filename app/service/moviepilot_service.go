@@ -313,7 +313,7 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 	if strings.TrimSpace(category) != "" {
 		basePath = path.Join("/", category, folderName)
 	}
-	if info.HasBeginSeason {
+	if shouldAddSeasonFolder(info) {
 		basePath = path.Join(basePath, fmt.Sprintf("Season %02d", info.BeginSeason))
 	}
 
@@ -625,6 +625,39 @@ func extractBeginSeason(data map[string]any) (int, bool) {
 		return int(val), true
 	}
 	return 0, false
+}
+
+func shouldAddSeasonFolder(info MoviePilotMediaInfo) bool {
+	if !info.HasBeginSeason {
+		return false
+	}
+	if isTVMediaType(info.MediaType) {
+		return true
+	}
+	if isTVCategory(info.Category) {
+		return true
+	}
+	return false
+}
+
+func isTVMediaType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "tv", "series", "tvshow", "show", "电视剧":
+		return true
+	default:
+		return false
+	}
+}
+
+func isTVCategory(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return false
+	}
+	if strings.Contains(value, "剧集") {
+		return true
+	}
+	return value == "tv" || value == "series"
 }
 
 func extractSeasonEpisode(data map[string]any) string {
