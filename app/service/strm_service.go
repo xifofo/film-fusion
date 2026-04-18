@@ -289,8 +289,10 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 
 	// 尽可能的缓存 pickcode
 	if pickcode != "" && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
-		// 缓存 pickcode
-		model.CreateIfNotExistsStatic(database.DB, pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(path)), pickcode)
+		// 缓存 key 采用 STRM 内容空间的绝对路径，即 ContentPrefix + path，
+		// 与 Emby 读到的播放地址一致，便于管理页直观展示与命中
+		cacheKey := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, path)
+		model.CreateIfNotExistsStatic(database.DB, cacheKey, pickcode)
 	}
 
 	s.logger.Debugf("创建 STRM 文件到: %s", strmFilePath)

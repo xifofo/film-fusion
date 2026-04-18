@@ -72,6 +72,11 @@ func (s *Web115Service) GetFilesWithClient(client *driver.Pan115Client, cid stri
 	req.SetQueryParams(params).SetResult(&result)
 	resp, err := req.Get(driver.ApiFileList)
 	if err = driver.CheckErr(err, &result, resp); err != nil {
+		raw := ""
+		if resp != nil {
+			raw = resp.String()
+		}
+		s.logger.Errorf("115 GetFiles 失败 cid=%s offset=%d limit=%d err=%v raw=%s", cid, offset, limit, err, raw)
 		return Web115ListResult{}, err
 	}
 
@@ -132,6 +137,11 @@ func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, ci
 	req.SetQueryParams(params).SetResult(&result)
 	resp, err := req.Get(driver.ApiFileList)
 	if err = driver.CheckErr(err, &result, resp); err != nil {
+		raw := ""
+		if resp != nil {
+			raw = resp.String()
+		}
+		s.logger.Errorf("115 GetDirectories 失败 cid=%s offset=%d limit=%d err=%v raw=%s", cid, offset, limit, err, raw)
 		return Web115ListResult{}, err
 	}
 
@@ -157,14 +167,30 @@ func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, ci
 	}, nil
 }
 
+// web115BrowserUA 使用和 115 网页端完全一致的 UA，避免被风控识别为脚本客户端。
+// 同步更新时，从浏览器 DevTools 里复制 https://webapi.115.com/files 请求的 User-Agent 整段。
+const web115BrowserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 115Browser/36.0.0 Chromium/125.0"
+
 func (s *Web115Service) NewClient(cookie string) (*driver.Pan115Client, error) {
-	cred, err := parse115Credential(cookie)
-	if err != nil {
+	cookie = normalizeCookie(cookie)
+	if _, err := parse115Credential(cookie); err != nil {
 		return nil, err
 	}
 
-	client := driver.New(driver.UA(driver.UA115Browser))
-	client.ImportCredential(cred)
+	client := driver.New(driver.UA(web115BrowserUA))
+	client.Client.
+		SetCookieJar(nil).
+		SetHeader("Cookie", cookie).
+		SetHeader("Origin", "https://115.com").
+		SetHeader("Referer", "https://115.com/").
+		SetHeader("Accept", "*/*").
+		SetHeader("Accept-Language", "zh-CN,zh;q=0.9").
+		SetHeader("Sec-Fetch-Site", "same-site").
+		SetHeader("Sec-Fetch-Mode", "cors").
+		SetHeader("Sec-Fetch-Dest", "empty").
+		SetHeader("sec-ch-ua", `"Chromium";v="125", "Not.A/Brand";v="24"`).
+		SetHeader("sec-ch-ua-mobile", "?0").
+		SetHeader("sec-ch-ua-platform", `"macOS"`)
 
 	if err := client.CookieCheck(); err != nil {
 		return nil, fmt.Errorf("115 Cookie 无效: %w", err)
@@ -203,6 +229,21 @@ func (s *Web115Service) MoveFiles(client *driver.Pan115Client, dirID string, fil
 		return nil
 	}
 	return client.Move(dirID, fileIDs...)
+}
+
+// MkdirWithClient 使用 cookie 会话（webapi.115.com/files/add）新建文件夹。
+// 和列目录走同一套鉴权 + 浏览器指纹，避免 OpenAPI 侧的风控/重名异常。
+// 返回新目录的 cid。
+func (s *Web115Service) MkdirWithClient(client *driver.Pan115Client, parentID, name string) (string, error) {
+	parentID = strings.TrimSpace(parentID)
+	name = strings.TrimSpace(name)
+	if parentID == "" {
+		parentID = "0"
+	}
+	if name == "" {
+		return "", fmt.Errorf("目录名不能为空")
+	}
+	return client.Mkdir(parentID, name)
 }
 
 func parse115Credential(cookie string) (*driver.Credential, error) {

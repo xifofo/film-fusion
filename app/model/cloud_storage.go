@@ -11,8 +11,9 @@ import (
 type CloudStorage struct {
 	ID               uint           `gorm:"primarykey" json:"id"`
 	UserID           uint           `gorm:"not null;index;comment:所属用户ID" json:"user_id"`
-	StorageType      string         `gorm:"size:20;not null;comment:存储类型(115,baidu,aliyun,tencent等)" json:"storage_type"`
+	StorageType      string         `gorm:"size:20;not null;comment:存储类型(115,baidu,aliyun,tencent等);uniqueIndex:uk_user_type_provider,priority:2" json:"storage_type"`
 	StorageName      string         `gorm:"size:100;not null;comment:存储名称" json:"storage_name"`
+	ProviderUID      string         `gorm:"size:100;comment:云盘账号唯一标识(如115的user_id);uniqueIndex:uk_user_type_provider,priority:3" json:"provider_uid"`
 	AppID            string         `gorm:"size:100;comment:应用ID" json:"app_id"`
 	AppSecret        string         `gorm:"size:200;comment:应用密钥" json:"app_secret"`
 	AccessToken      string         `gorm:"type:text;comment:访问令牌" json:"access_token"`

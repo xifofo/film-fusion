@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
@@ -74,6 +75,7 @@ type Organize115ItemResult struct {
 	PickCode       string   `json:"pickcode"`
 	MediaType      string   `json:"media_type"`
 	Category       string   `json:"category"`
+	TmdbID         string   `json:"tmdb_id,omitempty"`
 	Title          string   `json:"title"`
 	Year           string   `json:"year"`
 	TitleYear      string   `json:"title_year,omitempty"`
@@ -199,6 +201,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			}
 
 			item.MediaType = info.MediaType
+			item.TmdbID = info.TmdbID
 			item.Title = info.Title
 			item.Year = info.Year
 			item.TitleYear = info.TitleYear
@@ -296,10 +299,6 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 			return
 		}
 
-		if len(listResp.Raw) > 0 {
-			h.logger.Infof("115 WEB 目录分页数据 (offset=%d): %s", offset, string(listResp.Raw))
-		}
-
 		for _, file := range listResp.Items {
 			if !file.IsFile {
 				continue
@@ -339,6 +338,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 			}
 
 			item.MediaType = info.MediaType
+			item.TmdbID = info.TmdbID
 			item.Title = info.Title
 			item.Year = info.Year
 			item.TitleYear = info.TitleYear
@@ -392,7 +392,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		return
 	}
 	if !req.DryRun {
-		h.cachePickcodeCaches(results)
+		h.cachePickcodeCaches(dir, results)
 	}
 
 	h.success(c, gin.H{
@@ -432,8 +432,9 @@ func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStora
 		}
 	}
 
+	resolver := newDirResolver(webClient, h.web115Svc)
 	for dirPath, debug := range dirMap {
-		resolved, err := h.resolveTargetDir(webClient, dirPath)
+		resolved, err := h.resolveTargetDir(resolver, dirPath)
 		if err != nil {
 			debug.Error = err.Error()
 			return nil, err
@@ -448,11 +449,7 @@ func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStora
 		finalID := resolved.ExistingID
 		if resolved.NeedCreate {
 			if !dryRun {
-				if strings.TrimSpace(storage.AccessToken) == "" {
-					return nil, fmt.Errorf("115open AccessToken 为空，无法创建目录")
-				}
-				h.sdk115Open.SetAccessToken(storage.AccessToken)
-				createdID, err := h.createDirectories(webClient, resolved.ExistingID, resolved.ExistingDir, resolved.MissingDirs)
+				createdID, err := h.createDirectories(resolver, resolved.ExistingID, resolved.ExistingDir, resolved.MissingDirs)
 				if err != nil {
 					debug.Error = err.Error()
 					return nil, err
@@ -488,7 +485,86 @@ func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStora
 	return debugs, nil
 }
 
-func (h *OrganizeHandler) resolveTargetDir(webClient *driver.Pan115Client, targetDir string) (Organize115DirDebug, error) {
+type dirResolver struct {
+	webClient *driver.Pan115Client
+	web115Svc *service.Web115Service
+	cache     map[string]map[string]string
+}
+
+func newDirResolver(webClient *driver.Pan115Client, svc *service.Web115Service) *dirResolver {
+	return &dirResolver{
+		webClient: webClient,
+		web115Svc: svc,
+		cache:     make(map[string]map[string]string),
+	}
+}
+
+func (r *dirResolver) loadChildren(parentID string, force bool) error {
+	if !force {
+		if _, ok := r.cache[parentID]; ok {
+			return nil
+		}
+	}
+	children := make(map[string]string)
+	offset := 0
+	for {
+		listResp, err := r.web115Svc.GetDirectoriesWithClient(r.webClient, parentID, offset, 0)
+		if err != nil {
+			return err
+		}
+		for _, it := range listResp.Items {
+			if _, exists := children[it.Name]; !exists {
+				children[it.Name] = it.FileID
+			}
+		}
+		pageLen := len(listResp.Items)
+		if pageLen == 0 {
+			break
+		}
+		if listResp.Total > 0 {
+			if int64(offset+pageLen) >= listResp.Total {
+				break
+			}
+		} else if pageLen < int(driver.MaxDirPageLimit) {
+			break
+		}
+		offset += pageLen
+	}
+	r.cache[parentID] = children
+	return nil
+}
+
+func (r *dirResolver) findChild(parentID, name string) (string, error) {
+	if err := r.loadChildren(parentID, false); err != nil {
+		return "", err
+	}
+	return r.cache[parentID][name], nil
+}
+
+func (r *dirResolver) refreshChild(parentID, name string) (string, error) {
+	if err := r.loadChildren(parentID, true); err != nil {
+		return "", err
+	}
+	return r.cache[parentID][name], nil
+}
+
+func splitDirParts(cleaned string) []string {
+	trimmed := strings.Trim(cleaned, "/")
+	if trimmed == "" {
+		return nil
+	}
+	raw := strings.Split(trimmed, "/")
+	out := make([]string, 0, len(raw))
+	for _, p := range raw {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func (h *OrganizeHandler) resolveTargetDir(resolver *dirResolver, targetDir string) (Organize115DirDebug, error) {
 	cleaned := normalizeDirPath(targetDir)
 	if cleaned == "/" {
 		return Organize115DirDebug{
@@ -499,78 +575,79 @@ func (h *OrganizeHandler) resolveTargetDir(webClient *driver.Pan115Client, targe
 		}, nil
 	}
 
-	current := cleaned
-	lookups := make([]Organize115DirLookup, 0)
-	existingID := ""
-	existingDir := ""
+	parts := splitDirParts(cleaned)
+	currentID := "0"
+	currentPath := "/"
+	lookups := []Organize115DirLookup{{Path: "/", ID: "0"}}
 
-	for {
-		resp, err := webClient.DirName2CID(current)
+	for i, name := range parts {
+		nextPath := path.Join(currentPath, name)
+		if !strings.HasPrefix(nextPath, "/") {
+			nextPath = "/" + nextPath
+		}
+		childID, err := resolver.findChild(currentID, name)
 		if err != nil {
 			return Organize115DirDebug{}, err
 		}
-		id := strings.TrimSpace(string(resp.CategoryID))
-		lookups = append(lookups, Organize115DirLookup{
-			Path: current,
-			ID:   id,
-		})
-		if id != "" && id != "0" {
-			existingID = id
-			existingDir = current
-			break
+		lookups = append(lookups, Organize115DirLookup{Path: nextPath, ID: childID})
+		if childID == "" {
+			return Organize115DirDebug{
+				TargetDir:   cleaned,
+				ExistingDir: currentPath,
+				ExistingID:  currentID,
+				MissingDirs: append([]string{}, parts[i:]...),
+				NeedCreate:  true,
+				Lookups:     lookups,
+			}, nil
 		}
-
-		if current == "/" || current == "." {
-			existingID = "0"
-			existingDir = "/"
-			break
-		}
-		parent := path.Dir(current)
-		if parent == current {
-			existingID = "0"
-			existingDir = "/"
-			break
-		}
-		current = parent
+		currentID = childID
+		currentPath = nextPath
 	}
 
-	missing := computeMissingDirs(cleaned, existingDir)
 	return Organize115DirDebug{
 		TargetDir:   cleaned,
-		ExistingDir: existingDir,
-		ExistingID:  existingID,
-		MissingDirs: missing,
-		NeedCreate:  len(missing) > 0,
+		ExistingDir: currentPath,
+		ExistingID:  currentID,
+		NeedCreate:  false,
 		Lookups:     lookups,
 	}, nil
 }
 
-func (h *OrganizeHandler) createDirectories(webClient *driver.Pan115Client, existingID, existingDir string, missing []string) (string, error) {
+func (h *OrganizeHandler) createDirectories(resolver *dirResolver, existingID, existingDir string, missing []string) (string, error) {
+	if resolver == nil || resolver.webClient == nil {
+		return "", fmt.Errorf("createDirectories: resolver/webClient 未初始化")
+	}
+	webClient := resolver.webClient
 	pid := strings.TrimSpace(existingID)
 	if pid == "" {
 		pid = "0"
 	}
 	currentPath := normalizeDirPath(existingDir)
 	for _, name := range missing {
-		if strings.TrimSpace(name) == "" {
+		name = strings.TrimSpace(name)
+		if name == "" {
 			continue
 		}
 		nextPath := path.Join(currentPath, name)
-		resp, err := h.sdk115Open.Mkdir(context.Background(), pid, name)
+		h.logger.Infof("115 Mkdir 调用 pid=%s name=%q path=%s", pid, name, nextPath)
+		cid, err := h.web115Svc.MkdirWithClient(webClient, pid, name)
 		if err != nil {
-			if webClient != nil {
-				if lookup, lookupErr := webClient.DirName2CID(nextPath); lookupErr == nil {
-					id := strings.TrimSpace(string(lookup.CategoryID))
-					if id != "" && id != "0" {
-						pid = id
-						currentPath = nextPath
-						continue
-					}
-				}
+			alreadyExists := errors.Is(err, driver.ErrExist) || strings.Contains(err.Error(), "target already exists") || strings.Contains(err.Error(), "该目录名称已存在")
+			if alreadyExists {
+				h.logger.Infof("115 Mkdir 目录已存在(errno=20004) pid=%s name=%q path=%s, 重新列父目录查已存在 cid", pid, name, nextPath)
+			} else {
+				h.logger.Warnf("115 Mkdir 失败 pid=%s name=%q path=%s err=%v", pid, name, nextPath, err)
+			}
+			if childID, lookupErr := resolver.refreshChild(pid, name); lookupErr == nil && childID != "" {
+				h.logger.Infof("115 Mkdir 失败后通过子目录列表找到已存在目录 path=%s file_id=%s", nextPath, childID)
+				pid = childID
+				currentPath = nextPath
+				continue
 			}
 			return "", fmt.Errorf("创建目录失败(%s): %w", nextPath, err)
 		}
-		pid = resp.FileID
+		h.logger.Infof("115 Mkdir 成功 pid=%s name=%q path=%s file_id=%s", pid, name, nextPath, cid)
+		pid = cid
 		currentPath = nextPath
 	}
 	return pid, nil
@@ -808,17 +885,20 @@ func isCompressionExt(ext string) bool {
 	}
 }
 
-func (h *OrganizeHandler) cachePickcodeCaches(items []Organize115ItemResult) {
+func (h *OrganizeHandler) cachePickcodeCaches(dir model.CloudDirectory, items []Organize115ItemResult) {
 	if len(items) == 0 {
 		return
 	}
+	// 缓存 key 与 STRM 内容空间对齐：ContentPrefix + TargetPath
+	// 与 Emby 播放代理(getDownloadURL)侧使用的 cacheKey 同构，保证命中
+	contentPrefix := strings.TrimSpace(dir.ContentPrefix)
 	created := 0
 	for _, item := range items {
 		targetPath := strings.TrimSpace(item.TargetPath)
 		if targetPath == "" || strings.TrimSpace(item.PickCode) == "" {
 			continue
 		}
-		filePath := pathhelper.EnsureLeadingSlash(targetPath)
+		filePath := pathhelper.SafeFilePathJoin(contentPrefix, targetPath)
 		_, isCreated, err := model.CreateIfNotExistsStatic(database.DB, filePath, item.PickCode)
 		if err != nil {
 			h.logger.Warnf("缓存 pickcode 失败: %s, err=%v", filePath, err)

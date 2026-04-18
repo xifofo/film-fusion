@@ -302,6 +302,10 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 		folderName = strings.TrimSuffix(folderName, path.Ext(folderName))
 	}
 
+	if tmdbID := strings.TrimSpace(info.TmdbID); tmdbID != "" && !strings.Contains(folderName, "{tmdb-") {
+		folderName = strings.TrimRight(folderName, " ") + " {tmdb-" + tmdbID + "}"
+	}
+
 	fileName := strings.TrimSpace(transferName)
 	if fileName == "" {
 		fileName = originalName

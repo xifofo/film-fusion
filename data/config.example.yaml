@@ -6,7 +6,7 @@ server:
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
 
 moviepilot:
-  api: "http://127.0.0.1:3001" 
+  api: "http://127.0.0.1:3001"
   username: ""
   password: ""
 
@@ -21,6 +21,16 @@ emby:
   admin_user_id: ""
   # 播放时提前获取下一集的媒体信息，提高播放速度，需要配置 admin_user_id
   add_next_media_info: true
+  # 媒体库封面生成器
+  cover:
+    enabled: false                   # 是否启用封面生成（启用后才接收 API 调用 / 定时任务）
+    cron: ""                         # cron 表达式（如 "0 3 * * *" 每天 3 点）；为空则只支持手动触发
+    width: 1920                      # 封面宽度
+    height: 1080                     # 封面高度
+    jpeg_quality: 88                 # JPEG 输出质量 1-100
+    poster_count: 9                  # 拼接海报数量（最新 N 个 Item）
+    font_cn: "data/assets/fonts/SourceHanSansCN-Bold.otf"   # 中文字体路径
+    font_en: "data/assets/fonts/Inter-Bold.ttf"             # 英文字体路径
 
 log:
   level: info           # debug, info, warn, error, fatal

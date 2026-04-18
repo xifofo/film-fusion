@@ -6,6 +6,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -204,6 +205,17 @@ func (s *TokenRefreshService) refresh115Token(storage *model.CloudStorage) (stri
 	}
 
 	s.logger.Infof("成功刷新115存储[%s]的令牌，新令牌过期时间: %d秒", storage.StorageName, tokenResp.ExpiresIn)
+
+	// 回填 provider_uid（仅在空时触发，避免对旧数据不断重试）
+	if storage.ProviderUID == "" {
+		tokenedClient := sdk115.New(sdk115.WithAccessToken(tokenResp.AccessToken))
+		if info, infoErr := tokenedClient.UserInfo(ctx); infoErr != nil {
+			s.logger.Warnf("回填115账号标识失败(storage=%s): %v", storage.StorageName, infoErr)
+		} else if info != nil && info.UserID != 0 {
+			storage.ProviderUID = strconv.FormatInt(info.UserID, 10)
+			s.logger.Infof("已回填115账号标识: storage=%s, provider_uid=%s", storage.StorageName, storage.ProviderUID)
+		}
+	}
 
 	return tokenResp.AccessToken, newRefreshToken, tokenResp.ExpiresIn, nil
 }

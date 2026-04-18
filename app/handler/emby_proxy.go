@@ -341,7 +341,9 @@ func (h *EmbyProxyHandler) checkMatch302(filePath, userAgent string) (string, bo
 			filePath, matchedPath, match.SourcePath, match.TargetPath)
 
 		// 尝试获取下载URL
-		downloadURL, err := h.getDownloadURL(matchedPath, match.CloudStorage.AccessToken, userAgent)
+		// filePath 是 Emby 看到的播放地址(STRM 内容空间)，用作 pickcode 缓存 key
+		// matchedPath 是 115 盘内路径，用于调 115 API 反查 pickcode
+		downloadURL, err := h.getDownloadURL(filePath, matchedPath, match.CloudStorage.AccessToken, userAgent)
 		if err != nil {
 			h.logger.Errorf("[EMBY PROXY] 获取下载URL失败: %v", err)
 			continue
@@ -355,10 +357,19 @@ func (h *EmbyProxyHandler) checkMatch302(filePath, userAgent string) (string, bo
 }
 
 // getDownloadURL 获取文件的下载URL
-func (h *EmbyProxyHandler) getDownloadURL(matchedPath, accessToken, userAgent string) (string, error) {
+// filePath: Emby 播放地址(STRM 内容空间的完整绝对路径)，用作 pickcode 缓存 key
+// matchedPath: 115 盘内路径，用于调 115 API 反查 pickcode
+func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath, accessToken, userAgent string) (string, error) {
+	// 缓存 key 使用解码后的 filePath（与 walk 时写入缓存的 key 语义一致）
+	cacheKey, decodeErr := url.PathUnescape(filePath)
+	if decodeErr != nil {
+		cacheKey = filePath
+	}
+	cacheKey = pathhelper.EnsureLeadingSlash(cacheKey)
+
 	// 检查是否有 pickcode 缓存
 	var pickcodeCache model.PickcodeCache
-	err := database.DB.Where("file_path = ?", matchedPath).First(&pickcodeCache).Error
+	err := database.DB.Where("file_path = ?", cacheKey).First(&pickcodeCache).Error
 
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return "", fmt.Errorf("查询 pickcode 缓存失败: %w", err)
@@ -366,15 +377,15 @@ func (h *EmbyProxyHandler) getDownloadURL(matchedPath, accessToken, userAgent st
 
 	// 如果没有缓存或 pickcode 为空，则获取新的 pickcode
 	if errors.Is(err, gorm.ErrRecordNotFound) || pickcodeCache.Pickcode == "" {
-		h.logger.Infof("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", matchedPath)
+		h.logger.Infof("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", cacheKey)
 
 		pickcode, err := h.fetchPickcodeFromAPI(matchedPath, accessToken)
 		if err != nil {
 			return "", fmt.Errorf("获取 pickcode 失败: %w", err)
 		}
 
-		// 创建或更新缓存
-		cache, _, err := model.CreateIfNotExistsStatic(database.DB, matchedPath, pickcode)
+		// 创建或更新缓存（key 用 STRM 内容空间的 cacheKey）
+		cache, _, err := model.CreateIfNotExistsStatic(database.DB, cacheKey, pickcode)
 		if err != nil {
 			h.logger.Errorf("[EMBY PROXY] 保存 pickcode 缓存失败: %v", err)
 		}

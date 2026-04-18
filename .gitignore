@@ -1,5 +1,7 @@
 /data/*
 !/data/config.example.yaml
+!/data/assets/
+/data/assets/fonts/*.cache
 film-fusion
 /dist/*
 .DS_Store

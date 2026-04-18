@@ -22,6 +22,7 @@ func AutoMigrate() error {
 		&model.PickcodeCache{},
 		&model.Match302{},
 		&model.MediaTask{},
+		&model.EmbyCoverLibrary{},
 	)
 }
 

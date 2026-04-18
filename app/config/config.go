@@ -59,13 +59,26 @@ type FileWatcherConfig struct {
 }
 
 type EmbyConfig struct {
-	Enabled          bool   `mapstructure:"enabled"`             // 是否启用 EMBY 服务
-	URL              string `mapstructure:"url"`                 // EMBY 服务器地址
-	APIKey           string `mapstructure:"api_key"`             // EMBY API 密钥
-	AdminUserID      string `mapstructure:"admin_user_id"`       // EMBY 管理员用户 ID
-	CacheTime        int    `mapstructure:"cache_time"`          // API 请求超时时间（秒）
-	AddNextMediaInfo bool   `mapstructure:"add_next_media_info"` // 是否添加下一部媒体信息
-	RunProxyPort     int    `mapstructure:"run_proxy_port"`      // 运行 Emby 代理端口
+	Enabled          bool            `mapstructure:"enabled"`             // 是否启用 EMBY 服务
+	URL              string          `mapstructure:"url"`                 // EMBY 服务器地址
+	APIKey           string          `mapstructure:"api_key"`             // EMBY API 密钥
+	AdminUserID      string          `mapstructure:"admin_user_id"`       // EMBY 管理员用户 ID
+	CacheTime        int             `mapstructure:"cache_time"`          // API 请求超时时间（秒）
+	AddNextMediaInfo bool            `mapstructure:"add_next_media_info"` // 是否添加下一部媒体信息
+	RunProxyPort     int             `mapstructure:"run_proxy_port"`      // 运行 Emby 代理端口
+	Cover            EmbyCoverConfig `mapstructure:"cover"`               // 媒体库封面生成器配置
+}
+
+// EmbyCoverConfig 媒体库封面生成器配置
+type EmbyCoverConfig struct {
+	Enabled     bool   `mapstructure:"enabled"`      // 是否启用封面生成功能
+	Cron        string `mapstructure:"cron"`         // cron 表达式，例如 "0 3 * * *" 每天 3 点；为空则禁用定时任务
+	Width       int    `mapstructure:"width"`        // 输出图宽（默认 1920）
+	Height      int    `mapstructure:"height"`       // 输出图高（默认 1080）
+	JpegQuality int    `mapstructure:"jpeg_quality"` // JPEG 输出质量 1-100（默认 88）
+	FontCN      string `mapstructure:"font_cn"`      // 中文字体绝对路径或相对项目根目录路径
+	FontEN      string `mapstructure:"font_en"`      // 英文字体路径
+	PosterCount int    `mapstructure:"poster_count"` // 拼接海报数量（默认 9，对应九宫格）
 }
 
 type MoviePilotConfig struct {
@@ -122,6 +135,16 @@ func setDefaults() {
 	viper.SetDefault("jwt.secret", "your-secret-key-change-in-production")
 	viper.SetDefault("jwt.expire_time", 24) // 24小时
 	viper.SetDefault("jwt.issuer", "film-fusion")
+
+	// Emby Cover 默认配置
+	viper.SetDefault("emby.cover.enabled", false)
+	viper.SetDefault("emby.cover.cron", "")
+	viper.SetDefault("emby.cover.width", 1920)
+	viper.SetDefault("emby.cover.height", 1080)
+	viper.SetDefault("emby.cover.jpeg_quality", 88)
+	viper.SetDefault("emby.cover.font_cn", "data/assets/fonts/SourceHanSansCN-Bold.otf")
+	viper.SetDefault("emby.cover.font_en", "data/assets/fonts/Inter-Bold.ttf")
+	viper.SetDefault("emby.cover.poster_count", 9)
 }
 
 // validateConfig 验证配置的有效性

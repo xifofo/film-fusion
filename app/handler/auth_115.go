@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"film-fusion/app/config"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
@@ -17,6 +18,7 @@ import (
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 	"resty.dev/v3"
 )
 
@@ -74,8 +76,8 @@ type Auth115StatusResponse struct {
 
 // Auth115CompleteRequest 完成授权请求
 type Auth115CompleteRequest struct {
-	CloudStorageId uint   `json:"cloud_storage_id"` // 云存储配置ID
-	SessionID      string `json:"session_id" binding:"required"`
+	StorageID uint   `json:"storage_id"` // 云存储配置ID，用于重新登录场景指定更新目标
+	SessionID string `json:"session_id" binding:"required"`
 }
 
 // ApiResponse 统一的API响应格式
@@ -334,23 +336,89 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 	sdk115Client := sdk115.New()
 
 	// 获取token
-	token, err := sdk115Client.CodeToToken(context.Background(), session.DeviceCode.UID, session.CodeVerifier)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	token, err := sdk115Client.CodeToToken(ctx, session.DeviceCode.UID, session.CodeVerifier)
 	if err != nil {
 		h.logger.Errorf("获取 token 错误: %v", err)
 		h.error(c, http.StatusInternalServerError, 500, "获取token失败")
 		return
 	}
 
-	// 查找是否已存在相同的云存储配置
+	// 通过访问令牌获取115账号唯一标识(user_id)，作为云盘账号的稳定主键
+	tokenedClient := sdk115.New(sdk115.WithAccessToken(token.AccessToken))
+	userInfo, err := tokenedClient.UserInfo(ctx)
+	if err != nil {
+		h.logger.Errorf("获取115用户信息失败: %v", err)
+		h.error(c, http.StatusInternalServerError, 500, "获取115账号信息失败，无法完成授权")
+		return
+	}
+	if userInfo.UserID == 0 {
+		h.error(c, http.StatusInternalServerError, 500, "115账号信息异常，无法完成授权")
+		return
+	}
+	providerUID := strconv.FormatInt(userInfo.UserID, 10)
+
+	// 按优先级定位目标记录：
+	// 1) 若请求显式指定 storage_id（重新登录场景），按 id 定位，且必须属于当前用户
+	// 2) 否则按 (user_id, storage_type, provider_uid) 定位同一个115账号
+	// 3) 仍未命中，兼容尚未回填 provider_uid 的旧数据：按 (user_id, storage_type, app_id) 定位 provider_uid 为空的记录
 	var cloudStorage model.CloudStorage
-	database.DB.Where("user_id = ? AND app_id = ? AND storage_type = ?",
-		userID.(uint), session.ClientID, model.StorageType115Open).First(&cloudStorage)
+	var found bool
+
+	if req.StorageID > 0 {
+		if err := database.DB.
+			Where("id = ? AND user_id = ? AND storage_type = ?", req.StorageID, userID.(uint), model.StorageType115Open).
+			First(&cloudStorage).Error; err == nil {
+			found = true
+			// 防止误操作：指定的记录若已绑定另一个115账号，则拒绝更新
+			if cloudStorage.ProviderUID != "" && cloudStorage.ProviderUID != providerUID {
+				h.error(c, http.StatusConflict, 409,
+					fmt.Sprintf("扫码使用的115账号(user_id=%s)与当前存储配置绑定的账号(%s)不一致，请使用原账号扫码", providerUID, cloudStorage.ProviderUID))
+				return
+			}
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.logger.Errorf("查询指定云存储失败: %v", err)
+			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
+			return
+		}
+	}
+
+	if !found {
+		if err := database.DB.
+			Where("user_id = ? AND storage_type = ? AND provider_uid = ?", userID.(uint), model.StorageType115Open, providerUID).
+			First(&cloudStorage).Error; err == nil {
+			found = true
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.logger.Errorf("按 provider_uid 查询云存储失败: %v", err)
+			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
+			return
+		}
+	}
+
+	if !found {
+		if err := database.DB.
+			Where("user_id = ? AND storage_type = ? AND app_id = ? AND (provider_uid IS NULL OR provider_uid = '')",
+				userID.(uint), model.StorageType115Open, session.ClientID).
+			First(&cloudStorage).Error; err == nil {
+			found = true
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			h.logger.Errorf("按 app_id 兼容查询云存储失败: %v", err)
+			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
+			return
+		}
+	}
+
+	wasNew := !found
 
 	// 更新配置信息
 	now := time.Now()
 	cloudStorage.UserID = userID.(uint)
+	cloudStorage.ProviderUID = providerUID
 	cloudStorage.AppID = session.ClientID
-	cloudStorage.StorageName = session.Name
+	if session.Name != "" {
+		cloudStorage.StorageName = session.Name
+	}
 	cloudStorage.StorageType = model.StorageType115Open
 	cloudStorage.AccessToken = token.AccessToken
 	cloudStorage.RefreshToken = token.RefreshToken
@@ -358,9 +426,6 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 	cloudStorage.ErrorMessage = ""
 	cloudStorage.LastErrorAt = nil
 	cloudStorage.LastRefreshAt = &now
-	if cloudStorage.SortOrder == 0 && cloudStorage.ID == 0 {
-		cloudStorage.SortOrder = 0
-	}
 
 	// 计算过期时间
 	if token.ExpiresIn > 0 {
@@ -375,11 +440,11 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 		return
 	}
 
-	isUpdate := cloudStorage.ID != 0 && cloudStorage.CreatedAt.Before(now.Add(-time.Second))
+	isUpdate := !wasNew
 	if isUpdate {
-		h.logger.Infof("用户 %d 成功更新115授权，存储配置ID: %d", userID.(uint), cloudStorage.ID)
+		h.logger.Infof("用户 %d 成功更新115授权(provider_uid=%s)，存储配置ID: %d", userID.(uint), providerUID, cloudStorage.ID)
 	} else {
-		h.logger.Infof("用户 %d 成功完成115授权，存储配置ID: %d", userID.(uint), cloudStorage.ID)
+		h.logger.Infof("用户 %d 新增115授权(provider_uid=%s)，存储配置ID: %d", userID.(uint), providerUID, cloudStorage.ID)
 	}
 
 	// 清理会话

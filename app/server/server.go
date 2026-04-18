@@ -25,6 +25,7 @@ type Server struct {
 	tokenRefreshService *service.TokenRefreshService
 	download115Service  *service.Download115Service
 	moviePilotService   *service.MoviePilotService
+	embyCoverService    *service.EmbyCoverService
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
 	taskQueue           *service.PersistentTaskQueue
@@ -59,6 +60,8 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		log.Error("❌ 任务队列初始化失败")
 	}
 
+	embyCoverService := service.NewEmbyCoverService(cfg, log, embyClient)
+
 	s := &Server{
 		gin: router,
 		http: &http.Server{
@@ -70,6 +73,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		tokenRefreshService: service.NewTokenRefreshService(log),
 		download115Service:  download115Service,
 		moviePilotService:   moviePilotService,
+		embyCoverService:    embyCoverService,
 		taskQueue:           taskQueue,
 	}
 
@@ -106,6 +110,9 @@ func (s *Server) Start() error {
 	// 启动 MoviePilot 令牌刷新服务
 	s.moviePilotService.Start()
 
+	// 启动 Emby 封面生成定时任务调度
+	s.embyCoverService.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -125,6 +132,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止 MoviePilot 令牌刷新服务
 	s.moviePilotService.Stop()
+
+	// 停止 Emby 封面生成 cron
+	s.embyCoverService.Stop()
 
 	// 停止Emby代理服务器
 	if s.embyProxyServer != nil {
@@ -180,6 +190,7 @@ func (s *Server) setupRoutes() {
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service)
+	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -326,6 +337,17 @@ func (s *Server) setupRoutes() {
 
 			// 统计信息
 			pickcode.GET("/stats", pickcodeCacheHandler.GetPickcodeCacheStats)
+		}
+
+		// Emby 封面生成器
+		embyCover := protected.Group("/emby-cover")
+		{
+			embyCover.GET("/templates", embyCoverHandler.ListTemplates)
+			embyCover.GET("/libraries", embyCoverHandler.ListLibraries)
+			embyCover.PUT("/libraries/:emby_id", embyCoverHandler.UpsertLibraryConfig)
+			embyCover.POST("/libraries/:emby_id/preview", embyCoverHandler.PreviewLibraryCover)
+			embyCover.POST("/libraries/:emby_id/generate", embyCoverHandler.GenerateLibraryCover)
+			embyCover.POST("/batch-generate", embyCoverHandler.BatchGenerate)
 		}
 
 		// Match302 匹配配置相关路由
