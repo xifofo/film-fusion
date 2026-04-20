@@ -17,11 +17,17 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/gin-gonic/gin"
 )
+
+// web115DirCacheTTL 整理流程中「已存在目录」查找的进程内缓存 TTL。
+// 10 分钟平衡「跳过 115 的重复列目录」与「避免误用陈旧目录结构」；
+// 新建 / 刷新子目录时会同步更新缓存，日常不依赖 TTL 失效来纠正。
+const web115DirCacheTTL = 10 * time.Minute
 
 // OrganizeHandler 处理整理文件的接口
 type OrganizeHandler struct {
@@ -30,6 +36,7 @@ type OrganizeHandler struct {
 	moviePilotSvc  *service.MoviePilotService
 	web115Svc      *service.Web115Service
 	download115Svc *service.Download115Service
+	dirCache       *service.Web115DirCache
 }
 
 func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, download115Svc *service.Download115Service) *OrganizeHandler {
@@ -39,6 +46,7 @@ func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotSer
 		moviePilotSvc:  moviePilotSvc,
 		web115Svc:      service.NewWeb115Service(log),
 		download115Svc: download115Svc,
+		dirCache:       service.NewWeb115DirCache(web115DirCacheTTL),
 	}
 }
 
@@ -432,7 +440,7 @@ func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStora
 		}
 	}
 
-	resolver := newDirResolver(webClient, h.web115Svc)
+	resolver := newDirResolver(webClient, h.web115Svc, h.dirCache, storage.ID)
 	for dirPath, debug := range dirMap {
 		resolved, err := h.resolveTargetDir(resolver, dirPath)
 		if err != nil {
@@ -485,23 +493,39 @@ func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStora
 	return debugs, nil
 }
 
+// dirResolver 封装「根据路径沉找 115 上已存在目录」的查找。
+//
+// 从 v? 起，「父目录 -> 子目录 map」不再按 resolver 实例单独缓存，
+// 而是写入整理 handler 上挂的 Web115DirCache，在同一进程、同一云存储下
+// 跨 Organize115Cookie 请求共享，显著减少对 115 的重复列目录请求。
 type dirResolver struct {
 	webClient *driver.Pan115Client
 	web115Svc *service.Web115Service
-	cache     map[string]map[string]string
+	cache     *service.Web115DirCache
+	storageID uint
+	local     map[string]map[string]string // 本次请求内的二级缓存，避免重复拷贝全局缓存
 }
 
-func newDirResolver(webClient *driver.Pan115Client, svc *service.Web115Service) *dirResolver {
+func newDirResolver(webClient *driver.Pan115Client, svc *service.Web115Service, cache *service.Web115DirCache, storageID uint) *dirResolver {
 	return &dirResolver{
 		webClient: webClient,
 		web115Svc: svc,
-		cache:     make(map[string]map[string]string),
+		cache:     cache,
+		storageID: storageID,
+		local:     make(map[string]map[string]string),
 	}
 }
 
+// loadChildren 保证 r.local[parentID] 被填充：
+//   - force=false 时，依次尝试 local -> global cache -> 115；命中即返回
+//   - force=true  时，跳过两层缓存直接去 115 拉，拉回后更新两层
 func (r *dirResolver) loadChildren(parentID string, force bool) error {
 	if !force {
-		if _, ok := r.cache[parentID]; ok {
+		if _, ok := r.local[parentID]; ok {
+			return nil
+		}
+		if children, ok := r.cache.Get(r.storageID, parentID); ok {
+			r.local[parentID] = children
 			return nil
 		}
 	}
@@ -530,7 +554,8 @@ func (r *dirResolver) loadChildren(parentID string, force bool) error {
 		}
 		offset += pageLen
 	}
-	r.cache[parentID] = children
+	r.local[parentID] = children
+	r.cache.Set(r.storageID, parentID, children)
 	return nil
 }
 
@@ -538,14 +563,25 @@ func (r *dirResolver) findChild(parentID, name string) (string, error) {
 	if err := r.loadChildren(parentID, false); err != nil {
 		return "", err
 	}
-	return r.cache[parentID][name], nil
+	return r.local[parentID][name], nil
 }
 
 func (r *dirResolver) refreshChild(parentID, name string) (string, error) {
 	if err := r.loadChildren(parentID, true); err != nil {
 		return "", err
 	}
-	return r.cache[parentID][name], nil
+	return r.local[parentID][name], nil
+}
+
+// rememberChild 在 mkdir 成功后用：将新目录写回两层缓存，不触发 115 请求。
+func (r *dirResolver) rememberChild(parentID, name, childID string) {
+	if name == "" || childID == "" {
+		return
+	}
+	if bucket, ok := r.local[parentID]; ok {
+		bucket[name] = childID
+	}
+	r.cache.AddChild(r.storageID, parentID, name, childID)
 }
 
 func splitDirParts(cleaned string) []string {
@@ -647,6 +683,7 @@ func (h *OrganizeHandler) createDirectories(resolver *dirResolver, existingID, e
 			return "", fmt.Errorf("创建目录失败(%s): %w", nextPath, err)
 		}
 		h.logger.Infof("115 Mkdir 成功 pid=%s name=%q path=%s file_id=%s", pid, name, nextPath, cid)
+		resolver.rememberChild(pid, name, cid)
 		pid = cid
 		currentPath = nextPath
 	}
