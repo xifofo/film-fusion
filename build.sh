@@ -5,7 +5,7 @@
 #   3) docker build 多平台镜像（默认推送到 registry）
 #
 # 用法:
-#   ./build.sh v2.1.6              # 默认：构建 + 推送
+#   ./build.sh v2.1.6              # 默认：构建 + 推送 <version> 和 latest 两个 tag
 #   ./build.sh v2.1.6 --no-push    # 仅构建，不推送（本地校验用）
 #
 # 可通过环境变量覆盖默认行为:
@@ -13,6 +13,7 @@
 #   FRONTEND_DIR=../film-fusion-frontend       # 前端代码目录
 #   PLATFORMS=linux/amd64,linux/arm64          # 目标平台
 #   DOCKER_BUILD_ARGS="--no-cache"             # 额外透传给 docker build 的参数
+#   TAG_LATEST=0                               # 关闭默认打 latest 行为
 
 set -euo pipefail
 
@@ -33,8 +34,11 @@ esac
 
 IMAGE_REPO="${IMAGE_REPO:-kumayi/film-fusion}"
 IMAGE="${IMAGE_REPO}:${VERSION}"
+IMAGE_LATEST="${IMAGE_REPO}:latest"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS:-}"
+# 是否同时打 latest tag（默认开启，可用 TAG_LATEST=0 关闭）
+TAG_LATEST="${TAG_LATEST:-1}"
 
 BACKEND_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR_DEFAULT="$BACKEND_DIR/../film-fusion-frontend"
@@ -74,17 +78,24 @@ mkdir -p "$BACKEND_DIR/dist"
 # 拷贝前端 dist 内容（含隐藏文件）到后端 dist 下
 cp -R "$FRONTEND_DIR/dist/." "$BACKEND_DIR/dist/"
 
+TAG_ARGS=( -t "$IMAGE" )
+IMAGE_TAGS_DESC="$IMAGE"
+if [[ "$TAG_LATEST" == "1" ]]; then
+  TAG_ARGS+=( -t "$IMAGE_LATEST" )
+  IMAGE_TAGS_DESC="$IMAGE, $IMAGE_LATEST"
+fi
+
 if [[ -n "$PUSH_FLAG" ]]; then
-  echo "==> [3/3] docker build: $IMAGE  (platforms=$PLATFORMS, 推送到 registry)"
+  echo "==> [3/3] docker build: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 推送到 registry)"
 else
-  echo "==> [3/3] docker build: $IMAGE  (platforms=$PLATFORMS, 不推送)"
+  echo "==> [3/3] docker build: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 不推送)"
 fi
 # shellcheck disable=SC2086
 docker build \
   --platform="$PLATFORMS" \
-  -t "$IMAGE" \
+  "${TAG_ARGS[@]}" \
   $PUSH_FLAG \
   $DOCKER_BUILD_ARGS \
   "$BACKEND_DIR"
 
-echo "==> 完成: $IMAGE"
+echo "==> 完成: $IMAGE_TAGS_DESC"
