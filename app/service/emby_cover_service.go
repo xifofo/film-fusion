@@ -27,13 +27,13 @@ import (
 //   - 上传到 Emby
 //   - cron 定时批量生成
 type EmbyCoverService struct {
-	cfg    *config.Config
-	log    *logger.Logger
-	db     *gorm.DB
-	emby   *embyhelper.EmbyClient
-	cron   *cron.Cron
-	cronID cron.EntryID
-	mu     sync.Mutex
+	cfg     *config.Config
+	log     *logger.Logger
+	db      *gorm.DB
+	emby    *embyhelper.EmbyClient
+	cron    *cron.Cron
+	cronID  cron.EntryID
+	mu      sync.Mutex
 	running bool
 }
 
@@ -49,20 +49,20 @@ func NewEmbyCoverService(cfg *config.Config, log *logger.Logger, emby *embyhelpe
 
 // LibraryView 一个媒体库的合并视图：Emby 元信息 + 本地配置
 type LibraryView struct {
-	EmbyLibraryID string     `json:"emby_library_id"`
-	EmbyName      string     `json:"emby_name"`
-	CollectionType string    `json:"collection_type"`
-	CNTitle       string     `json:"cn_title"`
-	ENSubtitle    string     `json:"en_subtitle"`
-	TemplateID    string     `json:"template_id"`
-	Enabled       bool       `json:"enabled"`
+	EmbyLibraryID   string     `json:"emby_library_id"`
+	EmbyName        string     `json:"emby_name"`
+	CollectionType  string     `json:"collection_type"`
+	CNTitle         string     `json:"cn_title"`
+	ENSubtitle      string     `json:"en_subtitle"`
+	TemplateID      string     `json:"template_id"`
+	Enabled         bool       `json:"enabled"`
 	LastGeneratedAt *time.Time `json:"last_generated_at,omitempty"`
-	LastError     string     `json:"last_error,omitempty"`
-	Configured    bool       `json:"configured"` // 本地是否已建表项
+	LastError       string     `json:"last_error,omitempty"`
+	Configured      bool       `json:"configured"` // 本地是否已建表项
 }
 
 // ListLibraries 列出所有媒体库（合并 Emby + 本地配置）
-// 同时会自动 upsert 本地表，让 Emby 新加的库立即可见
+// 仅做合并视图，不写库；未配置的库返回 Configured=false、Enabled=true 的默认视图
 func (s *EmbyCoverService) ListLibraries(ctx context.Context) ([]LibraryView, error) {
 	libs, err := s.emby.ListLibraries()
 	if err != nil {
@@ -228,7 +228,10 @@ func (s *EmbyCoverService) GenerateAllEnabled(ctx context.Context) (success, fai
 	}
 
 	for _, lib := range libs {
-		if !lib.Configured || !lib.Enabled {
+		// 未在本地表配置过的库，ListLibraries 会给出 Enabled=true 的默认视图，
+		// 这里与单库手动 GenerateLibraryCover 的兜底语义保持一致：只看 Enabled。
+		// 用户若不想为某个库生成封面，需在前端把该库 enabled 关掉（会落到本地表）。
+		if !lib.Enabled {
 			continue
 		}
 		if ctx.Err() != nil {
