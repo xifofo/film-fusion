@@ -98,6 +98,8 @@ type Organize115ItemResult struct {
 	StrmContent    string   `json:"strm_content,omitempty"`
 	SubtitleQueued bool     `json:"subtitle_queued,omitempty"`
 	SubtitleError  string   `json:"subtitle_error,omitempty"`
+	LocalDir       string   `json:"local_dir,omitempty"`
+	LocalExists    bool     `json:"local_exists,omitempty"`
 	Error          string   `json:"error,omitempty"`
 }
 
@@ -395,6 +397,8 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		return
 	}
 
+	h.populateLocalLibraryStatus(dir, &results)
+
 	if err := h.generateStrmFiles(dir, &results, req.DryRun); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
@@ -584,6 +588,16 @@ func (r *dirResolver) rememberChild(parentID, name, childID string) {
 	r.cache.AddChild(r.storageID, parentID, name, childID)
 }
 
+// resolveWholePath 走 115 files/getid 直接查「整条路径对应的 CID」。
+// 命中时一次 HTTP 请求即完成，远快于逐级 loadChildren。未命中时返回 ok=false，
+// 由调用方回退到逐级查找流程。
+func (r *dirResolver) resolveWholePath(dir string) (string, bool, error) {
+	if r == nil || r.web115Svc == nil || r.webClient == nil {
+		return "", false, nil
+	}
+	return r.web115Svc.ResolveDirPathWithClient(r.webClient, dir)
+}
+
 func splitDirParts(cleaned string) []string {
 	trimmed := strings.Trim(cleaned, "/")
 	if trimmed == "" {
@@ -600,6 +614,54 @@ func splitDirParts(cleaned string) []string {
 	return out
 }
 
+// resolveTargetDirViaGetID 用 DirName2CID 从目标路径向上回退查找「已存在到哪一层」。
+//
+// 返回值语义：
+//   - handled=true：主路径成功完成，debug 已填好（含 ExistingDir/ExistingID/MissingDirs/Lookups），
+//     调用方直接返回即可；即便整条路径都不存在、走到根并落到 "/"，也算 handled
+//     （因为 ResolveDirPathWithClient 对 "/" 返回 ("0", true, nil)）。
+//   - handled=false 且 err != nil：getid 本身报错（风控、鉴权失效、网络），调用方应回退到 list 兜底。
+//   - handled=false 且 err == nil：不会出现。
+//
+// lookups 按「从深到浅」追加，保持和 1a32f9f 版本一致的观测语义。
+func (h *OrganizeHandler) resolveTargetDirViaGetID(resolver *dirResolver, cleaned string) (Organize115DirDebug, bool, error) {
+	current := cleaned
+	lookups := make([]Organize115DirLookup, 0, 4)
+	for {
+		cid, ok, err := resolver.resolveWholePath(current)
+		if err != nil {
+			return Organize115DirDebug{}, false, err
+		}
+		lookups = append(lookups, Organize115DirLookup{Path: current, ID: cid})
+		if ok {
+			missing := computeMissingDirs(cleaned, current)
+			return Organize115DirDebug{
+				TargetDir:   cleaned,
+				ExistingDir: current,
+				ExistingID:  cid,
+				MissingDirs: missing,
+				NeedCreate:  len(missing) > 0,
+				Lookups:     lookups,
+			}, true, nil
+		}
+		parent := path.Dir(current)
+		if parent == current {
+			// 防御：理论上 current=="/" 时 resolveWholePath 已返 ok=true 走不到这里。
+			// 保留是避免 115 行为变化导致死循环。
+			missing := computeMissingDirs(cleaned, "/")
+			return Organize115DirDebug{
+				TargetDir:   cleaned,
+				ExistingDir: "/",
+				ExistingID:  "0",
+				MissingDirs: missing,
+				NeedCreate:  len(missing) > 0,
+				Lookups:     lookups,
+			}, true, nil
+		}
+		current = parent
+	}
+}
+
 func (h *OrganizeHandler) resolveTargetDir(resolver *dirResolver, targetDir string) (Organize115DirDebug, error) {
 	cleaned := normalizeDirPath(targetDir)
 	if cleaned == "/" {
@@ -609,6 +671,19 @@ func (h *OrganizeHandler) resolveTargetDir(resolver *dirResolver, targetDir stri
 			ExistingID:  "0",
 			NeedCreate:  false,
 		}, nil
+	}
+
+	// 主路径：115 files/getid（SDK: DirName2CID）从目标路径向上逐级回退。
+	//
+	//   - 整路径已存在（最常见场景，如复整理/增量整理）：1 次 getid 即得 CID
+	//   - 部分已存在到第 k 层：k+1 次轻量 getid（每次只传一个路径字符串）
+	//
+	// 相比下面的 list 兜底，getid 不返回"父下所有子目录"，流量和耗时显著更低。
+	if debug, handled, err := h.resolveTargetDirViaGetID(resolver, cleaned); handled {
+		return debug, nil
+	} else if err != nil {
+		// getid 本身挂掉（风控 / 鉴权失效 / 网络）才走下面的 list 兜底
+		h.logger.Warnf("115 DirName2CID 查询失败，回退到逐级 list 查找 path=%s err=%v", cleaned, err)
 	}
 
 	parts := splitDirParts(cleaned)
@@ -841,6 +916,40 @@ func buildStrmInfo(savePath, contentPrefix, targetPath string, encodeURI bool) (
 
 	content := pathhelper.SafeFilePathJoin(contentPrefix, nextPath)
 	return strmPath, content
+}
+
+// populateLocalLibraryStatus 检查每个 item 的目标目录在本地（SavePath + TargetDir）是否已存在，
+// 用于前端展示「该片是否已入库」。必须在 generateStrmFiles（会 MkdirAll）之前调用，否则全为 true。
+//
+// 同 LocalDir 的 items 共享一次 os.Stat，避免对同一剧集多集重复 IO。
+// SavePath 为空时静默跳过（与 generateStrmFiles 报错相反，本检查不应阻断流程）。
+func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, items *[]Organize115ItemResult) {
+	if items == nil || len(*items) == 0 {
+		return
+	}
+	savePath := strings.TrimSpace(dir.SavePath)
+	if savePath == "" {
+		return
+	}
+
+	existsCache := make(map[string]bool)
+	for i := range *items {
+		item := &(*items)[i]
+		targetDir := strings.TrimSpace(item.TargetDir)
+		if targetDir == "" {
+			continue
+		}
+		localDir := pathhelper.SafeFilePathJoin(savePath, targetDir)
+		item.LocalDir = localDir
+		if exists, ok := existsCache[localDir]; ok {
+			item.LocalExists = exists
+			continue
+		}
+		info, err := os.Stat(localDir)
+		exists := err == nil && info.IsDir()
+		existsCache[localDir] = exists
+		item.LocalExists = exists
+	}
 }
 
 func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, storage *model.CloudStorage, items *[]Organize115ItemResult, dryRun bool) error {

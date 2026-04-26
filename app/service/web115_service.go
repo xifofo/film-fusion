@@ -231,6 +231,32 @@ func (s *Web115Service) MoveFiles(client *driver.Pan115Client, dirID string, fil
 	return client.Move(dirID, fileIDs...)
 }
 
+// ResolveDirPathWithClient 通过 115 的 files/getid（SDK 的 DirName2CID）直接查询
+// 整个目录路径对应的 CID。
+//
+// 语义：
+//   - 路径完全存在         -> (cid, true, nil)
+//   - 路径不完全存在       -> ("", false, nil)（115 通常返回 id="0"；统一视为 miss）
+//   - cookie 失效 / 网络错误 -> ("", false, err)
+//
+// 调用方拿到 miss 时应回退到逐级 loadChildren 查找（可得到 existing_dir 与 missing_dirs）。
+func (s *Web115Service) ResolveDirPathWithClient(client *driver.Pan115Client, dir string) (string, bool, error) {
+	trimmed := strings.TrimSpace(dir)
+	if trimmed == "" || trimmed == "/" {
+		return "0", true, nil
+	}
+	resp, err := client.DirName2CID(trimmed)
+	if err != nil {
+		s.logger.Warnf("115 DirName2CID 失败 path=%q err=%v", trimmed, err)
+		return "", false, err
+	}
+	cid := strings.TrimSpace(string(resp.CategoryID))
+	if cid == "" || cid == "0" {
+		return "", false, nil
+	}
+	return cid, true, nil
+}
+
 // MkdirWithClient 使用 cookie 会话（webapi.115.com/files/add）新建文件夹。
 // 和列目录走同一套鉴权 + 浏览器指纹，避免 OpenAPI 侧的风控/重名异常。
 // 返回新目录的 cid。

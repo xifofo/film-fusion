@@ -1,0 +1,23 @@
+# 仓库元信息
+.git
+.gitignore
+.gitattributes
+
+# 系统垃圾
+.DS_Store
+**/.DS_Store
+
+# 主机上构建出的二进制（builder 阶段会自己重新编译）
+/film-fusion
+
+# 运行时数据（容器内通过 volume 挂载，不应进镜像）
+/data
+!data/.keep
+
+# 文档/编辑器
+/docs
+.idea
+.vscode
+*.log
+
+# 注意：保留 /dist —— 它是前端构建产物，Dockerfile 需要从 build context 读
