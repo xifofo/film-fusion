@@ -59,14 +59,15 @@ type FileWatcherConfig struct {
 }
 
 type EmbyConfig struct {
-	Enabled          bool            `mapstructure:"enabled"`             // 是否启用 EMBY 服务
-	URL              string          `mapstructure:"url"`                 // EMBY 服务器地址
-	APIKey           string          `mapstructure:"api_key"`             // EMBY API 密钥
-	AdminUserID      string          `mapstructure:"admin_user_id"`       // EMBY 管理员用户 ID
-	CacheTime        int             `mapstructure:"cache_time"`          // API 请求超时时间（秒）
-	AddNextMediaInfo bool            `mapstructure:"add_next_media_info"` // 是否添加下一部媒体信息
-	RunProxyPort     int             `mapstructure:"run_proxy_port"`      // 运行 Emby 代理端口
-	Cover            EmbyCoverConfig `mapstructure:"cover"`               // 媒体库封面生成器配置
+	Enabled             bool            `mapstructure:"enabled"`                // 是否启用 EMBY 服务
+	URL                 string          `mapstructure:"url"`                    // EMBY 服务器地址
+	APIKey              string          `mapstructure:"api_key"`                // EMBY API 密钥
+	AdminUserID         string          `mapstructure:"admin_user_id"`          // EMBY 管理员用户 ID
+	CacheTime           int             `mapstructure:"cache_time"`             // API 请求超时时间（秒）
+	AddCurrentMediaInfo bool            `mapstructure:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
+	AddNextMediaInfo    bool            `mapstructure:"add_next_media_info"`    // 是否添加下一部媒体信息
+	RunProxyPort        int             `mapstructure:"run_proxy_port"`         // 运行 Emby 代理端口
+	Cover               EmbyCoverConfig `mapstructure:"cover"`                  // 媒体库封面生成器配置
 }
 
 // EmbyCoverConfig 媒体库封面生成器配置
@@ -135,6 +136,9 @@ func setDefaults() {
 	viper.SetDefault("jwt.secret", "your-secret-key-change-in-production")
 	viper.SetDefault("jwt.expire_time", 24) // 24小时
 	viper.SetDefault("jwt.issuer", "film-fusion")
+
+	// Emby 默认配置
+	viper.SetDefault("emby.add_current_media_info", true)
 
 	// Emby Cover 默认配置
 	viper.SetDefault("emby.cover.enabled", false)

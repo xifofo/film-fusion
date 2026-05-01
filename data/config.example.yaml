@@ -19,6 +19,8 @@ emby:
   cache_time: 30 # 缓存直链时间，单位：分钟
   # EMBY 管理员用户 ID, add_next_media_info 为 false 时可不配置
   admin_user_id: ""
+  # 开始播放时同步补充当前媒体的播放信息（提前预热直链/缓存），关闭可降低 Emby 压力
+  add_current_media_info: true
   # 播放时提前获取下一集的媒体信息，提高播放速度，需要配置 admin_user_id
   add_next_media_info: true
   # 媒体库封面生成器

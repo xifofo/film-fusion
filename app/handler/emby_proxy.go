@@ -210,9 +210,11 @@ func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
 	c.Request.Body = io.NopCloser(bytes.NewReader(recorder.Body.Bytes()))
 
 	if err := json.Unmarshal(recorder.Body.Bytes(), &startInfo); err == nil {
-		err := h.GETPlaybackInfo(startInfo.ItemId)
-		if err != nil {
-			h.logger.Warnf("补充媒体信息失败了: %v", err)
+		if h.config.Emby.AddCurrentMediaInfo {
+			err := h.GETPlaybackInfo(startInfo.ItemId)
+			if err != nil {
+				h.logger.Warnf("补充媒体信息失败了: %v", err)
+			}
 		}
 
 		// 使用 goroutine 获取下一集的媒体信息

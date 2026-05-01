@@ -72,9 +72,18 @@ type Organize115Request struct {
 }
 
 type Organize115CookieRequest struct {
-	CloudDirectoryID uint   `json:"cloud_directory_id" binding:"required"`
-	FolderID         string `json:"folder_id" binding:"required"`
-	DryRun           bool   `json:"dry_run"`
+	CloudDirectoryID uint     `json:"cloud_directory_id" binding:"required"`
+	FolderID         string   `json:"folder_id"`
+	FolderIDs        []string `json:"folder_ids"`
+	DryRun           bool     `json:"dry_run"`
+}
+
+type Organize115CookieGroup struct {
+	FolderID string                  `json:"folder_id"`
+	Total    int                     `json:"total"`
+	DirDebug []Organize115DirDebug   `json:"dir_debug,omitempty"`
+	Items    []Organize115ItemResult `json:"items,omitempty"`
+	Error    string                  `json:"error,omitempty"`
 }
 
 type Organize115ItemResult struct {
@@ -253,6 +262,12 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		return
 	}
 
+	folderIDs := normalizeFolderIDs(req.FolderIDs, req.FolderID)
+	if len(folderIDs) == 0 {
+		h.error(c, http.StatusBadRequest, 400, "115 目录ID为空")
+		return
+	}
+
 	var dir model.CloudDirectory
 	if err := database.DB.Preload("CloudStorage").
 		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
@@ -289,24 +304,84 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		return
 	}
 
+	includeExts := parseExtensions(dir.IncludeExtensions)
+	excludeExts := parseExtensions(dir.ExcludeExtensions)
+
+	groups := make([]Organize115CookieGroup, 0, len(folderIDs))
+	totalFiles := 0
+	flatItems := make([]Organize115ItemResult, 0)
+	flatDirDebug := make([]Organize115DirDebug, 0)
+
+	for _, folderID := range folderIDs {
+		group := h.processOrganize115CookieFolder(
+			processOrganizeArgs{
+				dir:         dir,
+				storage:     storage,
+				webClient:   webClient,
+				categoryCfg: categoryCfg,
+				includeExts: includeExts,
+				excludeExts: excludeExts,
+				folderID:    folderID,
+				dryRun:      req.DryRun,
+			},
+		)
+		totalFiles += group.Total
+		flatItems = append(flatItems, group.Items...)
+		flatDirDebug = append(flatDirDebug, group.DirDebug...)
+		groups = append(groups, group)
+	}
+
+	primaryFolderID := folderIDs[0]
+
+	h.success(c, gin.H{
+		"cloud_directory_id": req.CloudDirectoryID,
+		"cloud_storage_id":   dir.CloudStorageID,
+		"folder_id":          primaryFolderID,
+		"folder_ids":         folderIDs,
+		"dry_run":            req.DryRun,
+		"total":              totalFiles,
+		"dir_debug":          flatDirDebug,
+		"items":              flatItems,
+		"groups":             groups,
+	}, "整理完成")
+}
+
+type processOrganizeArgs struct {
+	dir         model.CloudDirectory
+	storage     *model.CloudStorage
+	webClient   *driver.Pan115Client
+	categoryCfg service.MoviePilotCategoryConfig
+	includeExts []string
+	excludeExts []string
+	folderID    string
+	dryRun      bool
+}
+
+func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArgs) Organize115CookieGroup {
+	group := Organize115CookieGroup{FolderID: args.folderID}
+
+	dir := args.dir
+	storage := args.storage
+	webClient := args.webClient
+	categoryCfg := args.categoryCfg
+	includeExts := args.includeExts
+	excludeExts := args.excludeExts
+	folderID := args.folderID
+	dryRun := args.dryRun
+	minSizeMB := dir.ExcludeSmallerThanMB
+
 	results := make([]Organize115ItemResult, 0)
 	totalFiles := 0
 	limit := 1150
 	offset := 0
-	folderID := strings.TrimSpace(req.FolderID)
-	if folderID == "" {
-		h.error(c, http.StatusBadRequest, 400, "115 目录ID为空")
-		return
-	}
-	includeExts := parseExtensions(dir.IncludeExtensions)
-	excludeExts := parseExtensions(dir.ExcludeExtensions)
-	minSizeMB := dir.ExcludeSmallerThanMB
 
 	for {
 		listResp, err := h.web115Svc.GetFilesWithClient(webClient, folderID, offset, limit)
 		if err != nil {
-			h.error(c, http.StatusBadRequest, 400, "获取115文件列表失败")
-			return
+			group.Error = fmt.Sprintf("获取115文件列表失败: %v", err)
+			group.Total = totalFiles
+			group.Items = results
+			return group
 		}
 
 		for _, file := range listResp.Items {
@@ -379,43 +454,65 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		offset += limit
 	}
 
-	dirDebugs, err := h.resolveAndPrepareDirectories(storage, webClient, &results, req.DryRun)
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
-	}
+	group.Total = totalFiles
 
-	if !req.DryRun {
+	dirDebugs, err := h.resolveAndPrepareDirectories(storage, webClient, &results, dryRun)
+	if err != nil {
+		group.Error = err.Error()
+		group.Items = results
+		group.DirDebug = dirDebugs
+		return group
+	}
+	group.DirDebug = dirDebugs
+
+	if !dryRun {
 		if err := h.batchRenameAndMove(webClient, results); err != nil {
-			h.error(c, http.StatusBadRequest, 400, err.Error())
-			return
+			group.Error = err.Error()
+			group.Items = results
+			return group
 		}
 	}
 
-	if err := h.enqueueSubtitleDownloads(dir, storage, &results, req.DryRun); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
+	if err := h.enqueueSubtitleDownloads(dir, storage, &results, dryRun); err != nil {
+		group.Error = err.Error()
+		group.Items = results
+		return group
 	}
 
 	h.populateLocalLibraryStatus(dir, &results)
 
-	if err := h.generateStrmFiles(dir, &results, req.DryRun); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
+	if err := h.generateStrmFiles(dir, &results, dryRun); err != nil {
+		group.Error = err.Error()
+		group.Items = results
+		return group
 	}
-	if !req.DryRun {
+	if !dryRun {
 		h.cachePickcodeCaches(dir, results)
 	}
 
-	h.success(c, gin.H{
-		"cloud_directory_id": req.CloudDirectoryID,
-		"cloud_storage_id":   dir.CloudStorageID,
-		"folder_id":          folderID,
-		"dry_run":            req.DryRun,
-		"total":              totalFiles,
-		"dir_debug":          dirDebugs,
-		"items":              results,
-	}, "整理完成")
+	group.Items = results
+	return group
+}
+
+func normalizeFolderIDs(ids []string, fallback string) []string {
+	seen := make(map[string]struct{}, len(ids)+1)
+	out := make([]string, 0, len(ids)+1)
+	add := func(raw string) {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			return
+		}
+		if _, ok := seen[v]; ok {
+			return
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	for _, id := range ids {
+		add(id)
+	}
+	add(fallback)
+	return out
 }
 
 func buildTargetPathWithDirectory(directoryName, category string, info service.MoviePilotMediaInfo, transferName, originalName string) string {
