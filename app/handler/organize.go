@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -72,10 +73,13 @@ type Organize115Request struct {
 }
 
 type Organize115CookieRequest struct {
-	CloudDirectoryID uint     `json:"cloud_directory_id" binding:"required"`
-	FolderID         string   `json:"folder_id"`
-	FolderIDs        []string `json:"folder_ids"`
-	DryRun           bool     `json:"dry_run"`
+	CloudDirectoryID         uint     `json:"cloud_directory_id" binding:"required"`
+	FolderID                 string   `json:"folder_id"`
+	FolderIDs                []string `json:"folder_ids"`
+	DryRun                   bool     `json:"dry_run"`
+	FilenameRegexEnabled     bool     `json:"filename_regex_enabled"`
+	FilenameRegexPattern     string   `json:"filename_regex_pattern"`
+	FilenameRegexReplacement string   `json:"filename_regex_replacement"`
 }
 
 type Organize115CookieGroup struct {
@@ -89,6 +93,7 @@ type Organize115CookieGroup struct {
 type Organize115ItemResult struct {
 	FileID         string   `json:"file_id"`
 	FileName       string   `json:"file_name"`
+	RecognizeName  string   `json:"recognize_name,omitempty"`
 	PickCode       string   `json:"pickcode"`
 	MediaType      string   `json:"media_type"`
 	Category       string   `json:"category"`
@@ -306,6 +311,11 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 
 	includeExts := parseExtensions(dir.IncludeExtensions)
 	excludeExts := parseExtensions(dir.ExcludeExtensions)
+	filenameProcessor, err := newFilenameRegexProcessor(req.FilenameRegexEnabled, req.FilenameRegexPattern, req.FilenameRegexReplacement)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 
 	groups := make([]Organize115CookieGroup, 0, len(folderIDs))
 	totalFiles := 0
@@ -323,6 +333,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 				excludeExts: excludeExts,
 				folderID:    folderID,
 				dryRun:      req.DryRun,
+				filename:    filenameProcessor,
 			},
 		)
 		totalFiles += group.Total
@@ -355,6 +366,39 @@ type processOrganizeArgs struct {
 	excludeExts []string
 	folderID    string
 	dryRun      bool
+	filename    filenameRegexProcessor
+}
+
+type filenameRegexProcessor struct {
+	enabled     bool
+	regex       *regexp.Regexp
+	replacement string
+}
+
+func newFilenameRegexProcessor(enabled bool, pattern, replacement string) (filenameRegexProcessor, error) {
+	if !enabled {
+		return filenameRegexProcessor{}, nil
+	}
+	pattern = strings.TrimSpace(pattern)
+	if pattern == "" {
+		return filenameRegexProcessor{}, fmt.Errorf("文件名处理正则不能为空")
+	}
+	regex, err := regexp.Compile(pattern)
+	if err != nil {
+		return filenameRegexProcessor{}, fmt.Errorf("文件名处理正则无效: %w", err)
+	}
+	return filenameRegexProcessor{
+		enabled:     true,
+		regex:       regex,
+		replacement: replacement,
+	}, nil
+}
+
+func (p filenameRegexProcessor) apply(name string) string {
+	if !p.enabled || p.regex == nil {
+		return name
+	}
+	return p.regex.ReplaceAllString(name, p.replacement)
 }
 
 func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArgs) Organize115CookieGroup {
@@ -369,6 +413,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	folderID := args.folderID
 	dryRun := args.dryRun
 	minSizeMB := dir.ExcludeSmallerThanMB
+	filenameProcessor := args.filename
 
 	results := make([]Organize115ItemResult, 0)
 	totalFiles := 0
@@ -401,10 +446,17 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				FileName: file.Name,
 				PickCode: file.PickCode,
 			}
+			recognizeName := filenameProcessor.apply(file.Name)
+			if filenameProcessor.enabled {
+				item.RecognizeName = recognizeName
+			}
 
-			ext := strings.TrimPrefix(filepath.Ext(file.Name), ".")
+			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
+			if ext == "" {
+				ext = strings.TrimPrefix(filepath.Ext(file.Name), ".")
+			}
 
-			info, _, recErr := h.moviePilotSvc.RecognizeFile(file.Name)
+			info, _, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
 			if recErr != nil {
 				item.Error = recErr.Error()
 				continue
@@ -413,7 +465,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				continue
 			}
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(file.Name, ext)
+			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeName, ext)
 			if transErr != nil {
 				if item.Error == "" {
 					item.Error = transErr.Error()
@@ -436,7 +488,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			if !dir.ClassifyByCategory {
 				categoryForPath = ""
 			}
-			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, file.Name)
+			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, recognizeName)
 			item.TargetDir = path.Dir(item.TargetPath)
 			item.RenameTo = path.Base(item.TargetPath)
 
