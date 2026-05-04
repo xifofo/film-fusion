@@ -76,6 +76,7 @@ type Organize115CookieRequest struct {
 	CloudDirectoryID         uint     `json:"cloud_directory_id" binding:"required"`
 	FolderID                 string   `json:"folder_id"`
 	FolderIDs                []string `json:"folder_ids"`
+	FileIDs                  []string `json:"file_ids"`
 	DryRun                   bool     `json:"dry_run"`
 	FilenameRegexEnabled     bool     `json:"filename_regex_enabled"`
 	FilenameRegexPattern     string   `json:"filename_regex_pattern"`
@@ -93,6 +94,7 @@ type Organize115CookieGroup struct {
 type Organize115ItemResult struct {
 	FileID         string   `json:"file_id"`
 	FileName       string   `json:"file_name"`
+	FileSize       int64    `json:"file_size,omitempty"`
 	RecognizeName  string   `json:"recognize_name,omitempty"`
 	PickCode       string   `json:"pickcode"`
 	MediaType      string   `json:"media_type"`
@@ -272,6 +274,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "115 目录ID为空")
 		return
 	}
+	fileIDSet := normalizeFileIDSet(req.FileIDs)
 
 	var dir model.CloudDirectory
 	if err := database.DB.Preload("CloudStorage").
@@ -332,6 +335,7 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 				includeExts: includeExts,
 				excludeExts: excludeExts,
 				folderID:    folderID,
+				fileIDs:     fileIDSet,
 				dryRun:      req.DryRun,
 				filename:    filenameProcessor,
 			},
@@ -365,6 +369,7 @@ type processOrganizeArgs struct {
 	includeExts []string
 	excludeExts []string
 	folderID    string
+	fileIDs     map[string]struct{}
 	dryRun      bool
 	filename    filenameRegexProcessor
 }
@@ -411,6 +416,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	includeExts := args.includeExts
 	excludeExts := args.excludeExts
 	folderID := args.folderID
+	fileIDs := args.fileIDs
 	dryRun := args.dryRun
 	minSizeMB := dir.ExcludeSmallerThanMB
 	filenameProcessor := args.filename
@@ -433,6 +439,11 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			if !file.IsFile {
 				continue
 			}
+			if len(fileIDs) > 0 {
+				if _, ok := fileIDs[strings.TrimSpace(file.FileID)]; !ok {
+					continue
+				}
+			}
 			if !shouldProcessFileByExtensions(file.Name, includeExts, excludeExts) {
 				continue
 			}
@@ -444,6 +455,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			item := Organize115ItemResult{
 				FileID:   file.FileID,
 				FileName: file.Name,
+				FileSize: file.Size,
 				PickCode: file.PickCode,
 			}
 			recognizeName := filenameProcessor.apply(file.Name)
@@ -565,6 +577,21 @@ func normalizeFolderIDs(ids []string, fallback string) []string {
 	}
 	add(fallback)
 	return out
+}
+
+func normalizeFileIDSet(ids []string) map[string]struct{} {
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		v := strings.TrimSpace(id)
+		if v == "" {
+			continue
+		}
+		seen[v] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	return seen
 }
 
 func buildTargetPathWithDirectory(directoryName, category string, info service.MoviePilotMediaInfo, transferName, originalName string) string {
