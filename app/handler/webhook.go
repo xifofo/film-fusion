@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"film-fusion/app/config"
 	"film-fusion/app/database"
@@ -20,15 +21,17 @@ type WebhookHandler struct {
 	config       *config.Config
 	cd2NotifySvc *service.CD2NotifyService
 	md2NotifySvc *service.MoviePilot2NotifyService
+	sortNameSvc  *service.EmbySortNameService
 }
 
 // NewWebhookHandler 创建新的 WebhookHandler
-func NewWebhookHandler(log *logger.Logger, cfg *config.Config, download115Svc *service.Download115Service) *WebhookHandler {
+func NewWebhookHandler(log *logger.Logger, cfg *config.Config, download115Svc *service.Download115Service, sortNameSvc *service.EmbySortNameService) *WebhookHandler {
 	return &WebhookHandler{
 		logger:       log,
 		config:       cfg,
 		cd2NotifySvc: service.NewCD2NotifyService(log, download115Svc),
 		md2NotifySvc: service.NewMoviePilot2NotifyService(log, download115Svc),
+		sortNameSvc:  sortNameSvc,
 	}
 }
 
@@ -189,6 +192,17 @@ func (h *WebhookHandler) HandleEmbyWebhook(c *gin.Context) {
 
 // handleLibraryNew 处理新增媒体事件
 func (h *WebhookHandler) handleLibraryNew(data EmbyWebhookRequest) {
+	// SortName 拼音首字母回写：和封面任务并行，独立判断
+	h.triggerSortName(data.Item.Id, data.Item.Name)
+	// 同时处理父 Folder。Emby 的 library.new 只推 Movie/Episode 本体，
+	// 不会为它所在目录单独推送；如果不顺手把父项也写一下，
+	// 新入库电影的 Folder 壳子（SortName 默认是目录中文名）永远回不到拼音，
+	// 会让字母索引一直有中文 prefix。ProcessItem 内部会按 allowedTypes 过滤，
+	// 非 Folder/Series/BoxSet/Movie 的父项会被自动跳过，安全。
+	if data.Item.ParentId != "" && data.Item.ParentId != data.Item.Id {
+		h.triggerSortName(data.Item.ParentId, "(parent of "+data.Item.Name+")")
+	}
+
 	// 判断是否处理该事件
 	if !h.config.Server.ProcessNewMedia {
 		h.logger.Infof("新增媒体事件处理已禁用，跳过处理: %s", data.Item.Name)
@@ -208,4 +222,20 @@ func (h *WebhookHandler) handleLibraryNew(data EmbyWebhookRequest) {
 	} else {
 		h.logger.Infof("媒体处理任务已添加到队列: ItemID=%s", data.Item.Id)
 	}
+}
+
+// triggerSortName 异步触发 SortName 处理。失败仅记日志，不影响主流程。
+func (h *WebhookHandler) triggerSortName(itemID, name string) {
+	if h.sortNameSvc == nil || itemID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		// webhook 自动触发：不强制覆盖（保护用户/工具已锁定的字段）
+		res := h.sortNameSvc.ProcessItem(ctx, itemID, false)
+		if res.Err != nil {
+			h.logger.Warnf("[emby-sortname] webhook 处理失败 itemID=%s name=%s: %v", itemID, name, res.Err)
+		}
+	}()
 }

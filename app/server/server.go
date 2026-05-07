@@ -26,6 +26,7 @@ type Server struct {
 	download115Service  *service.Download115Service
 	moviePilotService   *service.MoviePilotService
 	embyCoverService    *service.EmbyCoverService
+	embySortNameService *service.EmbySortNameService
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
 	taskQueue           *service.PersistentTaskQueue
@@ -61,6 +62,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	}
 
 	embyCoverService := service.NewEmbyCoverService(cfg, log, embyClient)
+	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 
 	s := &Server{
 		gin: router,
@@ -74,6 +76,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		download115Service:  download115Service,
 		moviePilotService:   moviePilotService,
 		embyCoverService:    embyCoverService,
+		embySortNameService: embySortNameService,
 		taskQueue:           taskQueue,
 	}
 
@@ -185,12 +188,13 @@ func (s *Server) setupRoutes() {
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
-	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service)
+	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service)
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
+	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -348,6 +352,14 @@ func (s *Server) setupRoutes() {
 			embyCover.POST("/libraries/:emby_id/preview", embyCoverHandler.PreviewLibraryCover)
 			embyCover.POST("/libraries/:emby_id/generate", embyCoverHandler.GenerateLibraryCover)
 			embyCover.POST("/batch-generate", embyCoverHandler.BatchGenerate)
+		}
+
+		// Emby SortName 拼音首字母批量回填
+		embySortName := protected.Group("/emby-sortname")
+		{
+			embySortName.GET("/status", embySortNameHandler.Status)
+			embySortName.POST("/backfill", embySortNameHandler.Backfill)
+			embySortName.POST("/items/:id", embySortNameHandler.ProcessItem)
 		}
 
 		// Match302 匹配配置相关路由

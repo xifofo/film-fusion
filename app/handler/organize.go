@@ -1094,10 +1094,27 @@ func buildStrmInfo(savePath, contentPrefix, targetPath string, encodeURI bool) (
 	return strmPath, content
 }
 
+// tmdbFolderIDRegexp 匹配 MoviePilot 落盘目录约定的 `{tmdb-12345}` 标记。
+var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
+
+// extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。
+func extractTmdbIDFromName(name string) string {
+	m := tmdbFolderIDRegexp.FindStringSubmatch(name)
+	if len(m) >= 2 {
+		return m[1]
+	}
+	return ""
+}
+
 // populateLocalLibraryStatus 检查每个 item 的目标目录在本地（SavePath + TargetDir）是否已存在，
 // 用于前端展示「该片是否已入库」。必须在 generateStrmFiles（会 MkdirAll）之前调用，否则全为 true。
 //
-// 同 LocalDir 的 items 共享一次 os.Stat，避免对同一剧集多集重复 IO。
+// 判定策略（按优先级）：
+//  1. 直接 os.Stat(savePath + targetDir) 命中 → 已入库；
+//  2. 未命中且 targetDir 带 `{tmdb-<id>}` 标记，则在该 tmdb 段的父目录下扫描所有同 tmdb id 的子目录，
+//     命中即视为已入库（兼容 TMDB 改名导致目录名漂移的场景），并把 LocalDir 改写为实际目录路径。
+//
+// 同 expected LocalDir 的 items 共享一次结果，同 parent 的扫描共享一次 ReadDir，避免对同一剧集多集重复 IO。
 // SavePath 为空时静默跳过（与 generateStrmFiles 报错相反，本检查不应阻断流程）。
 func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, items *[]Organize115ItemResult) {
 	if items == nil || len(*items) == 0 {
@@ -1108,7 +1125,32 @@ func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, i
 		return
 	}
 
-	existsCache := make(map[string]bool)
+	type localStatus struct {
+		exists  bool
+		realDir string // 仅在命中 tmdb-id fallback 时填，指向实际目录
+	}
+	statusCache := make(map[string]localStatus)
+	parentScanCache := make(map[string]map[string]string) // parentDir -> {tmdbID -> 实际目录名}
+
+	scanParent := func(parentDir string) map[string]string {
+		if cached, ok := parentScanCache[parentDir]; ok {
+			return cached
+		}
+		out := make(map[string]string)
+		if entries, err := os.ReadDir(parentDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if id := extractTmdbIDFromName(e.Name()); id != "" {
+					out[id] = e.Name()
+				}
+			}
+		}
+		parentScanCache[parentDir] = out
+		return out
+	}
+
 	for i := range *items {
 		item := &(*items)[i]
 		targetDir := strings.TrimSpace(item.TargetDir)
@@ -1117,14 +1159,60 @@ func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, i
 		}
 		localDir := pathhelper.SafeFilePathJoin(savePath, targetDir)
 		item.LocalDir = localDir
-		if exists, ok := existsCache[localDir]; ok {
-			item.LocalExists = exists
+
+		if cached, ok := statusCache[localDir]; ok {
+			item.LocalExists = cached.exists
+			if cached.exists && cached.realDir != "" {
+				item.LocalDir = cached.realDir
+			}
 			continue
 		}
-		info, err := os.Stat(localDir)
-		exists := err == nil && info.IsDir()
-		existsCache[localDir] = exists
-		item.LocalExists = exists
+
+		// 1. 直接命中预期目录
+		if info, err := os.Stat(localDir); err == nil && info.IsDir() {
+			statusCache[localDir] = localStatus{exists: true}
+			item.LocalExists = true
+			continue
+		}
+
+		// 2. tmdb-id 兜底：在 tmdb 段父目录下扫描同 id 子目录
+		parts := strings.Split(targetDir, "/")
+		tmdbID := strings.TrimSpace(item.TmdbID)
+		tmdbIdx := -1
+		for j := len(parts) - 1; j >= 0; j-- {
+			id := extractTmdbIDFromName(parts[j])
+			if id == "" {
+				continue
+			}
+			if tmdbID == "" {
+				tmdbID = id
+			}
+			if id == tmdbID {
+				tmdbIdx = j
+				break
+			}
+		}
+		if tmdbID == "" || tmdbIdx < 0 {
+			statusCache[localDir] = localStatus{exists: false}
+			item.LocalExists = false
+			continue
+		}
+
+		parentRel := strings.Join(parts[:tmdbIdx], "/")
+		parentDir := pathhelper.SafeFilePathJoin(savePath, parentRel)
+		actualName, ok := scanParent(parentDir)[tmdbID]
+		if !ok || actualName == "" {
+			statusCache[localDir] = localStatus{exists: false}
+			item.LocalExists = false
+			continue
+		}
+
+		replaced := append([]string{}, parts...)
+		replaced[tmdbIdx] = actualName
+		realDir := pathhelper.SafeFilePathJoin(savePath, strings.Join(replaced, "/"))
+		statusCache[localDir] = localStatus{exists: true, realDir: realDir}
+		item.LocalExists = true
+		item.LocalDir = realDir
 	}
 }
 
