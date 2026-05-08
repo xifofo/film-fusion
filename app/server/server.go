@@ -27,6 +27,7 @@ type Server struct {
 	moviePilotService   *service.MoviePilotService
 	embyCoverService    *service.EmbyCoverService
 	embySortNameService *service.EmbySortNameService
+	embyStatsService    *service.EmbyStatsService
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
 	taskQueue           *service.PersistentTaskQueue
@@ -63,6 +64,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	embyCoverService := service.NewEmbyCoverService(cfg, log, embyClient)
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
+	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
 
 	s := &Server{
 		gin: router,
@@ -77,6 +79,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		moviePilotService:   moviePilotService,
 		embyCoverService:    embyCoverService,
 		embySortNameService: embySortNameService,
+		embyStatsService:    embyStatsService,
 		taskQueue:           taskQueue,
 	}
 
@@ -195,6 +198,7 @@ func (s *Server) setupRoutes() {
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service)
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
+	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -360,6 +364,12 @@ func (s *Server) setupRoutes() {
 			embySortName.GET("/status", embySortNameHandler.Status)
 			embySortName.POST("/backfill", embySortNameHandler.Backfill)
 			embySortName.POST("/items/:id", embySortNameHandler.ProcessItem)
+		}
+
+		// Emby 媒体库电影 / 电视剧数量统计
+		embyStats := protected.Group("/emby-stats")
+		{
+			embyStats.GET("", embyStatsHandler.GetStats)
 		}
 
 		// Match302 匹配配置相关路由
