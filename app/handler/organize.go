@@ -1210,6 +1210,17 @@ func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, i
 		replaced := append([]string{}, parts...)
 		replaced[tmdbIdx] = actualName
 		realDir := pathhelper.SafeFilePathJoin(savePath, strings.Join(replaced, "/"))
+
+		// 若 tmdb 段后还有子路径（如电视剧的 `Season XX`），必须真正 stat 才能确认该季已入库。
+		// 否则仅剧名目录（tmdb-id 匹配）存在就会误判为已入库，导致"第一季已入库、整理第二季"被错误提示。
+		if tmdbIdx < len(parts)-1 {
+			if info, err := os.Stat(realDir); err != nil || !info.IsDir() {
+				statusCache[localDir] = localStatus{exists: false}
+				item.LocalExists = false
+				continue
+			}
+		}
+
 		statusCache[localDir] = localStatus{exists: true, realDir: realDir}
 		item.LocalExists = true
 		item.LocalDir = realDir
