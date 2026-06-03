@@ -23,6 +23,7 @@ func AutoMigrate() error {
 		&model.Match302{},
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},
+		&model.OrganizeLog{},
 	)
 }
 

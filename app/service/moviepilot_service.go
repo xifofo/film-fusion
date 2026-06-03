@@ -245,6 +245,56 @@ type MoviePilotMediaInfo struct {
 	HasBeginSeason      bool
 }
 
+type MoviePilotSearchResult struct {
+	MediaType     string `json:"media_type"`
+	Title         string `json:"title"`
+	OriginalTitle string `json:"original_title,omitempty"`
+	Year          string `json:"year,omitempty"`
+	TitleYear     string `json:"title_year,omitempty"`
+	TmdbID        string `json:"tmdb_id"`
+	Category      string `json:"category,omitempty"`
+	PosterPath    string `json:"poster_path,omitempty"`
+	Overview      string `json:"overview,omitempty"`
+}
+
+func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilotSearchResult, error) {
+	keyword = strings.TrimSpace(keyword)
+	if keyword == "" {
+		return nil, errors.New("搜索关键词不能为空")
+	}
+	if count <= 0 || count > 20 {
+		count = 8
+	}
+
+	values := url.Values{}
+	values.Set("title", keyword)
+	values.Set("type", "media")
+	values.Set("page", "1")
+	values.Set("count", strconv.Itoa(count))
+
+	body, err := s.doGet("/api/v1/media/search", values)
+	if err != nil {
+		return nil, err
+	}
+
+	rawItems := extractSearchResultMaps(body)
+	results := make([]MoviePilotSearchResult, 0, len(rawItems))
+	seen := make(map[string]struct{}, len(rawItems))
+	for _, raw := range rawItems {
+		item := parseSearchResult(raw)
+		if strings.TrimSpace(item.TmdbID) == "" || strings.TrimSpace(item.Title) == "" {
+			continue
+		}
+		key := item.MediaType + ":" + item.TmdbID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		results = append(results, item)
+	}
+	return results, nil
+}
+
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
 	values := url.Values{}
 	values.Set("path", filePath)
@@ -498,6 +548,106 @@ func unwrapDataMap(body []byte) map[string]any {
 		}
 	}
 	return root
+}
+
+func extractSearchResultMaps(body []byte) []map[string]any {
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil
+	}
+	return findSearchResultMaps(root)
+}
+
+func findSearchResultMaps(value any) []map[string]any {
+	switch typed := value.(type) {
+	case []any:
+		out := make([]map[string]any, 0, len(typed))
+		for _, item := range typed {
+			if m, ok := item.(map[string]any); ok {
+				if looksLikeSearchResult(m) {
+					out = append(out, m)
+					continue
+				}
+				if nested := findSearchResultMaps(m); len(nested) > 0 {
+					out = append(out, nested...)
+				}
+			}
+		}
+		return out
+	case map[string]any:
+		for _, key := range []string{"data", "items", "list", "results", "medias", "records"} {
+			if nested := findSearchResultMaps(typed[key]); len(nested) > 0 {
+				return nested
+			}
+		}
+		if looksLikeSearchResult(typed) {
+			return []map[string]any{typed}
+		}
+	}
+	return nil
+}
+
+func looksLikeSearchResult(data map[string]any) bool {
+	if data == nil {
+		return false
+	}
+	if raw, ok := data["media_info"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			if looksLikeSearchResult(m) {
+				return true
+			}
+		}
+	}
+	return extractString(data, "tmdb_id", "tmdbId", "mediaid") != "" &&
+		extractString(data, "title", "name", "original_title", "originalTitle") != ""
+}
+
+func parseSearchResult(data map[string]any) MoviePilotSearchResult {
+	base := data
+	if raw, ok := data["media_info"]; ok {
+		if m, ok := raw.(map[string]any); ok {
+			base = m
+		}
+	}
+
+	info := parseMediaInfo(data)
+	mediaType := extractString(base, "media_type", "mediaType", "type", "type_name")
+	if mediaType == "" {
+		mediaType = info.MediaType
+	}
+	tmdbID := normalizeTmdbID(extractString(base, "tmdb_id", "tmdbId", "mediaid"))
+	if tmdbID == "" {
+		tmdbID = normalizeTmdbID(extractString(data, "tmdb_id", "tmdbId", "mediaid"))
+	}
+
+	return MoviePilotSearchResult{
+		MediaType:     mediaType,
+		Title:         info.Title,
+		OriginalTitle: extractString(base, "original_title", "originalTitle", "original_name", "originalName"),
+		Year:          info.Year,
+		TitleYear:     info.TitleYear,
+		TmdbID:        tmdbID,
+		Category:      info.Category,
+		PosterPath:    extractString(base, "poster_path", "posterPath", "poster", "image"),
+		Overview:      extractString(base, "overview", "description", "desc"),
+	}
+}
+
+func normalizeTmdbID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(value, ":"); idx >= 0 && idx < len(value)-1 {
+		value = value[idx+1:]
+	}
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+	return digits.String()
 }
 
 func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {

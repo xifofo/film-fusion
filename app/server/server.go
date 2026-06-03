@@ -28,6 +28,7 @@ type Server struct {
 	embyCoverService    *service.EmbyCoverService
 	embySortNameService *service.EmbySortNameService
 	embyStatsService    *service.EmbyStatsService
+	organizeLogCleaner  *service.OrganizeLogCleaner
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
 	taskQueue           *service.PersistentTaskQueue
@@ -80,6 +81,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		embyCoverService:    embyCoverService,
 		embySortNameService: embySortNameService,
 		embyStatsService:    embyStatsService,
+		organizeLogCleaner:  service.NewOrganizeLogCleaner(log, 0, 0),
 		taskQueue:           taskQueue,
 	}
 
@@ -119,6 +121,9 @@ func (s *Server) Start() error {
 	// 启动 Emby 封面生成定时任务调度
 	s.embyCoverService.Start()
 
+	// 启动整理日志清理器（默认 7 天保留）
+	s.organizeLogCleaner.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -141,6 +146,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止 Emby 封面生成 cron
 	s.embyCoverService.Stop()
+
+	// 停止整理日志清理器
+	if s.organizeLogCleaner != nil {
+		s.organizeLogCleaner.Stop()
+	}
 
 	// 停止Emby代理服务器
 	if s.embyProxyServer != nil {
@@ -199,6 +209,7 @@ func (s *Server) setupRoutes() {
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
+	organizeLogHandler := handler.NewOrganizeLogHandler()
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -327,6 +338,16 @@ func (s *Server) setupRoutes() {
 		{
 			organize.POST("/115", organizeHandler.Organize115)
 			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
+			organize.POST("/media-search", organizeHandler.SearchMedia)
+			organize.POST("/media-local-status", organizeHandler.CheckMediaLocalStatus)
+		}
+
+		// 整理日志（STRM 生成 / 文件下载等业务事件）
+		organizeLogs := protected.Group("/organize-logs")
+		{
+			organizeLogs.GET("", organizeLogHandler.List)
+			organizeLogs.GET("/stats", organizeLogHandler.Stats)
+			organizeLogs.POST("/clear", organizeLogHandler.Clear)
 		}
 
 		// Pickcode 缓存相关路由

@@ -234,6 +234,11 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		// 不重复下载
 		if _, err := os.Stat(savePath); err == nil {
 			s.logger.Infof("本地文件已存在，跳过下载: %s", savePath)
+			WriteOrganizeLog(s.logger, OrganizeLogEntry{
+				Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusSkipped,
+				Source: path, Target: savePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+				PickCode: pickcode, Message: "本地文件已存在",
+			})
 			return
 		}
 
@@ -241,11 +246,28 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		folderInfo, err := s.sdk115Open.GetFolderInfoByPath(context.Background(), sourceCloudPath)
 		if err != nil {
 			s.logger.Errorf("获取115Open文件夹信息失败: %v", err)
+			WriteOrganizeLog(s.logger, OrganizeLogEntry{
+				Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusFailed,
+				Source: path, Target: savePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+				PickCode: pickcode, Error: err.Error(), Message: "获取115Open文件夹信息失败",
+			})
 			return
 		}
 
 		s.logger.Debugf("获取115Open信息成功: %s", folderInfo.PickCode)
-		s.download115Svc.AddDownloadTask(cloudPath.CloudStorage.ID, folderInfo.PickCode, savePath)
+		if addErr := s.download115Svc.AddDownloadTask(cloudPath.CloudStorage.ID, folderInfo.PickCode, savePath); addErr != nil {
+			WriteOrganizeLog(s.logger, OrganizeLogEntry{
+				Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusSkipped,
+				Source: path, Target: savePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+				PickCode: folderInfo.PickCode, Message: addErr.Error(),
+			})
+		} else {
+			WriteOrganizeLog(s.logger, OrganizeLogEntry{
+				Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusSuccess,
+				Source: path, Target: savePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+				PickCode: folderInfo.PickCode, Message: "已加入下载队列",
+			})
+		}
 		return
 	}
 
@@ -284,8 +306,18 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	err = os.WriteFile(strmFilePath, []byte(content), 0777)
 	if err != nil {
 		s.logger.Errorf("创建 STRM 文件失败: %v", err)
+		WriteOrganizeLog(s.logger, OrganizeLogEntry{
+			Action: model.OrganizeActionStrmCreate, Status: model.OrganizeStatusFailed,
+			Source: path, Target: strmFilePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+			PickCode: pickcode, Error: err.Error(), Message: "写入 STRM 文件失败",
+		})
 		return
 	}
+	WriteOrganizeLog(s.logger, OrganizeLogEntry{
+		Action: model.OrganizeActionStrmCreate, Status: model.OrganizeStatusSuccess,
+		Source: path, Target: strmFilePath, CloudPathID: cloudPath.ID, CloudStorageID: cloudPath.CloudStorageID,
+		PickCode: pickcode, Message: content,
+	})
 
 	// 尽可能的缓存 pickcode
 	if pickcode != "" && cloudPath.CloudStorage.StorageType == model.StorageType115Open {

@@ -182,6 +182,8 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 		s.wg.Done()
 	}()
 
+	taskStart := time.Now()
+
 	s.logger.Infof("开始115Open下载任务: CloudStorageID=%d, PickCode=%s, SavePath=%s, 重试次数: %d/%d",
 		task.CloudStorageID, task.PickCode, task.SavePath, task.RetryCount, task.MaxRetryCount)
 
@@ -223,6 +225,18 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 	if err := s.db.Delete(&task).Error; err != nil {
 		s.logger.Errorf("删除115Open下载任务记录失败: %v", err)
 	}
+
+	var size int64
+	if fi, err := os.Stat(task.SavePath); err == nil {
+		size = fi.Size()
+	}
+	WriteOrganizeLog(s.logger, OrganizeLogEntry{
+		Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusSuccess,
+		Trigger: "download_worker",
+		Target:  task.SavePath, CloudStorageID: task.CloudStorageID, PickCode: task.PickCode,
+		DurationMS: time.Since(taskStart).Milliseconds(), SizeBytes: size,
+		Message: "下载完成",
+	})
 
 	s.logger.Infof("115Open下载任务完成并已删除记录: PickCode=%s", task.PickCode)
 }
@@ -295,6 +309,12 @@ func (s *Download115Service) handleTaskError(task *model.Download115Queue, err e
 
 	if task.Status == model.QueueStatusFailed {
 		s.logger.Errorf("任务已达最大重试次数，标记为失败: PickCode=%s, Error=%v", task.PickCode, err)
+		WriteOrganizeLog(s.logger, OrganizeLogEntry{
+			Action: model.OrganizeActionFileDownload, Status: model.OrganizeStatusFailed,
+			Trigger: "download_worker",
+			Target:  task.SavePath, CloudStorageID: task.CloudStorageID, PickCode: task.PickCode,
+			Error: err.Error(), Message: fmt.Sprintf("重试达上限 %d/%d", task.RetryCount, task.MaxRetryCount),
+		})
 	} else {
 		s.logger.Warnf("任务失败，将重试: PickCode=%s, RetryCount=%d/%d, Error=%v",
 			task.PickCode, task.RetryCount, task.MaxRetryCount, err)

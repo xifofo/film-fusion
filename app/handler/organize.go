@@ -135,6 +135,138 @@ type Organize115DirDebug struct {
 	Error       string                 `json:"error,omitempty"`
 }
 
+type MediaLookupSearchRequest struct {
+	Keyword string `json:"keyword" binding:"required"`
+	Count   int    `json:"count"`
+}
+
+type MediaLookupLocalStatusRequest struct {
+	CloudDirectoryID uint   `json:"cloud_directory_id" binding:"required"`
+	TmdbID           string `json:"tmdb_id" binding:"required"`
+	Title            string `json:"title" binding:"required"`
+	Year             string `json:"year"`
+	TitleYear        string `json:"title_year"`
+	MediaType        string `json:"media_type"`
+	Category         string `json:"category"`
+}
+
+type MediaLookupLocalStatus struct {
+	TmdbID       string `json:"tmdb_id"`
+	Title        string `json:"title"`
+	Year         string `json:"year,omitempty"`
+	MediaType    string `json:"media_type,omitempty"`
+	Category     string `json:"category,omitempty"`
+	TargetDir    string `json:"target_dir,omitempty"`
+	LocalDir     string `json:"local_dir,omitempty"`
+	LocalExists  bool   `json:"local_exists"`
+	ScanFallback bool   `json:"scan_fallback,omitempty"`
+}
+
+func (h *OrganizeHandler) SearchMedia(c *gin.Context) {
+	var req MediaLookupSearchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "搜索关键词不能为空")
+		return
+	}
+
+	results, err := h.moviePilotSvc.SearchMedia(req.Keyword, req.Count)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+
+	h.success(c, gin.H{
+		"keyword": strings.TrimSpace(req.Keyword),
+		"items":   results,
+	}, "搜索完成")
+}
+
+func (h *OrganizeHandler) CheckMediaLocalStatus(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	userID := userIDVal.(uint)
+
+	var req MediaLookupLocalStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "参数错误")
+		return
+	}
+
+	tmdbID := strings.TrimSpace(req.TmdbID)
+	if tmdbID == "" {
+		h.error(c, http.StatusBadRequest, 400, "TMDB ID 不能为空")
+		return
+	}
+
+	var dir model.CloudDirectory
+	if err := database.DB.
+		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
+		First(&dir).Error; err != nil {
+		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
+		return
+	}
+
+	info := service.MoviePilotMediaInfo{
+		MediaType: strings.TrimSpace(req.MediaType),
+		Title:     strings.TrimSpace(req.Title),
+		Year:      strings.TrimSpace(req.Year),
+		TitleYear: strings.TrimSpace(req.TitleYear),
+		TmdbID:    tmdbID,
+		Category:  strings.TrimSpace(req.Category),
+	}
+	if info.TitleYear == "" {
+		info.TitleYear = buildTitleYear(info.Title, info.Year)
+	}
+
+	if info.Category == "" {
+		if categoryCfg, err := h.moviePilotSvc.GetCategoryConfig(); err == nil {
+			info.Category = service.SelectMoviePilotCategory(info.MediaType, info, categoryCfg)
+		}
+	}
+
+	categoryForPath := info.Category
+	if !dir.ClassifyByCategory {
+		categoryForPath = ""
+	}
+	targetDir := buildMediaLookupTargetDir(dir.DirectoryName, categoryForPath, info)
+	items := []Organize115ItemResult{
+		{
+			TmdbID:    tmdbID,
+			Title:     info.Title,
+			Year:      info.Year,
+			TitleYear: info.TitleYear,
+			MediaType: info.MediaType,
+			Category:  info.Category,
+			TargetDir: targetDir,
+		},
+	}
+	h.populateLocalLibraryStatus(dir, &items)
+	item := items[0]
+	status := MediaLookupLocalStatus{
+		TmdbID:      tmdbID,
+		Title:       info.Title,
+		Year:        info.Year,
+		MediaType:   info.MediaType,
+		Category:    info.Category,
+		TargetDir:   targetDir,
+		LocalDir:    item.LocalDir,
+		LocalExists: item.LocalExists,
+	}
+
+	if !status.LocalExists {
+		if localDir, ok := findLocalDirByTmdbID(dir.SavePath, tmdbID); ok {
+			status.LocalDir = localDir
+			status.LocalExists = true
+			status.ScanFallback = true
+		}
+	}
+
+	h.success(c, status, "检查完成")
+}
+
 func (h *OrganizeHandler) Organize115(c *gin.Context) {
 	userIDVal, exists := c.Get("user_id")
 	if !exists {
@@ -601,6 +733,69 @@ func buildTargetPathWithDirectory(directoryName, category string, info service.M
 		return base
 	}
 	return path.Join("/", dirName, strings.TrimPrefix(base, "/"))
+}
+
+func buildTitleYear(title, year string) string {
+	title = strings.TrimSpace(title)
+	year = strings.TrimSpace(year)
+	if title == "" {
+		return ""
+	}
+	if year == "" || strings.Contains(title, year) {
+		return title
+	}
+	return fmt.Sprintf("%s (%s)", title, year)
+}
+
+func buildMediaLookupTargetDir(directoryName, category string, info service.MoviePilotMediaInfo) string {
+	folderName := strings.TrimSpace(info.TitleYear)
+	if folderName == "" {
+		folderName = buildTitleYear(info.Title, info.Year)
+	}
+	if folderName == "" {
+		folderName = strings.TrimSpace(info.Title)
+	}
+	if folderName == "" {
+		folderName = strings.TrimSpace(info.TmdbID)
+	}
+	if tmdbID := strings.TrimSpace(info.TmdbID); tmdbID != "" && !strings.Contains(folderName, "{tmdb-") {
+		folderName = strings.TrimRight(folderName, " ") + " {tmdb-" + tmdbID + "}"
+	}
+
+	parts := []string{"/"}
+	if dirName := strings.Trim(strings.TrimSpace(directoryName), "/"); dirName != "" {
+		parts = append(parts, dirName)
+	}
+	if cat := strings.Trim(strings.TrimSpace(category), "/"); cat != "" {
+		parts = append(parts, cat)
+	}
+	parts = append(parts, folderName)
+	return path.Join(parts...)
+}
+
+func findLocalDirByTmdbID(savePath, tmdbID string) (string, bool) {
+	savePath = strings.TrimSpace(savePath)
+	tmdbID = strings.TrimSpace(tmdbID)
+	if savePath == "" || tmdbID == "" {
+		return "", false
+	}
+
+	found := ""
+	_ = filepath.WalkDir(savePath, func(current string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.IsDir() {
+			return nil
+		}
+		if current == savePath {
+			return nil
+		}
+		if extractTmdbIDFromName(entry.Name()) == tmdbID {
+			found = current
+			return filepath.SkipAll
+		}
+		return nil
+	})
+
+	return found, found != ""
 }
 
 func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStorage, webClient *driver.Pan115Client, items *[]Organize115ItemResult, dryRun bool) ([]Organize115DirDebug, error) {

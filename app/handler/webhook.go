@@ -8,6 +8,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -41,9 +42,27 @@ func (h *WebhookHandler) CloudDrive2FileNotify(c *gin.Context) {
 	var requestBody service.Cd2FileNotifyRequest
 	if err := c.Bind(&requestBody); err != nil {
 		h.logger.Errorf("解析 clouddrive2 文件通知请求体失败: %v", err)
+		service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+			Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusFailed,
+			Trigger: model.OrganizeTriggerCD2, Error: err.Error(), Message: "解析 clouddrive2 请求体失败",
+		})
 		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 		return
 	}
+
+	// 记录接收：多条 data 合并成一条，重点存首个文件路径 + 总数
+	cd2Summary := fmt.Sprintf("items=%d", len(requestBody.Data))
+	var cd2Source, cd2Target string
+	if len(requestBody.Data) > 0 {
+		first := requestBody.Data[0]
+		cd2Source = first.SourceFile
+		cd2Target = first.DestinationFile
+		cd2Summary = fmt.Sprintf("action=%s isDir=%s items=%d", first.Action, first.IsDir, len(requestBody.Data))
+	}
+	service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+		Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusSuccess,
+		Trigger: model.OrganizeTriggerCD2, Source: cd2Source, Target: cd2Target, Message: cd2Summary,
+	})
 
 	var cloudPaths []model.CloudPath
 	err := database.DB.Where("source_type = ?", model.SourceTypeCloudDrive2).Preload("CloudStorage").Find(&cloudPaths).Error
@@ -70,9 +89,20 @@ func (h *WebhookHandler) MoviePilotV2Webhook(c *gin.Context) {
 	var requestBody service.MoviePilot2NotifyRequestData
 	if err := c.Bind(&requestBody); err != nil {
 		h.logger.Errorf("解析 movie-pilot v2 请求体失败: %v", err)
+		service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+			Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusFailed,
+			Trigger: model.OrganizeTriggerMP2, Error: err.Error(), Message: "解析 movie-pilot v2 请求体失败",
+		})
 		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 		return
 	}
+
+	service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+		Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusSuccess,
+		Trigger: model.OrganizeTriggerMP2,
+		Target:  requestBody.Data.Transferinfo.TargetItem.Path,
+		Message: fmt.Sprintf("type=%s transferType=%s success=%v", requestBody.Type, requestBody.Data.Transferinfo.TransferType, requestBody.Data.Transferinfo.Success),
+	})
 
 	jsonData, _ := json.Marshal(requestBody)
 	h.logger.Debugf("MoviePilot V2 Webhook 请求体: %s", string(jsonData))
@@ -171,9 +201,20 @@ func (h *WebhookHandler) HandleEmbyWebhook(c *gin.Context) {
 	var webhookData EmbyWebhookRequest
 	if err := json.Unmarshal(body, &webhookData); err != nil {
 		h.logger.Errorf("Emby webhook JSON 解析失败: %v", err)
+		service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+			Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusFailed,
+			Trigger: model.OrganizeTriggerWebhook, Error: err.Error(), Message: "Emby webhook JSON 解析失败",
+		})
 		c.JSON(http.StatusBadRequest, gin.H{"error": "JSON 解析失败"})
 		return
 	}
+
+	service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+		Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusSuccess,
+		Trigger: model.OrganizeTriggerWebhook,
+		Source:  webhookData.Item.Path, Target: webhookData.Item.Id,
+		Message: fmt.Sprintf("event=%s itemType=%s name=%s", webhookData.Event, webhookData.Item.Type, webhookData.Item.Name),
+	})
 
 	// 处理不同类型的事件
 	switch webhookData.Event {
