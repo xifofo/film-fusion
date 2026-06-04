@@ -209,6 +209,7 @@ func (s *Server) setupRoutes() {
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
+	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 
 	// API路由组
@@ -391,6 +392,13 @@ func (s *Server) setupRoutes() {
 		embyStats := protected.Group("/emby-stats")
 		{
 			embyStats.GET("", embyStatsHandler.GetStats)
+		}
+
+		// Emby 代理 302 重定向日志
+		embyProxyLog := protected.Group("/emby-proxy")
+		{
+			embyProxyLog.GET("/302-logs", embyProxyLogHandler.List)
+			embyProxyLog.DELETE("/302-logs", embyProxyLogHandler.Clear)
 		}
 
 		// Match302 匹配配置相关路由

@@ -11,6 +11,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"film-fusion/app/store/embyproxylog"
 	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
 	"fmt"
@@ -157,6 +158,27 @@ func (h *EmbyProxyHandler) removeQueryParams(rawURL string) string {
 	return u.String()
 }
 
+// log302 统一记录 302 重定向日志（同时写入内存环形缓冲，供前端查询）。
+func (h *EmbyProxyHandler) log302(c *gin.Context, source, target string) {
+	method := c.Request.Method
+	uri := c.Request.RequestURI
+	ua := c.Request.UserAgent()
+	remote := c.ClientIP()
+
+	h.logger.Infof("[EMBY PROXY] 302 重定向 source=%s method=%s uri=%s ua=%q remote=%s -> %s",
+		source, method, uri, ua, remote, target,
+	)
+
+	embyproxylog.Default().Append(embyproxylog.Entry{
+		Source:    source,
+		Method:    method,
+		URI:       uri,
+		UserAgent: ua,
+		RemoteIP:  remote,
+		Target:    target,
+	})
+}
+
 // ProxyRequest 代理所有Emby请求的主要处理函数
 func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	currentURI := c.Request.RequestURI
@@ -177,6 +199,7 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	// 检查缓存
 	if cacheLink, found := h.goCache.Get(cacheKey); found {
 		h.logger.Infof("命中缓存: %s", cacheLink)
+		h.log302(c, "cache", cacheLink.(string))
 		c.Redirect(http.StatusFound, cacheLink.(string))
 		return
 	}
@@ -186,6 +209,7 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	if !skip {
 		// 缓存重定向URL
 		h.goCache.Set(cacheKey, redirectURL, cache.DefaultExpiration)
+		h.log302(c, "proxyPlay", redirectURL)
 		c.Redirect(http.StatusFound, redirectURL)
 		return
 	}
