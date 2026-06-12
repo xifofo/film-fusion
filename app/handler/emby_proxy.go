@@ -31,6 +31,10 @@ import (
 	"resty.dev/v3"
 )
 
+// videoPlayURIRegex 用于识别 Emby 视频播放请求 URI
+// 命中表示这是一个播放流请求；未命中表示是其它 API/资源请求
+var videoPlayURIRegex = regexp.MustCompile(`/[Vv]ideos/(\S+)/(stream|original|master)`)
+
 // SimpleStartInfo 播放开始信息结构体
 type SimpleStartInfo struct {
 	ItemId string `json:"ItemId"`
@@ -214,8 +218,36 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 		return
 	}
 
+	// 走到这里说明没命中 302 重定向；如果是视频播放请求，单独打一条
+	// fallback 日志，方便排查"该走 302 但没走"的场景。
+	if videoPlayURIRegex.MatchString(currentURI) {
+		h.logFallback(c, "未命中 match302 / 缓存，走默认反代")
+	}
+
 	// 默认代理请求
 	h.proxy.ServeHTTP(c.Writer, c.Request)
+}
+
+// logFallback 记录"播放请求未走 302、走了默认反代"的事件。
+// 复用同一份内存环形缓冲，但 source=fallback、target 为空、reason 描述原因。
+func (h *EmbyProxyHandler) logFallback(c *gin.Context, reason string) {
+	method := c.Request.Method
+	uri := c.Request.RequestURI
+	ua := c.Request.UserAgent()
+	remote := c.ClientIP()
+
+	h.logger.Infof("[EMBY PROXY] 未走302 method=%s uri=%s ua=%q remote=%s reason=%s",
+		method, uri, ua, remote, reason,
+	)
+
+	embyproxylog.Default().Append(embyproxylog.Entry{
+		Source:    "fallback",
+		Method:    method,
+		URI:       uri,
+		UserAgent: ua,
+		RemoteIP:  remote,
+		Target:    reason,
+	})
 }
 
 // handlePlaying 处理播放会话请求

@@ -28,6 +28,7 @@ type Server struct {
 	embyCoverService    *service.EmbyCoverService
 	embySortNameService *service.EmbySortNameService
 	embyStatsService    *service.EmbyStatsService
+	embyClient          *embyhelper.EmbyClient
 	organizeLogCleaner  *service.OrganizeLogCleaner
 	fileWatcher         *filewatcher.FileWatcherManager
 	embyProxyServer     *EmbyProxyServer
@@ -81,6 +82,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		embyCoverService:    embyCoverService,
 		embySortNameService: embySortNameService,
 		embyStatsService:    embyStatsService,
+		embyClient:          embyClient,
 		organizeLogCleaner:  service.NewOrganizeLogCleaner(log, 0, 0),
 		taskQueue:           taskQueue,
 	}
@@ -205,7 +207,7 @@ func (s *Server) setupRoutes() {
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler()
-	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service)
+	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service, s.embyClient)
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)

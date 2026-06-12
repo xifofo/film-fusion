@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -32,6 +33,15 @@ type EmbyItem struct {
 	ProviderIDs  map[string]string `json:"ProviderIds,omitempty"`
 }
 
+// EmbyLookupItem 表示按外部 ID 查到的 Emby 媒体项。
+type EmbyLookupItem struct {
+	ID          string            `json:"Id"`
+	Name        string            `json:"Name"`
+	Type        string            `json:"Type"`
+	ServerID    string            `json:"ServerId"`
+	ProviderIDs map[string]string `json:"ProviderIds,omitempty"`
+}
+
 // listMediaFoldersResp /Library/MediaFolders 响应
 type listMediaFoldersResp struct {
 	Items            []EmbyLibrary `json:"Items"`
@@ -42,6 +52,11 @@ type listMediaFoldersResp struct {
 type listItemsResp struct {
 	Items            []EmbyItem `json:"Items"`
 	TotalRecordCount int        `json:"TotalRecordCount"`
+}
+
+type listLookupItemsResp struct {
+	Items            []EmbyLookupItem `json:"Items"`
+	TotalRecordCount int              `json:"TotalRecordCount"`
 }
 
 // ListLibraries 列出所有媒体库（CollectionFolder）
@@ -108,6 +123,72 @@ func (e *EmbyClient) ListLatestItems(libraryID string, limit int, includeTypes [
 		return nil, fmt.Errorf("Emby 最新项 HTTP %d: %s", r.StatusCode(), r.String())
 	}
 	return resp.Items, nil
+}
+
+// FindItemByTmdbID 根据 TMDB ID 查找 Emby 中的 Movie / Series。
+func (e *EmbyClient) FindItemByTmdbID(tmdbID, mediaType string) (*EmbyLookupItem, error) {
+	tmdbID = strings.TrimSpace(tmdbID)
+	if tmdbID == "" {
+		return nil, fmt.Errorf("tmdbID 不能为空")
+	}
+	if strings.TrimSpace(e.config.Emby.URL) == "" || strings.TrimSpace(e.config.Emby.APIKey) == "" {
+		return nil, nil
+	}
+
+	includeTypes := "Movie,Series"
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "tv", "tvshow", "series", "show", "电视剧", "剧集":
+		includeTypes = "Series"
+	case "movie", "电影":
+		includeTypes = "Movie"
+	}
+
+	endpoint := "/Items"
+	if uid := strings.TrimSpace(e.config.Emby.AdminUserID); uid != "" {
+		endpoint = "/Users/" + uid + "/Items"
+	}
+
+	var resp listLookupItemsResp
+	r, err := e.client.R().
+		SetQueryParam("Recursive", "true").
+		SetQueryParam("IncludeItemTypes", includeTypes).
+		SetQueryParam("Fields", "ProviderIds").
+		SetQueryParam("AnyProviderIdEquals", "tmdb."+tmdbID).
+		SetQueryParam("Limit", "5").
+		SetResult(&resp).
+		Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Emby TMDB 匹配失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("Emby TMDB 匹配 HTTP %d: %s", r.StatusCode(), truncate(r.String(), 256))
+	}
+
+	for i := range resp.Items {
+		if providerTmdbID(resp.Items[i].ProviderIDs) == tmdbID {
+			return &resp.Items[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// WebItemURL 返回 Emby Web 中打开 Item 的地址。
+func (e *EmbyClient) WebItemURL(itemID string) string {
+	itemID = strings.TrimSpace(itemID)
+	base := strings.TrimRight(strings.TrimSpace(e.config.Emby.URL), "/")
+	if itemID == "" || base == "" {
+		return ""
+	}
+	return base + "/web/index.html#!/item?id=" + url.QueryEscape(itemID)
+}
+
+func providerTmdbID(providerIDs map[string]string) string {
+	for key, value := range providerIDs {
+		if strings.EqualFold(strings.TrimSpace(key), "tmdb") {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // DownloadImage 拉取某个 Item 的图片字节

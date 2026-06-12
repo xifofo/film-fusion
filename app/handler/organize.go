@@ -8,6 +8,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
+	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,9 +40,10 @@ type OrganizeHandler struct {
 	web115Svc      *service.Web115Service
 	download115Svc *service.Download115Service
 	dirCache       *service.Web115DirCache
+	embyClient     *embyhelper.EmbyClient
 }
 
-func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, download115Svc *service.Download115Service) *OrganizeHandler {
+func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, download115Svc *service.Download115Service, embyClient *embyhelper.EmbyClient) *OrganizeHandler {
 	return &OrganizeHandler{
 		logger:         log,
 		sdk115Open:     sdk115.New(),
@@ -48,6 +51,7 @@ func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotSer
 		web115Svc:      service.NewWeb115Service(log),
 		download115Svc: download115Svc,
 		dirCache:       service.NewWeb115DirCache(web115DirCacheTTL),
+		embyClient:     embyClient,
 	}
 }
 
@@ -151,15 +155,18 @@ type MediaLookupLocalStatusRequest struct {
 }
 
 type MediaLookupLocalStatus struct {
-	TmdbID       string `json:"tmdb_id"`
-	Title        string `json:"title"`
-	Year         string `json:"year,omitempty"`
-	MediaType    string `json:"media_type,omitempty"`
-	Category     string `json:"category,omitempty"`
-	TargetDir    string `json:"target_dir,omitempty"`
-	LocalDir     string `json:"local_dir,omitempty"`
-	LocalExists  bool   `json:"local_exists"`
-	ScanFallback bool   `json:"scan_fallback,omitempty"`
+	TmdbID          string   `json:"tmdb_id"`
+	Title           string   `json:"title"`
+	Year            string   `json:"year,omitempty"`
+	MediaType       string   `json:"media_type,omitempty"`
+	Category        string   `json:"category,omitempty"`
+	TargetDir       string   `json:"target_dir,omitempty"`
+	LocalDir        string   `json:"local_dir,omitempty"`
+	LocalExists     bool     `json:"local_exists"`
+	ExistingSeasons []string `json:"existing_seasons,omitempty"`
+	EmbyItemID      string   `json:"emby_item_id,omitempty"`
+	EmbyURL         string   `json:"emby_url,omitempty"`
+	ScanFallback    bool     `json:"scan_fallback,omitempty"`
 }
 
 func (h *OrganizeHandler) SearchMedia(c *gin.Context) {
@@ -263,8 +270,30 @@ func (h *OrganizeHandler) CheckMediaLocalStatus(c *gin.Context) {
 			status.ScanFallback = true
 		}
 	}
+	if status.LocalExists && strings.TrimSpace(status.LocalDir) != "" {
+		status.ExistingSeasons = listExistingSeasonDirs(status.LocalDir)
+	}
+	h.populateEmbyLookupStatus(&status)
 
 	h.success(c, status, "检查完成")
+}
+
+func (h *OrganizeHandler) populateEmbyLookupStatus(status *MediaLookupLocalStatus) {
+	if h == nil || h.embyClient == nil || status == nil || strings.TrimSpace(status.TmdbID) == "" {
+		return
+	}
+
+	item, err := h.embyClient.FindItemByTmdbID(status.TmdbID, status.MediaType)
+	if err != nil {
+		h.logger.Debugf("Emby TMDB lookup failed tmdb_id=%s: %v", status.TmdbID, err)
+		return
+	}
+	if item == nil || strings.TrimSpace(item.ID) == "" {
+		return
+	}
+
+	status.EmbyItemID = item.ID
+	status.EmbyURL = h.embyClient.WebItemURL(item.ID)
 }
 
 func (h *OrganizeHandler) Organize115(c *gin.Context) {
@@ -798,6 +827,71 @@ func findLocalDirByTmdbID(savePath, tmdbID string) (string, bool) {
 	return found, found != ""
 }
 
+type localSeasonDir struct {
+	name   string
+	number int
+}
+
+func listExistingSeasonDirs(localDir string) []string {
+	localDir = strings.TrimSpace(localDir)
+	if localDir == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(localDir)
+	if err != nil {
+		return nil
+	}
+
+	seasons := make([]localSeasonDir, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		number, ok := parseSeasonDirNumber(name)
+		if !ok {
+			continue
+		}
+		seasons = append(seasons, localSeasonDir{name: name, number: number})
+	}
+
+	if len(seasons) == 0 {
+		return nil
+	}
+
+	sort.SliceStable(seasons, func(i, j int) bool {
+		if seasons[i].number != seasons[j].number {
+			return seasons[i].number < seasons[j].number
+		}
+		return seasons[i].name < seasons[j].name
+	})
+
+	names := make([]string, 0, len(seasons))
+	for _, season := range seasons {
+		names = append(names, season.name)
+	}
+	return names
+}
+
+func parseSeasonDirNumber(name string) (int, bool) {
+	matches := seasonDirRegexp.FindStringSubmatch(strings.TrimSpace(name))
+	if len(matches) == 0 {
+		return 0, false
+	}
+	for _, value := range matches[1:] {
+		if value == "" {
+			continue
+		}
+		number, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, false
+		}
+		return number, true
+	}
+	return 0, false
+}
+
 func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStorage, webClient *driver.Pan115Client, items *[]Organize115ItemResult, dryRun bool) ([]Organize115DirDebug, error) {
 	if items == nil || len(*items) == 0 {
 		return nil, nil
@@ -1291,6 +1385,9 @@ func buildStrmInfo(savePath, contentPrefix, targetPath string, encodeURI bool) (
 
 // tmdbFolderIDRegexp 匹配 MoviePilot 落盘目录约定的 `{tmdb-12345}` 标记。
 var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
+
+// seasonDirRegexp 匹配 MoviePilot 默认季目录，以及常见的 S01 / 第 1 季命名。
+var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第\s*(\d+)\s*季)$`)
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。
 func extractTmdbIDFromName(name string) string {
