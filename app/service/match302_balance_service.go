@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"sort"
 	"strconv"
@@ -347,6 +348,53 @@ func (s *BalanceAssignmentService) PreheatAssignment(ctx context.Context, req Ba
 		return nil
 	}
 	return err
+}
+
+func (s *BalanceAssignmentService) FindReadyPlaybackCacheByPath(filePath string) (*model.Match302BalanceAssignment, error) {
+	lookupPaths := balanceAssignmentLookupPaths(filePath)
+	if len(lookupPaths) == 0 {
+		return nil, nil
+	}
+
+	var assignments []model.Match302BalanceAssignment
+	if err := database.DB.Preload("Match302.CloudStorage").
+		Preload("Match302.PoolMembers.CloudStorage").
+		Preload("SourceStorage").
+		Preload("PlaybackStorage").
+		Where("status = ? AND is_source_playback = ? AND target_pickcode <> ?",
+			model.BalanceAssignmentStatusReady,
+			false,
+			"",
+		).
+		Where("(cleanup_status IS NULL OR cleanup_status NOT IN ?)", []string{
+			model.BalanceCleanupStatusCleaning,
+			model.BalanceCleanupStatusCleaned,
+		}).
+		Where("(expires_at IS NULL OR expires_at > ?)", time.Now()).
+		Where("(source_file_path IN ? OR target_path IN ?)", lookupPaths, lookupPaths).
+		Order("last_played_at DESC").
+		Order("last_ready_at DESC").
+		Order("updated_at DESC").
+		Limit(20).
+		Find(&assignments).Error; err != nil {
+		return nil, err
+	}
+
+	for i := range assignments {
+		assignment := &assignments[i]
+		if assignment.Match302 == nil || !assignment.Match302.BalanceEnabled {
+			continue
+		}
+		assignment.Match302.NormalizeBalanceDefaults()
+		if assignment.PlaybackStorage == nil || !storageUsable(*assignment.PlaybackStorage) {
+			continue
+		}
+		if strings.TrimSpace(assignment.PlaybackStorage.AccessToken) == "" && strings.TrimSpace(assignment.PlaybackStorage.Cookie) == "" {
+			continue
+		}
+		return assignment, nil
+	}
+	return nil, nil
 }
 
 func (s *BalanceAssignmentService) RetryAssignment(ctx context.Context, matchID, assignmentID uint) (*model.Match302BalanceAssignment, error) {
@@ -927,6 +975,10 @@ func (s *BalanceAssignmentService) markPlayed(assignmentID uint) {
 	_ = database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignmentID).Update("last_played_at", now).Error
 }
 
+func (s *BalanceAssignmentService) MarkAssignmentPlayed(assignmentID uint) {
+	s.markPlayed(assignmentID)
+}
+
 func (s *BalanceAssignmentService) cooldownMember(matchID, storageID uint, err error) {
 	now := time.Now()
 	until := now.Add(defaultTransferCooldown)
@@ -1056,6 +1108,42 @@ func balancePlaybackKey(itemID, mediaSourceID, remoteIP, userAgent string) strin
 		return ""
 	}
 	return itemID + "|" + mediaSourceID + "|" + remoteIP + "|" + userAgent
+}
+
+func balanceAssignmentLookupPaths(filePath string) []string {
+	rawPath := strings.TrimSpace(filePath)
+	if rawPath == "" {
+		return nil
+	}
+
+	rawValues := []string{rawPath}
+	if decoded, err := url.PathUnescape(rawPath); err == nil && decoded != rawPath {
+		rawValues = append(rawValues, decoded)
+	}
+
+	seen := map[string]bool{}
+	paths := make([]string, 0, len(rawValues)*3)
+	for _, value := range rawValues {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+
+		candidates := []string{
+			value,
+			pathhelper.EnsureLeadingSlash(value),
+			path.Clean(pathhelper.EnsureLeadingSlash(value)),
+		}
+		for _, candidate := range candidates {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" || seen[candidate] {
+				continue
+			}
+			seen[candidate] = true
+			paths = append(paths, candidate)
+		}
+	}
+	return paths
 }
 
 func activePlaybackCountsByStorage() map[uint]int {

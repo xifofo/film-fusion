@@ -377,6 +377,10 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		return embyPlayPath, baseEntry, false
 	}
 
+	if redirectURL, entry, ok := h.proxyReadyBalanceCache(c, baseEntry, embyPlayPath, itemId, mediaSourceId); ok {
+		return redirectURL, entry, false
+	}
+
 	match, matchedPath, err := h.balanceSvc.FindMatch(embyPlayPath)
 	if err != nil {
 		h.logger.Debugf("[EMBY PROXY] 路径 %s 未匹配任何 match302 规则", embyPlayPath)
@@ -425,6 +429,61 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	entry := h.buildPlaybackLogEntry(baseEntry, redirectURL, fromCache, itemId, mediaSourceId, embyPlayPath, decision)
 	h.logger.Infof("[EMBY PROXY] Match302 匹配成功，重定向到: %s", redirectURL)
 	return redirectURL, entry, false
+}
+
+func (h *EmbyProxyHandler) proxyReadyBalanceCache(c *gin.Context, baseEntry embyproxylog.Entry, embyPlayPath, itemID, mediaSourceID string) (string, embyproxylog.Entry, bool) {
+	assignment, err := h.balanceSvc.FindReadyPlaybackCacheByPath(embyPlayPath)
+	if err != nil {
+		h.logger.Warnf("[EMBY PROXY] 查询 Match302 负载均衡缓存失败 path=%s err=%v", embyPlayPath, err)
+		return "", baseEntry, false
+	}
+	if assignment == nil {
+		return "", baseEntry, false
+	}
+	if assignment.Match302 == nil || assignment.PlaybackStorage == nil {
+		h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存关联数据不完整 assignment=%d", assignment.ID)
+		return "", baseEntry, false
+	}
+
+	playbackReq := service.BalancePlaybackRequest{
+		Match:         assignment.Match302,
+		SourcePath:    assignment.SourceFilePath,
+		MatchedPath:   assignment.TargetPath,
+		EmbyItemID:    itemID,
+		MediaSourceID: mediaSourceID,
+		UserAgent:     c.Request.UserAgent(),
+		RemoteIP:      c.ClientIP(),
+	}
+	if err := h.balanceSvc.EnsureStrictStorageAllowed(assignment.Match302, assignment.PlaybackStorageID, playbackReq); err != nil {
+		h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存命中但账号并发限制不允许播放 assignment=%d err=%v", assignment.ID, err)
+		return "", baseEntry, false
+	}
+
+	redirectURL, _, err := h.getDownloadURLForStorage(*assignment.PlaybackStorage, assignment.TargetPickcode, c.Request.UserAgent())
+	if err != nil {
+		h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存命中但获取直链失败 assignment=%d err=%v", assignment.ID, err)
+		return "", baseEntry, false
+	}
+
+	h.balanceSvc.MarkAssignmentPlayed(assignment.ID)
+	decision := &service.BalancePlaybackDecision{
+		UseBalance:       true,
+		Status:           "子账号播放",
+		Match:            assignment.Match302,
+		Assignment:       assignment,
+		SourceStorage:    assignment.SourceStorage,
+		PlaybackStorage:  assignment.PlaybackStorage,
+		ActualPickCode:   assignment.TargetPickcode,
+		IsSourcePlayback: false,
+		AccountType:      "member",
+	}
+	if decision.SourceStorage == nil {
+		decision.SourceStorage = assignment.Match302.CloudStorage
+	}
+
+	entry := h.buildPlaybackLogEntry(baseEntry, redirectURL, true, itemID, mediaSourceID, embyPlayPath, decision)
+	h.logger.Infof("[EMBY PROXY] Match302 负载均衡缓存命中 assignment=%d storage=%d，重定向到: %s", assignment.ID, assignment.PlaybackStorageID, redirectURL)
+	return redirectURL, entry, true
 }
 
 func (h *EmbyProxyHandler) buildPlaybackLogEntry(base embyproxylog.Entry, target string, fromCache bool, itemID, mediaSourceID, mediaPath string, decision *service.BalancePlaybackDecision) embyproxylog.Entry {
