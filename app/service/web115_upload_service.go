@@ -2,12 +2,14 @@ package service
 
 import (
 	"crypto/md5"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +29,9 @@ const (
 	web115UploadMD5Salt            = "Qclm8MGWUv59TnrR0XPg"
 )
 
-func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Client, fileSize int64, fileName, dirID, preID, fileSHA1 string, reader io.ReadSeeker) (*driver.UploadInitResp, error) {
+type web115RangeHashFunc func(signCheck string) (string, error)
+
+func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Client, fileSize int64, fileName, dirID, preID, fileSHA1 string, readRangeHash web115RangeHashFunc) (*driver.UploadInitResp, error) {
 	if client == nil {
 		return nil, fmt.Errorf("115 client 为空")
 	}
@@ -35,18 +39,23 @@ func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Cl
 	if err != nil {
 		return nil, err
 	}
-	if ok, err := client.UploadAvailable(); !ok || err != nil {
+	if err := ensureWeb115UploadUserID(client); err != nil {
 		return nil, err
 	}
+	uploadKey, err := s.GetUploadKeyWithClient(client)
+	if err != nil {
+		return nil, err
+	}
+	client.Userkey = uploadKey
 	appVersion, err := s.GetCachedUploadAppVersion(client)
 	if err != nil {
 		return nil, err
 	}
+	fileSHA1 = strings.ToUpper(strings.TrimSpace(fileSHA1))
 
 	target := "U_1_" + dirID
 	fileSizeStr := strconv.FormatInt(fileSize, 10)
 	form := url.Values{}
-	form.Set("appid", "0")
 	form.Set("appversion", appVersion)
 	form.Set("userid", strconv.FormatInt(client.UserID, 10))
 	form.Set("userkey", client.Userkey)
@@ -54,14 +63,12 @@ func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Cl
 	form.Set("filesize", fileSizeStr)
 	form.Set("fileid", fileSHA1)
 	form.Set("target", target)
-	form.Set("sign_key", "")
-	form.Set("sign_val", "")
-	form.Set("sig", client.GenerateSignature(fileSHA1, target))
+	form.Set("sig", generateWeb115UploadSignature(client.Userkey, form.Get("userid"), fileSHA1, target))
 	form.Set("topupload", "true")
 
 	signKey, signVal := "", ""
 	for {
-		now := driver.NowMilli()
+		now := driver.Now()
 		encodedToken, err := cipher.EncodeToken(now.ToInt64())
 		if err != nil {
 			return nil, err
@@ -69,10 +76,10 @@ func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Cl
 
 		form.Set("t", now.String())
 		form.Set("token", generateWeb115UploadToken(client, appVersion, fileSHA1, preID, now.String(), fileSizeStr, signKey, signVal))
-		form.Set("sign_key", signKey)
-		form.Set("sign_val", signVal)
+		setOptionalFormValue(form, "sign_key", signKey)
+		setOptionalFormValue(form, "sign_val", signVal)
 
-		encrypted, err := cipher.Encrypt([]byte(form.Encode()))
+		encrypted, err := cipher.Encrypt([]byte(encodeWeb115UploadForm(form)))
 		if err != nil {
 			return nil, err
 		}
@@ -84,12 +91,89 @@ func (s *Web115Service) RapidUploadWithP115ClientVersion(client *driver.Pan115Cl
 			result.SHA1 = fileSHA1
 			return result, nil
 		}
+		if readRangeHash == nil {
+			return nil, fmt.Errorf("秒传需要二次验证 range hash，但未提供读取函数")
+		}
 		signKey = result.SignKey
-		signVal, err = client.UploadDigestRange(reader, result.SignCheck)
+		signVal, err = readRangeHash(result.SignCheck)
 		if err != nil {
 			return nil, fmt.Errorf("秒传二次验证 range hash 失败: %w", err)
 		}
+		signVal = strings.ToUpper(strings.TrimSpace(signVal))
+		if signVal == "" {
+			return nil, fmt.Errorf("秒传二次验证 range hash 为空")
+		}
 	}
+}
+
+func ensureWeb115UploadUserID(client *driver.Pan115Client) error {
+	if client == nil {
+		return fmt.Errorf("115 client 为空")
+	}
+	if client.UserID > 0 {
+		return nil
+	}
+	if client.Client != nil {
+		if credential, err := parse115Credential(client.Client.Header.Get("Cookie")); err == nil {
+			if uid, err := parse115UID(credential.UID); err == nil {
+				client.UserID = uid
+				return nil
+			}
+		}
+	}
+	if ok, err := client.UploadAvailable(); !ok || err != nil {
+		if err != nil {
+			return fmt.Errorf("115 用户 UID 缺失，且自动获取上传信息失败: %w", err)
+		}
+		return fmt.Errorf("115 用户 UID 缺失，且自动获取上传信息不可用")
+	}
+	if client.UserID <= 0 {
+		return fmt.Errorf("115 用户 UID 缺失")
+	}
+	return nil
+}
+
+func hashWeb115RangeSHA1(reader io.ReadSeeker, rangeSpec string) (string, error) {
+	var start, end int64
+	if _, err := fmt.Sscanf(rangeSpec, "%d-%d", &start, &end); err != nil {
+		return "", err
+	}
+	if end < start {
+		return "", fmt.Errorf("invalid range: %s", rangeSpec)
+	}
+	if _, err := reader.Seek(start, io.SeekStart); err != nil {
+		return "", err
+	}
+	hash := sha1.New()
+	if _, err := io.CopyN(hash, reader, end-start+1); err != nil {
+		return "", err
+	}
+	return strings.ToUpper(hex.EncodeToString(hash.Sum(nil))), nil
+}
+
+func setOptionalFormValue(form url.Values, key, value string) {
+	if strings.TrimSpace(value) == "" {
+		form.Del(key)
+		return
+	}
+	form.Set(key, value)
+}
+
+func encodeWeb115UploadForm(form url.Values) string {
+	keys := make([]string, 0, len(form))
+	for key, values := range form {
+		if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	values := make(url.Values, len(keys))
+	for _, key := range keys {
+		values.Set(key, form.Get(key))
+	}
+	return values.Encode()
 }
 
 func (s *Web115Service) postWeb115UploadInit(client *driver.Pan115Client, cipher *ec115.EcdhCipher, appVersion, encodedToken string, encrypted []byte) (*driver.UploadInitResp, error) {
@@ -114,6 +198,45 @@ func (s *Web115Service) postWeb115UploadInit(client *driver.Pan115Client, cipher
 		return nil, err
 	}
 	return parseWeb115UploadInitResponse(cipher, bodyBytes)
+}
+
+func (s *Web115Service) GetUploadKeyWithClient(client *driver.Pan115Client) (string, error) {
+	if client == nil {
+		return "", fmt.Errorf("115 client 为空")
+	}
+	var result struct {
+		State   bool             `json:"state"`
+		Code    int              `json:"code"`
+		Errno   driver.StringInt `json:"errno"`
+		ErrNo   int              `json:"errNo"`
+		Error   string           `json:"error"`
+		Message string           `json:"message"`
+		Msg     string           `json:"msg"`
+		Data    struct {
+			Userkey string `json:"userkey"`
+		} `json:"data"`
+	}
+
+	resp, err := client.NewRequest().
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&result).
+		Get("https://proapi.115.com/android/2.0/user/upload_key")
+	if err != nil {
+		return "", err
+	}
+	raw := ""
+	if resp != nil {
+		raw = resp.String()
+	}
+	if !result.State || result.Code != 0 || int(result.Errno) != 0 || result.ErrNo != 0 {
+		msg := firstNonEmptyString(result.Message, result.Msg, result.Error, raw)
+		return "", fmt.Errorf("获取 115 upload_key 失败 code=%d errno=%d errNo=%d msg=%s", result.Code, int(result.Errno), result.ErrNo, msg)
+	}
+	uploadKey := strings.TrimSpace(result.Data.Userkey)
+	if uploadKey == "" {
+		return "", fmt.Errorf("获取 115 upload_key 失败：userkey 为空")
+	}
+	return uploadKey, nil
 }
 
 func (s *Web115Service) GetCachedUploadAppVersion(client *driver.Pan115Client) (string, error) {
@@ -212,6 +335,15 @@ func (s *Web115Service) FetchOfficialUploadAppVersion(client *driver.Pan115Clien
 func web115UploadUserAgent(appVersion string) string {
 	version := strings.TrimSpace(appVersion)
 	return fmt.Sprintf("Mozilla/5.0 115disk/%s 115Browser/%s 115wangpan_android/%s", version, version, version)
+}
+
+func generateWeb115UploadSignature(userKey, userID, fileID, target string) string {
+	inner := sha1.Sum([]byte(userID + fileID + target + "0"))
+	outer := sha1.New()
+	outer.Write([]byte(userKey))
+	outer.Write([]byte(hex.EncodeToString(inner[:])))
+	outer.Write([]byte("000000"))
+	return strings.ToUpper(hex.EncodeToString(outer.Sum(nil)))
 }
 
 func generateWeb115UploadToken(client *driver.Pan115Client, appVersion, fileID, preID, timeStamp, fileSize, signKey, signVal string) string {

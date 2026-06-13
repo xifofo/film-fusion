@@ -186,11 +186,15 @@ const web115BrowserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWe
 
 func (s *Web115Service) NewClient(cookie string) (*driver.Pan115Client, error) {
 	cookie = normalizeCookie(cookie)
-	if _, err := parse115Credential(cookie); err != nil {
+	credential, err := parse115Credential(cookie)
+	if err != nil {
 		return nil, err
 	}
 
 	client := driver.New(driver.UA(web115BrowserUA))
+	if uid, err := parse115UID(credential.UID); err == nil {
+		client.UserID = uid
+	}
 	client.Client.
 		SetCookieJar(nil).
 		SetHeader("Cookie", cookie).
@@ -376,6 +380,24 @@ func parse115Credential(cookie string) (*driver.Credential, error) {
 	}
 
 	return cred, nil
+}
+
+func parse115UID(uid string) (int64, error) {
+	uid = strings.Trim(strings.TrimSpace(uid), `"'`)
+	if parts := strings.Split(uid, "_"); len(parts) > 0 {
+		uid = strings.TrimSpace(parts[0])
+	}
+	if uid == "" {
+		return 0, fmt.Errorf("115 UID 为空")
+	}
+	parsed, err := strconv.ParseInt(uid, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("115 UID 非数字: %q", uid)
+	}
+	if parsed <= 0 {
+		return 0, fmt.Errorf("115 UID 无效: %q", uid)
+	}
+	return parsed, nil
 }
 
 func normalizeCookie(cookie string) string {

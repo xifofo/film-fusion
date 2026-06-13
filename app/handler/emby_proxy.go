@@ -196,7 +196,7 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	}
 
 	// 尝试代理播放请求
-	redirectURL, logEntry, skip := h.proxyPlay(c)
+	redirectURL, logEntry, skip, fallbackReason := h.proxyPlay(c)
 	if !skip {
 		h.log302Entry(logEntry)
 		c.Redirect(http.StatusFound, redirectURL)
@@ -206,7 +206,10 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	// 走到这里说明没命中 302 重定向；如果是视频播放请求，单独打一条
 	// fallback 日志，方便排查"该走 302 但没走"的场景。
 	if videoPlayURIRegex.MatchString(currentURI) {
-		h.logFallback(c, "未命中 match302 / 缓存，走默认反代")
+		if strings.TrimSpace(fallbackReason) == "" {
+			fallbackReason = "未命中 match302 / 缓存，走默认反代"
+		}
+		h.logFallback(c, fallbackReason)
 	}
 
 	// 默认代理请求
@@ -382,8 +385,8 @@ func stringValue(payload map[string]any, keys ...string) string {
 	return ""
 }
 
-// proxyPlay 代理播放请求，返回重定向URL、日志条目和是否跳过标志
-func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry, bool) {
+// proxyPlay 代理播放请求，返回重定向URL、日志条目、是否跳过和跳过原因。
+func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry, bool, string) {
 	currentURI := c.Request.RequestURI
 	baseEntry := embyproxylog.Entry{
 		Method:    c.Request.Method,
@@ -398,7 +401,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 
 	if len(matches) < 1 {
 		h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求 URI 不匹配: %s", currentURI)
-		return "", baseEntry, true
+		return "", baseEntry, true, "不是 Emby 视频播放请求"
 	}
 
 	// 开始计时
@@ -413,7 +416,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 
 	if err != nil {
 		h.logger.Errorf("获取 EmbyItems 错误: %v", err)
-		return "", baseEntry, true
+		return "", baseEntry, true, "获取 EmbyItems 失败: " + err.Error()
 	}
 
 	h.logger.Infof("[EMBY PROXY] Request URI: %s", currentURI)
@@ -430,17 +433,17 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		baseEntry.ItemID = itemId
 		baseEntry.MediaSourceID = mediaSourceId
 		baseEntry.MediaPath = embyPlayPath
-		return embyPlayPath, baseEntry, false
+		return embyPlayPath, baseEntry, false, ""
 	}
 
 	if redirectURL, entry, ok := h.proxyReadyBalanceCache(c, baseEntry, embyPlayPath, itemId, mediaSourceId); ok {
-		return redirectURL, entry, false
+		return redirectURL, entry, false, ""
 	}
 
 	match, matchedPath, err := h.balanceSvc.FindMatch(embyPlayPath)
 	if err != nil {
 		h.logger.Debugf("[EMBY PROXY] 路径 %s 未匹配任何 match302 规则", embyPlayPath)
-		return "", baseEntry, true
+		return "", baseEntry, true, "路径未匹配任何 match302 规则: " + embyPlayPath
 	}
 
 	playbackReq := service.BalancePlaybackRequest{
@@ -455,18 +458,18 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	decision, err := h.balanceSvc.ResolvePlayback(context.Background(), playbackReq)
 	if err != nil {
 		h.logger.Errorf("[EMBY PROXY] Match302 负载均衡决策失败: %v", err)
-		return "", baseEntry, true
+		return "", baseEntry, true, "Match302 负载均衡决策失败: " + err.Error()
 	}
 
 	redirectURL, fromCache, err := h.getDownloadURLForStorage(*decision.PlaybackStorage, decision.ActualPickCode, c.Request.UserAgent())
 	if err != nil && decision.UseBalance && !decision.IsSourcePlayback {
 		if decision.SourceStorage == nil {
 			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，源账号信息缺失，无法回退: %v", err)
-			return "", baseEntry, true
+			return "", baseEntry, true, "获取子账号直链失败，源账号信息缺失: " + err.Error()
 		}
 		if limitErr := h.balanceSvc.EnsureStrictStorageAllowed(decision.Match, decision.SourceStorage.ID, playbackReq); limitErr != nil {
 			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，但严格模式不允许回退源账号: %v", limitErr)
-			return "", baseEntry, true
+			return "", baseEntry, true, "获取子账号直链失败，严格模式不允许回退源账号: " + limitErr.Error()
 		}
 		h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，回退源账号: %v", err)
 		decision.PlaybackStorage = decision.SourceStorage
@@ -479,12 +482,12 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	}
 	if err != nil {
 		h.logger.Errorf("[EMBY PROXY] 获取下载URL失败: %v", err)
-		return "", baseEntry, true
+		return "", baseEntry, true, "获取下载URL失败: " + err.Error()
 	}
 
 	entry := h.buildPlaybackLogEntry(baseEntry, redirectURL, fromCache, itemId, mediaSourceId, embyPlayPath, decision)
 	h.logger.Infof("[EMBY PROXY] Match302 匹配成功，重定向到: %s", redirectURL)
-	return redirectURL, entry, false
+	return redirectURL, entry, false, ""
 }
 
 func (h *EmbyProxyHandler) proxyReadyBalanceCache(c *gin.Context, baseEntry embyproxylog.Entry, embyPlayPath, itemID, mediaSourceID string) (string, embyproxylog.Entry, bool) {

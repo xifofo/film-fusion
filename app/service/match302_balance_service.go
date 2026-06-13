@@ -559,12 +559,15 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 		}, nil
 	}
 
-	downloadInfo, err := fromClient.DownloadWithUA(sourceInfo.PickCode, web115BrowserUA)
-	if err != nil {
-		return transferSingleResult{}, fmt.Errorf("获取源账号直链失败: %w", err)
+	rangeHash := func(signCheck string) (string, error) {
+		downloadInfo, err := s.web115Svc.DownloadForP115Transfer(ctx, source.AccessToken, fromClient, sourceInfo)
+		if err != nil {
+			return "", fmt.Errorf("获取源账号直链失败: %w", err)
+		}
+		reader := newHTTPRangeReadSeeker(downloadInfo.Url.Url, downloadInfo.Header, sourceInfo.Size)
+		return hashWeb115RangeSHA1(reader, signCheck)
 	}
-	reader := newHTTPRangeReadSeeker(downloadInfo.Url.Url, downloadInfo.Header, sourceInfo.Size)
-	uploadResp, err := s.web115Svc.RapidUploadWithP115ClientVersion(toClient, sourceInfo.Size, targetName, targetDirID, "", sourceInfo.SHA1, reader)
+	uploadResp, err := s.web115Svc.RapidUploadWithP115ClientVersion(toClient, sourceInfo.Size, targetName, targetDirID, "", sourceInfo.SHA1, rangeHash)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("秒传请求失败: %w", err)
 	}
@@ -1309,7 +1312,7 @@ func (r *httpRangeReadSeeker) Read(p []byte) (int, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
-		return 0, fmt.Errorf("源直链不支持 Range 请求: HTTP %d", resp.StatusCode)
+		return 0, fmt.Errorf("源直链不支持 Range 请求: HTTP %d range=bytes=%d-%d", resp.StatusCode, r.offset, end)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
