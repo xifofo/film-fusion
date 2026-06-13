@@ -18,22 +18,23 @@ import (
 
 // Server 表示 HTTP 服务器
 type Server struct {
-	Config              *config.Config
-	Logger              *logger.Logger
-	gin                 *gin.Engine
-	http                *http.Server
-	tokenRefreshService *service.TokenRefreshService
-	download115Service  *service.Download115Service
-	moviePilotService   *service.MoviePilotService
-	embyCoverService    *service.EmbyCoverService
-	embySortNameService *service.EmbySortNameService
-	embyStatsService    *service.EmbyStatsService
-	balanceCleanupSvc   *service.BalanceCleanupService
-	embyClient          *embyhelper.EmbyClient
-	organizeLogCleaner  *service.OrganizeLogCleaner
-	fileWatcher         *filewatcher.FileWatcherManager
-	embyProxyServer     *EmbyProxyServer
-	taskQueue           *service.PersistentTaskQueue
+	Config                 *config.Config
+	Logger                 *logger.Logger
+	gin                    *gin.Engine
+	http                   *http.Server
+	tokenRefreshService    *service.TokenRefreshService
+	web115KeepAliveService *service.Web115KeepAliveService
+	download115Service     *service.Download115Service
+	moviePilotService      *service.MoviePilotService
+	embyCoverService       *service.EmbyCoverService
+	embySortNameService    *service.EmbySortNameService
+	embyStatsService       *service.EmbyStatsService
+	balanceCleanupSvc      *service.BalanceCleanupService
+	embyClient             *embyhelper.EmbyClient
+	organizeLogCleaner     *service.OrganizeLogCleaner
+	fileWatcher            *filewatcher.FileWatcherManager
+	embyProxyServer        *EmbyProxyServer
+	taskQueue              *service.PersistentTaskQueue
 }
 
 // NewServer 创建一个新的 Server 实例
@@ -75,18 +76,19 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 			Addr:    ":" + cfg.Server.Port,
 			Handler: router,
 		},
-		Config:              cfg,
-		Logger:              log,
-		tokenRefreshService: service.NewTokenRefreshService(log),
-		download115Service:  download115Service,
-		moviePilotService:   moviePilotService,
-		embyCoverService:    embyCoverService,
-		embySortNameService: embySortNameService,
-		embyStatsService:    embyStatsService,
-		balanceCleanupSvc:   service.NewBalanceCleanupService(log),
-		embyClient:          embyClient,
-		organizeLogCleaner:  service.NewOrganizeLogCleaner(log, 0, 0),
-		taskQueue:           taskQueue,
+		Config:                 cfg,
+		Logger:                 log,
+		tokenRefreshService:    service.NewTokenRefreshService(log),
+		web115KeepAliveService: service.NewWeb115KeepAliveService(log),
+		download115Service:     download115Service,
+		moviePilotService:      moviePilotService,
+		embyCoverService:       embyCoverService,
+		embySortNameService:    embySortNameService,
+		embyStatsService:       embyStatsService,
+		balanceCleanupSvc:      service.NewBalanceCleanupService(log),
+		embyClient:             embyClient,
+		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
+		taskQueue:              taskQueue,
 	}
 
 	// 设置路由
@@ -115,6 +117,9 @@ func (s *Server) Start() error {
 
 	// 启动令牌刷新服务
 	s.tokenRefreshService.Start()
+
+	// 启动 115 cookie 保活服务
+	s.web115KeepAliveService.Start()
 
 	// 启动115Open下载服务
 	s.download115Service.StartWorkers()
@@ -147,6 +152,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
+
+	// 停止 115 cookie 保活服务
+	s.web115KeepAliveService.Stop()
 
 	// 停止 MoviePilot 令牌刷新服务
 	s.moviePilotService.Stop()
@@ -210,7 +218,7 @@ func (s *Server) setupRoutes() {
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
-	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger)
+	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
@@ -336,6 +344,9 @@ func (s *Server) setupRoutes() {
 		web115 := protected.Group("/115-cookie")
 		{
 			web115.POST("/dirs", web115CookieHandler.ListDirectories)
+			// cookie 保活：手动换端续期 + 状态查询
+			web115.POST("/keepalive/refresh", web115CookieHandler.RefreshCookie)
+			web115.GET("/keepalive/status", web115CookieHandler.KeepaliveStatus)
 		}
 
 		// STRM 相关路由
