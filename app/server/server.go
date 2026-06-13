@@ -28,6 +28,7 @@ type Server struct {
 	embyCoverService    *service.EmbyCoverService
 	embySortNameService *service.EmbySortNameService
 	embyStatsService    *service.EmbyStatsService
+	balanceCleanupSvc   *service.BalanceCleanupService
 	embyClient          *embyhelper.EmbyClient
 	organizeLogCleaner  *service.OrganizeLogCleaner
 	fileWatcher         *filewatcher.FileWatcherManager
@@ -82,6 +83,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		embyCoverService:    embyCoverService,
 		embySortNameService: embySortNameService,
 		embyStatsService:    embyStatsService,
+		balanceCleanupSvc:   service.NewBalanceCleanupService(log),
 		embyClient:          embyClient,
 		organizeLogCleaner:  service.NewOrganizeLogCleaner(log, 0, 0),
 		taskQueue:           taskQueue,
@@ -126,6 +128,9 @@ func (s *Server) Start() error {
 	// 启动整理日志清理器（默认 7 天保留）
 	s.organizeLogCleaner.Start()
 
+	// 启动 Match302 子账号缓存清理器
+	s.balanceCleanupSvc.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -152,6 +157,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// 停止整理日志清理器
 	if s.organizeLogCleaner != nil {
 		s.organizeLogCleaner.Stop()
+	}
+
+	if s.balanceCleanupSvc != nil {
+		s.balanceCleanupSvc.Stop()
 	}
 
 	// 停止Emby代理服务器
@@ -206,7 +215,7 @@ func (s *Server) setupRoutes() {
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
-	match302Handler := handler.NewMatch302Handler()
+	match302Handler := handler.NewMatch302Handler(s.Logger)
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service, s.embyClient)
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
@@ -401,6 +410,7 @@ func (s *Server) setupRoutes() {
 		{
 			embyProxyLog.GET("/302-logs", embyProxyLogHandler.List)
 			embyProxyLog.DELETE("/302-logs", embyProxyLogHandler.Clear)
+			embyProxyLog.GET("/balance-status", embyProxyLogHandler.BalanceStatus)
 		}
 
 		// Match302 匹配配置相关路由
@@ -408,16 +418,24 @@ func (s *Server) setupRoutes() {
 		{
 			// 基础CRUD操作
 			match302.GET("/", match302Handler.GetMatch302s)
-			match302.GET("/:id", match302Handler.GetMatch302)
 			match302.POST("/", match302Handler.CreateMatch302)
-			match302.PUT("/:id", match302Handler.UpdateMatch302)
-			match302.DELETE("/:id", match302Handler.DeleteMatch302)
 
 			// 批量操作
 			match302.POST("/batch/delete", match302Handler.BatchDeleteMatch302s)
 
 			// 统计信息
 			match302.GET("/stats", match302Handler.GetMatch302Stats)
+
+			// 负载均衡 assignment
+			match302.GET("/:id/assignments", match302Handler.GetAssignments)
+			match302.POST("/:id/assignments/:assignment_id/retry", match302Handler.RetryAssignment)
+			match302.POST("/:id/assignments/:assignment_id/cleanup", match302Handler.CleanupAssignment)
+			match302.POST("/:id/assignments/:assignment_id/extend-retention", match302Handler.ExtendAssignmentRetention)
+			match302.PATCH("/:id/balance-enabled", match302Handler.UpdateMatch302BalanceEnabled)
+
+			match302.GET("/:id", match302Handler.GetMatch302)
+			match302.PUT("/:id", match302Handler.UpdateMatch302)
+			match302.DELETE("/:id", match302Handler.DeleteMatch302)
 		}
 	}
 }

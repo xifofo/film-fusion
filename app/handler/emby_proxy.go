@@ -11,6 +11,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"film-fusion/app/service"
 	"film-fusion/app/store/embyproxylog"
 	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
@@ -21,6 +22,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +61,8 @@ type EmbyProxyHandler struct {
 	proxy      *httputil.ReverseProxy
 	goCache    *cache.Cache
 	sdk115Open *sdk115.Client
+	balanceSvc *service.BalanceAssignmentService
+	web115Svc  *service.Web115Service
 }
 
 // NewEmbyProxyHandler 创建新的Emby代理处理器
@@ -69,6 +73,8 @@ func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger) *EmbyProxyHandl
 		log.Errorf("解析Emby URL失败: %v", err)
 		return nil
 	}
+
+	balanceSvc := service.NewBalanceAssignmentService(log)
 
 	// 创建反向代理
 	proxy := httputil.NewSingleHostReverseProxy(embyURL)
@@ -83,39 +89,6 @@ func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger) *EmbyProxyHandl
 		req.Header.Set("X-Forwarded-Host", req.Host)
 	}
 
-	// 自定义ModifyResponse函数来修改响应
-	// proxy.ModifyResponse = func(resp *http.Response) error {
-
-	// 	isPlaybackInfoURI := embyhelper.IsPlaybackInfoURI(resp.Request.RequestURI)
-
-	// 	// 判断是否匹配特定的 URI 减少不必要的读取
-	// 	if !isPlaybackInfoURI {
-	// 		return nil
-	// 	}
-
-	// 	// 读取原始响应体
-	// 	body, err := io.ReadAll(resp.Body)
-	// 	if err != nil {
-	// 		log.Errorf("读取响应体失败: %v", err)
-	// 		return err
-	// 	}
-
-	// 	modifiedBody := body
-
-	// 	if isPlaybackInfoURI {
-	// 		modifiedBody, err = embyhelper.ProxyPlaybackInfo(modifiedBody, resp.Request.RequestURI)
-	// 		if err != nil {
-	// 			return err
-	// 		}
-	// 	}
-
-	// 	resp.Body = io.NopCloser(strings.NewReader(string(modifiedBody)))
-	// 	resp.ContentLength = int64(len(modifiedBody))
-	// 	resp.Header.Set("Content-Length", fmt.Sprint(len(modifiedBody)))
-
-	// 	return nil
-	// }
-
 	// 错误处理
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Errorf("Emby代理请求失败: %v", err)
@@ -126,13 +99,17 @@ func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger) *EmbyProxyHandl
 	cacheExpiration := time.Duration(cfg.Emby.CacheTime) * time.Minute
 	goCache := cache.New(cacheExpiration, 10*time.Minute)
 
-	return &EmbyProxyHandler{
+	h := &EmbyProxyHandler{
 		config:     cfg,
 		logger:     log,
 		proxy:      proxy,
 		goCache:    goCache,
 		sdk115Open: sdk115.New(),
+		balanceSvc: balanceSvc,
+		web115Svc:  service.NewWeb115Service(log),
 	}
+	proxy.ModifyResponse = h.modifyResponse
+	return h
 }
 
 // md5CacheKey 生成MD5缓存键
@@ -173,7 +150,7 @@ func (h *EmbyProxyHandler) log302(c *gin.Context, source, target string) {
 		source, method, uri, ua, remote, target,
 	)
 
-	embyproxylog.Default().Append(embyproxylog.Entry{
+	h.log302Entry(embyproxylog.Entry{
 		Source:    source,
 		Method:    method,
 		URI:       uri,
@@ -183,10 +160,26 @@ func (h *EmbyProxyHandler) log302(c *gin.Context, source, target string) {
 	})
 }
 
+func (h *EmbyProxyHandler) log302Entry(entry embyproxylog.Entry) {
+	if entry.Timestamp.IsZero() {
+		entry.Timestamp = time.Now()
+	}
+	h.logger.Infof("[EMBY PROXY] 302 source=%s method=%s uri=%s status=%s assignment=%d actual_storage=%d fallback=%s -> %s",
+		entry.Source,
+		entry.Method,
+		entry.URI,
+		entry.BalanceStatus,
+		entry.AssignmentID,
+		entry.ActualStorageID,
+		entry.FallbackReason,
+		entry.Target,
+	)
+	embyproxylog.Default().Append(entry)
+}
+
 // ProxyRequest 代理所有Emby请求的主要处理函数
 func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 	currentURI := c.Request.RequestURI
-	cacheKey := h.md5CacheKey(fmt.Sprintf("%s-%s", h.removeQueryParams(currentURI), c.Request.UserAgent()))
 
 	u, err := url.Parse(currentURI)
 	if err == nil {
@@ -200,20 +193,10 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 		}
 	}
 
-	// 检查缓存
-	if cacheLink, found := h.goCache.Get(cacheKey); found {
-		h.logger.Infof("命中缓存: %s", cacheLink)
-		h.log302(c, "cache", cacheLink.(string))
-		c.Redirect(http.StatusFound, cacheLink.(string))
-		return
-	}
-
 	// 尝试代理播放请求
-	redirectURL, skip := h.proxyPlay(c)
+	redirectURL, logEntry, skip := h.proxyPlay(c)
 	if !skip {
-		// 缓存重定向URL
-		h.goCache.Set(cacheKey, redirectURL, cache.DefaultExpiration)
-		h.log302(c, "proxyPlay", redirectURL)
+		h.log302Entry(logEntry)
 		c.Redirect(http.StatusFound, redirectURL)
 		return
 	}
@@ -240,14 +223,65 @@ func (h *EmbyProxyHandler) logFallback(c *gin.Context, reason string) {
 		method, uri, ua, remote, reason,
 	)
 
-	embyproxylog.Default().Append(embyproxylog.Entry{
-		Source:    "fallback",
-		Method:    method,
-		URI:       uri,
-		UserAgent: ua,
-		RemoteIP:  remote,
-		Target:    reason,
+	h.log302Entry(embyproxylog.Entry{
+		Source:         "fallback",
+		Method:         method,
+		URI:            uri,
+		UserAgent:      ua,
+		RemoteIP:       remote,
+		Target:         reason,
+		FallbackReason: reason,
 	})
+}
+
+func (h *EmbyProxyHandler) modifyResponse(resp *http.Response) error {
+	if resp == nil || resp.Request == nil || !embyhelper.IsPlaybackInfoURI(resp.Request.RequestURI) {
+		return nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		h.logger.Errorf("读取 PlaybackInfo 响应体失败: %v", err)
+		return err
+	}
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", fmt.Sprint(len(body)))
+	go h.preheatPlaybackInfo(resp.Request.RequestURI, body)
+	return nil
+}
+
+func (h *EmbyProxyHandler) preheatPlaybackInfo(requestURI string, body []byte) {
+	var payload struct {
+		MediaSources []struct {
+			ID     string `json:"Id"`
+			ItemID string `json:"ItemId"`
+			Path   string `json:"Path"`
+		} `json:"MediaSources"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return
+	}
+	for _, mediaSource := range payload.MediaSources {
+		mediaPath := pathhelper.EnsureLeadingSlash(mediaSource.Path)
+		if strings.TrimSpace(mediaPath) == "" {
+			continue
+		}
+		match, matchedPath, err := h.balanceSvc.FindMatch(mediaPath)
+		if err != nil || match == nil || !match.BalanceEnabled {
+			continue
+		}
+		err = h.balanceSvc.PreheatAssignment(context.Background(), service.BalancePlaybackRequest{
+			Match:         match,
+			SourcePath:    mediaPath,
+			MatchedPath:   matchedPath,
+			EmbyItemID:    mediaSource.ItemID,
+			MediaSourceID: mediaSource.ID,
+		})
+		if err != nil {
+			h.logger.Warnf("[EMBY PROXY] PlaybackInfo 预热失败 uri=%s path=%s err=%v", requestURI, mediaPath, err)
+		}
+	}
 }
 
 // handlePlaying 处理播放会话请求
@@ -292,9 +326,15 @@ func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
 	c.Writer.Write(recorder.Body.Bytes())
 }
 
-// proxyPlay 代理播放请求，返回重定向URL和是否跳过标志
-func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, bool) {
+// proxyPlay 代理播放请求，返回重定向URL、日志条目和是否跳过标志
+func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry, bool) {
 	currentURI := c.Request.RequestURI
+	baseEntry := embyproxylog.Entry{
+		Method:    c.Request.Method,
+		URI:       currentURI,
+		UserAgent: c.Request.UserAgent(),
+		RemoteIP:  c.ClientIP(),
+	}
 
 	h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求 URI: %s", currentURI)
 	re := regexp.MustCompile(`/[Vv]ideos/(\S+)/(stream|original|master)`)
@@ -302,7 +342,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, bool) {
 
 	if len(matches) < 1 {
 		h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求 URI 不匹配: %s", currentURI)
-		return "", true
+		return "", baseEntry, true
 	}
 
 	// 开始计时
@@ -317,7 +357,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, bool) {
 
 	if err != nil {
 		h.logger.Errorf("获取 EmbyItems 错误: %v", err)
-		return "", true
+		return "", baseEntry, true
 	}
 
 	h.logger.Infof("[EMBY PROXY] Request URI: %s", currentURI)
@@ -327,28 +367,105 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, bool) {
 
 	h.logger.Infof("[EMBY PROXY] Emby 原地址: %s", embyPlayPath)
 
-	originalHeaders := make(map[string]string)
-	for key, value := range c.Request.Header {
-		if len(value) > 0 {
-			originalHeaders[key] = value[0]
-		}
-	}
-
 	if strings.HasPrefix(embyPlayPath, "http") {
 		h.logger.Infof("[EMBY PROXY] Emby 播放地址是完整的 URL: %s", embyPlayPath)
-		return embyPlayPath, false
+		baseEntry.Source = "proxyPlay"
+		baseEntry.Target = embyPlayPath
+		baseEntry.ItemID = itemId
+		baseEntry.MediaSourceID = mediaSourceId
+		baseEntry.MediaPath = embyPlayPath
+		return embyPlayPath, baseEntry, false
 	}
 
-	// 判断是否在 match302 监控内
-	redirectURL, matched := h.checkMatch302(embyPlayPath, c.Request.UserAgent())
-
-	if matched {
-		h.logger.Infof("[EMBY PROXY] Match302 匹配成功，重定向到: %s", redirectURL)
-		return redirectURL, false
+	match, matchedPath, err := h.balanceSvc.FindMatch(embyPlayPath)
+	if err != nil {
+		h.logger.Debugf("[EMBY PROXY] 路径 %s 未匹配任何 match302 规则", embyPlayPath)
+		return "", baseEntry, true
 	}
 
-	// 暂时返回跳过，使用默认代理
-	return "", true
+	playbackReq := service.BalancePlaybackRequest{
+		Match:         match,
+		SourcePath:    embyPlayPath,
+		MatchedPath:   matchedPath,
+		EmbyItemID:    itemId,
+		MediaSourceID: mediaSourceId,
+		UserAgent:     c.Request.UserAgent(),
+		RemoteIP:      c.ClientIP(),
+	}
+	decision, err := h.balanceSvc.ResolvePlayback(context.Background(), playbackReq)
+	if err != nil {
+		h.logger.Errorf("[EMBY PROXY] Match302 负载均衡决策失败: %v", err)
+		return "", baseEntry, true
+	}
+
+	redirectURL, fromCache, err := h.getDownloadURLForStorage(*decision.PlaybackStorage, decision.ActualPickCode, c.Request.UserAgent())
+	if err != nil && decision.UseBalance && !decision.IsSourcePlayback {
+		if decision.SourceStorage == nil {
+			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，源账号信息缺失，无法回退: %v", err)
+			return "", baseEntry, true
+		}
+		if limitErr := h.balanceSvc.EnsureStrictStorageAllowed(decision.Match, decision.SourceStorage.ID, playbackReq); limitErr != nil {
+			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，但严格模式不允许回退源账号: %v", limitErr)
+			return "", baseEntry, true
+		}
+		h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，回退源账号: %v", err)
+		decision.PlaybackStorage = decision.SourceStorage
+		decision.ActualPickCode = decision.SourceFile.PickCode
+		decision.IsSourcePlayback = true
+		decision.AccountType = "source"
+		decision.Status = "失败回退"
+		decision.FallbackReason = "获取子账号直链失败: " + err.Error()
+		redirectURL, fromCache, err = h.getDownloadURLForStorage(*decision.SourceStorage, decision.SourceFile.PickCode, c.Request.UserAgent())
+	}
+	if err != nil {
+		h.logger.Errorf("[EMBY PROXY] 获取下载URL失败: %v", err)
+		return "", baseEntry, true
+	}
+
+	entry := h.buildPlaybackLogEntry(baseEntry, redirectURL, fromCache, itemId, mediaSourceId, embyPlayPath, decision)
+	h.logger.Infof("[EMBY PROXY] Match302 匹配成功，重定向到: %s", redirectURL)
+	return redirectURL, entry, false
+}
+
+func (h *EmbyProxyHandler) buildPlaybackLogEntry(base embyproxylog.Entry, target string, fromCache bool, itemID, mediaSourceID, mediaPath string, decision *service.BalancePlaybackDecision) embyproxylog.Entry {
+	if fromCache {
+		base.Source = "cache"
+	} else {
+		base.Source = "proxyPlay"
+	}
+	base.Target = target
+	base.ItemID = itemID
+	base.MediaSourceID = mediaSourceID
+	base.MediaPath = mediaPath
+	if decision == nil {
+		return base
+	}
+	if decision.Match != nil {
+		base.Match302ID = decision.Match.ID
+	}
+	if decision.Assignment != nil {
+		base.AssignmentID = decision.Assignment.ID
+		base.AssignedStorageID = decision.Assignment.PlaybackStorageID
+		if decision.Assignment.PlaybackStorage != nil {
+			base.AssignedStorageName = decision.Assignment.PlaybackStorage.StorageName
+		}
+	}
+	if decision.PlaybackStorage != nil {
+		if base.AssignedStorageID == 0 {
+			base.AssignedStorageID = decision.PlaybackStorage.ID
+		}
+		if base.AssignedStorageName == "" {
+			base.AssignedStorageName = decision.PlaybackStorage.StorageName
+		}
+	}
+	if decision.PlaybackStorage != nil {
+		base.ActualStorageID = decision.PlaybackStorage.ID
+		base.ActualStorageName = decision.PlaybackStorage.StorageName
+	}
+	base.AccountType = decision.AccountType
+	base.BalanceStatus = decision.Status
+	base.FallbackReason = decision.FallbackReason
+	return base
 }
 
 // checkMatch302 检查路径是否匹配 match302 规则
@@ -401,7 +518,7 @@ func (h *EmbyProxyHandler) checkMatch302(filePath, userAgent string) (string, bo
 		// 尝试获取下载URL
 		// filePath 是 Emby 看到的播放地址(STRM 内容空间)，用作 pickcode 缓存 key
 		// matchedPath 是 115 盘内路径，用于调 115 API 反查 pickcode
-		downloadURL, err := h.getDownloadURL(filePath, matchedPath, match.CloudStorage.AccessToken, userAgent)
+		downloadURL, _, err := h.getDownloadURL(filePath, matchedPath, *match.CloudStorage, userAgent)
 		if err != nil {
 			h.logger.Errorf("[EMBY PROXY] 获取下载URL失败: %v", err)
 			continue
@@ -417,7 +534,7 @@ func (h *EmbyProxyHandler) checkMatch302(filePath, userAgent string) (string, bo
 // getDownloadURL 获取文件的下载URL
 // filePath: Emby 播放地址(STRM 内容空间的完整绝对路径)，用作 pickcode 缓存 key
 // matchedPath: 115 盘内路径，用于调 115 API 反查 pickcode
-func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath, accessToken, userAgent string) (string, error) {
+func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath string, storage model.CloudStorage, userAgent string) (string, bool, error) {
 	// 缓存 key 使用解码后的 filePath（与 walk 时写入缓存的 key 语义一致）
 	cacheKey, decodeErr := url.PathUnescape(filePath)
 	if decodeErr != nil {
@@ -430,16 +547,16 @@ func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath, accessToken, us
 	err := database.DB.Where("file_path = ?", cacheKey).First(&pickcodeCache).Error
 
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return "", fmt.Errorf("查询 pickcode 缓存失败: %w", err)
+		return "", false, fmt.Errorf("查询 pickcode 缓存失败: %w", err)
 	}
 
 	// 如果没有缓存或 pickcode 为空，则获取新的 pickcode
 	if errors.Is(err, gorm.ErrRecordNotFound) || pickcodeCache.Pickcode == "" {
 		h.logger.Infof("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", cacheKey)
 
-		pickcode, err := h.fetchPickcodeFromAPI(matchedPath, accessToken)
+		pickcode, err := h.fetchPickcodeFromAPI(matchedPath, storage.AccessToken)
 		if err != nil {
-			return "", fmt.Errorf("获取 pickcode 失败: %w", err)
+			return "", false, fmt.Errorf("获取 pickcode 失败: %w", err)
 		}
 
 		// 创建或更新缓存（key 用 STRM 内容空间的 cacheKey）
@@ -451,24 +568,80 @@ func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath, accessToken, us
 	}
 
 	if pickcodeCache.Pickcode == "" {
-		return "", fmt.Errorf("pickcode 为空")
+		return "", false, fmt.Errorf("pickcode 为空")
 	}
 
-	// 获取下载链接
-	h.sdk115Open.SetAccessToken(accessToken)
-	downURLResp, err := h.sdk115Open.DownURL(context.Background(), pickcodeCache.Pickcode, userAgent)
-	if err != nil {
-		return "", fmt.Errorf("调用 DownURL API 失败: %w", err)
-	}
+	return h.getDownloadURLForStorage(storage, pickcodeCache.Pickcode, userAgent)
+}
 
-	// 获取第一个可用的下载URL
-	for _, urlInfo := range downURLResp {
-		if urlInfo.URL.URL != "" {
-			return urlInfo.URL.URL, nil
+func (h *EmbyProxyHandler) getDownloadURLForStorage(storage model.CloudStorage, pickcode, userAgent string) (string, bool, error) {
+	pickcode = strings.TrimSpace(pickcode)
+	if pickcode == "" {
+		return "", false, fmt.Errorf("pickcode 为空")
+	}
+	cacheKey := h.md5CacheKey(fmt.Sprintf("download-url:%d:%s:%s", storage.ID, pickcode, userAgent))
+	if cacheLink, found := h.goCache.Get(cacheKey); found {
+		if link, ok := cacheLink.(string); ok && link != "" {
+			return link, true, nil
 		}
 	}
 
-	return "", fmt.Errorf("未找到可用的下载URL，pickcode: %s", pickcodeCache.Pickcode)
+	var redirectURL string
+	if strings.TrimSpace(storage.AccessToken) != "" {
+		h.sdk115Open.SetAccessToken(storage.AccessToken)
+		downURLResp, err := h.sdk115Open.DownURL(context.Background(), pickcode, userAgent)
+		if err != nil {
+			return "", false, fmt.Errorf("调用 DownURL API 失败: %w", err)
+		}
+		for _, urlInfo := range downURLResp {
+			if urlInfo.URL.URL != "" {
+				redirectURL = urlInfo.URL.URL
+				break
+			}
+		}
+	} else if strings.TrimSpace(storage.Cookie) != "" {
+		client, err := h.web115Svc.NewClient(storage.Cookie)
+		if err != nil {
+			return "", false, fmt.Errorf("115 Cookie 无效: %w", err)
+		}
+		info, err := client.DownloadWithUA(pickcode, userAgent)
+		if err != nil {
+			return "", false, fmt.Errorf("调用 115 Web 下载接口失败: %w", err)
+		}
+		redirectURL = info.Url.Url
+	}
+	if redirectURL == "" {
+		return "", false, fmt.Errorf("未找到可用的下载URL，pickcode: %s", pickcode)
+	}
+	h.goCache.Set(cacheKey, redirectURL, h.downloadURLCacheTTL(redirectURL))
+	return redirectURL, false, nil
+}
+
+func (h *EmbyProxyHandler) downloadURLCacheTTL(rawURL string) time.Duration {
+	configured := time.Duration(h.config.Emby.CacheTime) * time.Minute
+	if configured <= 0 {
+		configured = cache.DefaultExpiration
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return configured
+	}
+	rawT := parsed.Query().Get("t")
+	if rawT == "" {
+		return configured
+	}
+	expiresAt, err := strconv.ParseInt(rawT, 10, 64)
+	if err != nil {
+		return configured
+	}
+	until := time.Until(time.Unix(expiresAt, 0))
+	if until <= 0 {
+		return time.Second
+	}
+	if configured > 0 && until < configured {
+		return until
+	}
+	return configured
 }
 
 // fetchPickcodeFromAPI 从API获取 pickcode

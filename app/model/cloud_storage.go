@@ -9,29 +9,31 @@ import (
 
 // CloudStorage 网盘存储配置模型
 type CloudStorage struct {
-	ID               uint           `gorm:"primarykey" json:"id"`
-	UserID           uint           `gorm:"not null;index;comment:所属用户ID" json:"user_id"`
-	StorageType      string         `gorm:"size:20;not null;comment:存储类型(115,baidu,aliyun,tencent等);uniqueIndex:uk_user_type_provider,priority:2" json:"storage_type"`
-	StorageName      string         `gorm:"size:100;not null;comment:存储名称" json:"storage_name"`
-	ProviderUID      string         `gorm:"size:100;comment:云盘账号唯一标识(如115的user_id);uniqueIndex:uk_user_type_provider,priority:3" json:"provider_uid"`
-	AppID            string         `gorm:"size:100;comment:应用ID" json:"app_id"`
-	AppSecret        string         `gorm:"size:200;comment:应用密钥" json:"app_secret"`
-	AccessToken      string         `gorm:"type:text;comment:访问令牌" json:"access_token"`
-	RefreshToken     string         `gorm:"type:text;comment:刷新令牌" json:"refresh_token"`
-	Cookie           string         `gorm:"type:text;comment:Cookie信息" json:"cookie"`
-	TokenExpiresAt   *time.Time     `gorm:"comment:令牌过期时间" json:"token_expires_at"`
-	RefreshExpiresAt *time.Time     `gorm:"comment:刷新令牌过期时间" json:"refresh_expires_at"`
-	LastRefreshAt    *time.Time     `gorm:"comment:最后刷新时间" json:"last_refresh_at"`
-	AutoRefresh      bool           `gorm:"default:true;comment:是否自动刷新令牌" json:"auto_refresh"`
-	RefreshBeforeMin int            `gorm:"default:30;comment:提前多少分钟刷新令牌" json:"refresh_before_min"`
-	Status           string         `gorm:"size:20;default:active;comment:状态(active,disabled,error)" json:"status"`
-	ErrorMessage     string         `gorm:"type:text;comment:错误信息" json:"error_message"`
-	LastErrorAt      *time.Time     `gorm:"comment:最后错误时间" json:"last_error_at"`
-	Config           string         `gorm:"type:json;comment:额外配置信息" json:"config"`
-	SortOrder        int            `gorm:"default:0;comment:排序" json:"sort_order"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	DeletedAt        gorm.DeletedAt `gorm:"index" json:"deleted_at"`
+	ID                 uint           `gorm:"primarykey" json:"id"`
+	UserID             uint           `gorm:"not null;index;comment:所属用户ID" json:"user_id"`
+	StorageType        string         `gorm:"size:20;not null;comment:存储类型(115,baidu,aliyun,tencent等);uniqueIndex:uk_user_type_provider,priority:2" json:"storage_type"`
+	StorageName        string         `gorm:"size:100;not null;comment:存储名称" json:"storage_name"`
+	ProviderUID        string         `gorm:"size:100;comment:云盘账号唯一标识(如115的user_id);uniqueIndex:uk_user_type_provider,priority:3" json:"provider_uid"`
+	AppID              string         `gorm:"size:100;comment:应用ID" json:"app_id"`
+	AppSecret          string         `gorm:"size:200;comment:应用密钥" json:"app_secret"`
+	AccessToken        string         `gorm:"type:text;comment:访问令牌" json:"access_token"`
+	RefreshToken       string         `gorm:"type:text;comment:刷新令牌" json:"refresh_token"`
+	Cookie             string         `gorm:"type:text;comment:Cookie信息" json:"cookie"`
+	TokenExpiresAt     *time.Time     `gorm:"comment:令牌过期时间" json:"token_expires_at"`
+	RefreshExpiresAt   *time.Time     `gorm:"comment:刷新令牌过期时间" json:"refresh_expires_at"`
+	LastRefreshAt      *time.Time     `gorm:"comment:最后刷新时间" json:"last_refresh_at"`
+	AutoRefresh        bool           `gorm:"default:true;comment:是否自动刷新令牌" json:"auto_refresh"`
+	RefreshBeforeMin   int            `gorm:"default:30;comment:提前多少分钟刷新令牌" json:"refresh_before_min"`
+	Status             string         `gorm:"size:20;default:active;comment:状态(active,disabled,error)" json:"status"`
+	ErrorMessage       string         `gorm:"type:text;comment:错误信息" json:"error_message"`
+	LastErrorAt        *time.Time     `gorm:"comment:最后错误时间" json:"last_error_at"`
+	Config             string         `gorm:"type:json;comment:额外配置信息" json:"config"`
+	SortOrder          int            `gorm:"default:0;comment:排序" json:"sort_order"`
+	Match302MaxActive  int            `gorm:"default:0;comment:Match302最大同时播放数，0表示不限制" json:"match302_max_active"`
+	Match302CacheMaxGB int64          `gorm:"default:0;comment:Match302子账号缓存空间上限GB，0表示不限制" json:"match302_cache_max_gb"`
+	CreatedAt          time.Time      `json:"created_at"`
+	UpdatedAt          time.Time      `json:"updated_at"`
+	DeletedAt          gorm.DeletedAt `gorm:"index" json:"deleted_at"`
 
 	// 关联关系
 	User *User `gorm:"foreignKey:UserID" json:"user,omitempty"`
@@ -40,6 +42,15 @@ type CloudStorage struct {
 // TableName 指定表名
 func (CloudStorage) TableName() string {
 	return "cloud_storages"
+}
+
+func (cs *CloudStorage) NormalizeMatch302Defaults() {
+	if cs.Match302MaxActive < 0 {
+		cs.Match302MaxActive = 0
+	}
+	if cs.Match302CacheMaxGB < 0 {
+		cs.Match302CacheMaxGB = 0
+	}
 }
 
 // StorageType 存储类型常量

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"film-fusion/app/service"
 	"net/http"
 	"strconv"
 
@@ -10,10 +11,14 @@ import (
 )
 
 // EmbyProxyLogHandler 提供 Emby 代理 302 日志查询接口。
-type EmbyProxyLogHandler struct{}
+type EmbyProxyLogHandler struct {
+	balanceStatusSvc *service.BalanceStatusService
+}
 
 func NewEmbyProxyLogHandler() *EmbyProxyLogHandler {
-	return &EmbyProxyLogHandler{}
+	return &EmbyProxyLogHandler{
+		balanceStatusSvc: service.NewBalanceStatusService(),
+	}
 }
 
 // List GET /api/emby-proxy/302-logs?limit=500
@@ -41,4 +46,9 @@ func (h *EmbyProxyLogHandler) List(c *gin.Context) {
 func (h *EmbyProxyLogHandler) Clear(c *gin.Context) {
 	embyproxylog.Default().Clear()
 	c.JSON(http.StatusOK, NewSuccessResponse("ok", gin.H{}))
+}
+
+// BalanceStatus GET /api/emby-proxy/balance-status
+func (h *EmbyProxyLogHandler) BalanceStatus(c *gin.Context) {
+	c.JSON(http.StatusOK, NewSuccessResponse("ok", h.balanceStatusSvc.Snapshot()))
 }

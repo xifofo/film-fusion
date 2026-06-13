@@ -52,6 +52,7 @@ func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
 		return
 	}
 	req.UserID = userID.(uint)
+	req.NormalizeMatch302Defaults()
 
 	if err := database.DB.Create(&req).Error; err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "创建存储配置失败")
@@ -160,19 +161,21 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 	}
 
 	var req struct {
-		StorageName      *string    `json:"storage_name"`
-		AppID            *string    `json:"app_id"`
-		AppSecret        *string    `json:"app_secret"`
-		AccessToken      *string    `json:"access_token"`
-		RefreshToken     *string    `json:"refresh_token"`
-		Cookie           *string    `json:"cookie"`
-		TokenExpiresAt   *time.Time `json:"token_expires_at"`
-		RefreshExpiresAt *time.Time `json:"refresh_expires_at"`
-		AutoRefresh      *bool      `json:"auto_refresh"`
-		RefreshBeforeMin *int       `json:"refresh_before_min"`
-		Status           *string    `json:"status"`
-		Config           *string    `json:"config"`
-		SortOrder        *int       `json:"sort_order"`
+		StorageName        *string    `json:"storage_name"`
+		AppID              *string    `json:"app_id"`
+		AppSecret          *string    `json:"app_secret"`
+		AccessToken        *string    `json:"access_token"`
+		RefreshToken       *string    `json:"refresh_token"`
+		Cookie             *string    `json:"cookie"`
+		TokenExpiresAt     *time.Time `json:"token_expires_at"`
+		RefreshExpiresAt   *time.Time `json:"refresh_expires_at"`
+		AutoRefresh        *bool      `json:"auto_refresh"`
+		RefreshBeforeMin   *int       `json:"refresh_before_min"`
+		Status             *string    `json:"status"`
+		Config             *string    `json:"config"`
+		SortOrder          *int       `json:"sort_order"`
+		Match302MaxActive  *int       `json:"match302_max_active"`
+		Match302CacheMaxGB *int64     `json:"match302_cache_max_gb"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
@@ -219,6 +222,20 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 	}
 	if req.SortOrder != nil {
 		updates["sort_order"] = *req.SortOrder
+	}
+	if req.Match302MaxActive != nil {
+		maxActive := *req.Match302MaxActive
+		if maxActive < 0 {
+			maxActive = 0
+		}
+		updates["match302_max_active"] = maxActive
+	}
+	if req.Match302CacheMaxGB != nil {
+		cacheMaxGB := *req.Match302CacheMaxGB
+		if cacheMaxGB < 0 {
+			cacheMaxGB = 0
+		}
+		updates["match302_cache_max_gb"] = cacheMaxGB
 	}
 
 	// 更新字段

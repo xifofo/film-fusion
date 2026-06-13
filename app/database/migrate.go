@@ -11,8 +11,12 @@ func AutoMigrate() error {
 		return fmt.Errorf("移除email唯一索引失败: %v", err)
 	}
 
+	if err := removeDeprecatedMatch302Columns(); err != nil {
+		return fmt.Errorf("移除Match302废弃字段失败: %v", err)
+	}
+
 	// 自动迁移表结构
-	return DB.AutoMigrate(
+	if err := DB.AutoMigrate(
 		&model.SystemConfig{},
 		&model.User{},
 		&model.CloudStorage{},
@@ -21,10 +25,20 @@ func AutoMigrate() error {
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
 		&model.Match302{},
+		&model.Match302BalanceMember{},
+		&model.Match302BalanceAssignment{},
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},
 		&model.OrganizeLog{},
-	)
+	); err != nil {
+		return err
+	}
+
+	if err := migrateMatch302CacheQuotaToGB(); err != nil {
+		return fmt.Errorf("迁移Match302缓存空间单位失败: %v", err)
+	}
+
+	return nil
 }
 
 // removeEmailUniqueIndex 移除email字段的唯一索引
@@ -45,4 +59,41 @@ func removeEmailUniqueIndex() error {
 	}
 
 	return nil
+}
+
+func removeDeprecatedMatch302Columns() error {
+	if err := dropColumnIfExists(&model.Match302{}, "source_max_active"); err != nil {
+		return err
+	}
+	if err := dropColumnIfExists(&model.Match302BalanceMember{}, "max_active"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func migrateMatch302CacheQuotaToGB() error {
+	if !DB.Migrator().HasColumn(&model.CloudStorage{}, "match302_cache_max_mb") {
+		return nil
+	}
+	if !DB.Migrator().HasColumn(&model.CloudStorage{}, "match302_cache_max_gb") {
+		return nil
+	}
+
+	if err := DB.Exec(`
+		UPDATE cloud_storages
+		SET match302_cache_max_gb = (match302_cache_max_mb + 1023) / 1024
+		WHERE match302_cache_max_gb = 0 AND match302_cache_max_mb > 0
+	`).Error; err != nil {
+		return err
+	}
+
+	return dropColumnIfExists(&model.CloudStorage{}, "match302_cache_max_mb")
+}
+
+func dropColumnIfExists(table any, column string) error {
+	if !DB.Migrator().HasColumn(table, column) {
+		return nil
+	}
+
+	return DB.Migrator().DropColumn(table, column)
 }

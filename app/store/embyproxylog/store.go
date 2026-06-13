@@ -10,14 +10,33 @@ import (
 
 // Entry 单条 302 重定向日志。
 type Entry struct {
-	ID        uint64    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Source    string    `json:"source"` // cache / proxyPlay
-	Method    string    `json:"method"`
-	URI       string    `json:"uri"`
-	UserAgent string    `json:"user_agent"`
-	RemoteIP  string    `json:"remote_ip"`
-	Target    string    `json:"target"`
+	ID                  uint64    `json:"id"`
+	Timestamp           time.Time `json:"timestamp"`
+	Source              string    `json:"source"` // cache / proxyPlay / fallback
+	Method              string    `json:"method"`
+	URI                 string    `json:"uri"`
+	UserAgent           string    `json:"user_agent"`
+	RemoteIP            string    `json:"remote_ip"`
+	Target              string    `json:"target"`
+	ItemID              string    `json:"item_id,omitempty"`
+	MediaSourceID       string    `json:"media_source_id,omitempty"`
+	MediaPath           string    `json:"media_path,omitempty"`
+	Match302ID          uint      `json:"match302_id,omitempty"`
+	AssignmentID        uint      `json:"assignment_id,omitempty"`
+	AssignedStorageID   uint      `json:"assigned_storage_id,omitempty"`
+	AssignedStorageName string    `json:"assigned_storage_name,omitempty"`
+	ActualStorageID     uint      `json:"actual_storage_id,omitempty"`
+	ActualStorageName   string    `json:"actual_storage_name,omitempty"`
+	AccountType         string    `json:"account_type,omitempty"`
+	BalanceStatus       string    `json:"balance_status,omitempty"`
+	FallbackReason      string    `json:"fallback_reason,omitempty"`
+}
+
+func (e Entry) PlaybackKey() string {
+	if e.ItemID == "" && e.MediaSourceID == "" && e.RemoteIP == "" && e.UserAgent == "" {
+		return ""
+	}
+	return e.ItemID + "|" + e.MediaSourceID + "|" + e.RemoteIP + "|" + e.UserAgent
 }
 
 // Store 固定容量的环形缓冲。
