@@ -617,17 +617,30 @@ func (s *BalanceAssignmentService) ensureAssignment(ctx context.Context, match *
 	var existing model.Match302BalanceAssignment
 	err := database.DB.Where("match302_id = ? AND source_file_path = ?", match.ID, sourceInfo.SourceFilePath).First(&existing).Error
 	if err == nil {
-		if existing.SourcePickcode == "" || existing.SHA1 == "" || existing.Size == 0 {
-			updates := map[string]any{
-				"source_pickcode": sourceInfo.PickCode,
-				"source_file_id":  sourceInfo.FileID,
-				"sha1":            sourceInfo.SHA1,
-				"size":            sourceInfo.Size,
+		if assignmentCacheReusable(&existing, time.Now()) {
+			if existing.SourcePickcode == "" || existing.SHA1 == "" || existing.Size == 0 {
+				updates := map[string]any{
+					"source_pickcode": sourceInfo.PickCode,
+					"source_file_id":  sourceInfo.FileID,
+					"sha1":            sourceInfo.SHA1,
+					"size":            sourceInfo.Size,
+				}
+				_ = database.DB.Model(&existing).Updates(updates).Error
+				_ = database.DB.First(&existing, existing.ID).Error
 			}
-			_ = database.DB.Model(&existing).Updates(updates).Error
-			_ = database.DB.First(&existing, existing.ID).Error
+			if !existing.IsSourcePlayback && existing.Status == model.BalanceAssignmentStatusPending {
+				s.StartTransferAsync(existing.ID)
+			}
+			return &existing, nil
 		}
-		if !existing.IsSourcePlayback && existing.Status == model.BalanceAssignmentStatusPending {
+		if len(candidates) == 0 {
+			return nil, errNoBalanceCandidate
+		}
+		selected := s.selectCandidate(candidates, playbackKey)
+		if err := s.rematerializeAssignment(&existing, match, sourceInfo, selected, embyItemID, mediaSourceID); err != nil {
+			return nil, err
+		}
+		if !existing.IsSourcePlayback {
 			s.StartTransferAsync(existing.ID)
 		}
 		return &existing, nil
@@ -677,6 +690,60 @@ func (s *BalanceAssignmentService) ensureAssignment(ctx context.Context, match *
 	}
 	_ = ctx
 	return assignment, nil
+}
+
+func assignmentCacheReusable(assignment *model.Match302BalanceAssignment, now time.Time) bool {
+	if assignment == nil {
+		return false
+	}
+	if assignment.CleanupStatus == model.BalanceCleanupStatusCleaning || assignment.CleanupStatus == model.BalanceCleanupStatusCleaned {
+		return false
+	}
+	if assignment.ExpiresAt != nil && !assignment.ExpiresAt.After(now) {
+		return false
+	}
+	return assignment.Status == model.BalanceAssignmentStatusReady ||
+		assignment.Status == model.BalanceAssignmentStatusPending ||
+		assignment.Status == model.BalanceAssignmentStatusTransferring
+}
+
+func (s *BalanceAssignmentService) rematerializeAssignment(assignment *model.Match302BalanceAssignment, match *model.Match302, sourceInfo BalanceSourceFile, selected balanceCandidate, embyItemID, mediaSourceID string) error {
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(match.RetentionHours) * time.Hour)
+	updates := map[string]any{
+		"emby_item_id":        embyItemID,
+		"media_source_id":     mediaSourceID,
+		"source_storage_id":   match.CloudStorageID,
+		"playback_storage_id": selected.Storage.ID,
+		"is_source_playback":  selected.IsSource,
+		"source_pickcode":     sourceInfo.PickCode,
+		"source_file_id":      sourceInfo.FileID,
+		"sha1":                sourceInfo.SHA1,
+		"size":                sourceInfo.Size,
+		"status":              model.BalanceAssignmentStatusPending,
+		"attempts":            0,
+		"last_error":          "",
+		"last_error_at":       nil,
+		"last_ready_at":       nil,
+		"expires_at":          &expiresAt,
+		"cleanup_status":      model.BalanceCleanupStatusNone,
+		"cleanup_error":       "",
+		"cleaned_at":          nil,
+		"target_pickcode":     "",
+		"target_file_id":      "",
+		"target_path":         "",
+	}
+	if selected.IsSource {
+		updates["status"] = model.BalanceAssignmentStatusReady
+		updates["target_pickcode"] = sourceInfo.PickCode
+		updates["target_file_id"] = sourceInfo.FileID
+		updates["target_path"] = sourceInfo.MatchedPath
+		updates["last_ready_at"] = &now
+	}
+	if err := database.DB.Model(assignment).Updates(updates).Error; err != nil {
+		return err
+	}
+	return database.DB.First(assignment, assignment.ID).Error
 }
 
 func (s *BalanceAssignmentService) candidates(match *model.Match302, excludeKey string) ([]balanceCandidate, string) {

@@ -88,7 +88,10 @@ func (m *Match302) GetMatchedPath(targetPath string) string {
 
 	normalizedSource := pathhelper.EnsureLeadingSlash(m.SourcePath)
 	normalizedTarget := pathhelper.EnsureLeadingSlash(decodedTargetPath)
-	normalizedTargetPath := pathhelper.EnsureLeadingSlash(m.TargetPath)
+	normalizedTargetPath := ""
+	if strings.TrimSpace(m.TargetPath) != "" {
+		normalizedTargetPath = pathhelper.EnsureLeadingSlash(m.TargetPath)
+	}
 
 	// sourcePath 是 targetPath 的子路径 - 需要在 targetPath 基础上添加 sourcePath 到 targetPath 的映射
 	if pathhelper.IsSubPath(normalizedTarget, normalizedSource) {

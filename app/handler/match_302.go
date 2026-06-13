@@ -338,10 +338,6 @@ func (h *Match302Handler) UpdateMatch302(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "源路径不能为空")
 		return
 	}
-	if req.TargetPath == "" {
-		h.error(c, http.StatusBadRequest, 400, "目标路径不能为空")
-		return
-	}
 	if req.CloudStorageID == 0 {
 		h.error(c, http.StatusBadRequest, 400, "云存储ID不能为空")
 		return
