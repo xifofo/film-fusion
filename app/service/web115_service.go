@@ -29,6 +29,16 @@ type Web115ListResult struct {
 	Raw   []byte
 }
 
+type Web115SupervisionInfo struct {
+	FileID    string
+	Name      string
+	PickCode  string
+	SHA1      string
+	Size      int64
+	IsCollect bool
+	FileType  int
+}
+
 func NewWeb115Service(log *logger.Logger) *Web115Service {
 	return &Web115Service{
 		logger: log,
@@ -234,6 +244,67 @@ func (s *Web115Service) MoveFiles(client *driver.Pan115Client, dirID string, fil
 	return client.Move(dirID, fileIDs...)
 }
 
+func (s *Web115Service) GetFileSupervisionWithClient(client *driver.Pan115Client, pickCode string) (Web115SupervisionInfo, error) {
+	pickCode = strings.TrimSpace(pickCode)
+	if pickCode == "" {
+		return Web115SupervisionInfo{}, fmt.Errorf("pickcode 为空")
+	}
+
+	var result struct {
+		State   *bool            `json:"state"`
+		Code    int              `json:"code"`
+		Errno   driver.StringInt `json:"errno"`
+		ErrNo   int              `json:"errNo"`
+		Error   string           `json:"error"`
+		Message string           `json:"message"`
+		Msg     string           `json:"msg"`
+		Data    struct {
+			FileID    string             `json:"file_id"`
+			FileName  string             `json:"file_name"`
+			FileSHA1  string             `json:"file_sha1"`
+			FileSize  driver.StringInt64 `json:"file_size"`
+			IsCollect driver.StringInt   `json:"is_collect"`
+			FileType  driver.StringInt   `json:"file_type"`
+			PickCode  string             `json:"pick_code"`
+		} `json:"data"`
+	}
+
+	req := client.NewRequest().
+		SetFormData(map[string]string{
+			"pickcode":     pickCode,
+			"preview_type": "file",
+			"module":       "10",
+		}).
+		ForceContentType("application/json;charset=UTF-8").
+		SetResult(&result)
+	resp, err := req.Post("https://webapi.115.com/files/supervision")
+	if err != nil {
+		return Web115SupervisionInfo{}, err
+	}
+	raw := ""
+	if resp != nil {
+		raw = resp.String()
+	}
+	if result.State != nil && !*result.State {
+		msg := firstNonEmptyString(result.Message, result.Msg, result.Error, raw)
+		return Web115SupervisionInfo{}, fmt.Errorf("115 supervision 失败 code=%d errno=%d errNo=%d msg=%s", result.Code, int(result.Errno), result.ErrNo, msg)
+	}
+	if result.Code != 0 || int(result.Errno) != 0 || result.ErrNo != 0 {
+		msg := firstNonEmptyString(result.Message, result.Msg, result.Error, raw)
+		return Web115SupervisionInfo{}, fmt.Errorf("115 supervision 失败 code=%d errno=%d errNo=%d msg=%s", result.Code, int(result.Errno), result.ErrNo, msg)
+	}
+
+	return Web115SupervisionInfo{
+		FileID:    strings.TrimSpace(result.Data.FileID),
+		Name:      strings.TrimSpace(result.Data.FileName),
+		PickCode:  firstNonEmptyString(result.Data.PickCode, pickCode),
+		SHA1:      strings.ToUpper(strings.TrimSpace(result.Data.FileSHA1)),
+		Size:      int64(result.Data.FileSize),
+		IsCollect: int(result.Data.IsCollect) != 0,
+		FileType:  int(result.Data.FileType),
+	}, nil
+}
+
 // ResolveDirPathWithClient 通过 115 的 files/getid（SDK 的 DirName2CID）直接查询
 // 整个目录路径对应的 CID。
 //
@@ -313,4 +384,13 @@ func normalizeCookie(cookie string) string {
 		return strings.TrimSpace(cookie[len("cookie:"):])
 	}
 	return cookie
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }

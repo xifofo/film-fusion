@@ -27,6 +27,7 @@ func AutoMigrate() error {
 		&model.Match302{},
 		&model.Match302BalanceMember{},
 		&model.Match302BalanceAssignment{},
+		&model.Web115AppVersionCache{},
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},
 		&model.OrganizeLog{},

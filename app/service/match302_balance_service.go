@@ -35,6 +35,8 @@ type BalanceSourceFile struct {
 	FileID         string
 	SHA1           string
 	Size           int64
+	IsCollect      bool
+	FileType       int
 }
 
 type BalancePlaybackRequest struct {
@@ -452,17 +454,6 @@ func (s *BalanceAssignmentService) RunTransfer(ctx context.Context, assignmentID
 		First(&assignment, assignmentID).Error; err != nil {
 		return err
 	}
-	if err := s.cleanupStorageCacheForQuota(ctx, &assignment); err != nil {
-		now := time.Now()
-		updates := map[string]any{
-			"status":        model.BalanceAssignmentStatusFailed,
-			"last_error":    err.Error(),
-			"last_error_at": now,
-		}
-		_ = database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignmentID).Updates(updates).Error
-		s.recordMemberError(assignment.Match302ID, assignment.PlaybackStorageID, err)
-		return err
-	}
 
 	result, err := s.transferSingle(ctx, &assignment)
 	if err != nil {
@@ -491,6 +482,12 @@ func (s *BalanceAssignmentService) RunTransfer(ctx context.Context, assignmentID
 		"cleanup_status":  model.BalanceCleanupStatusNone,
 		"cleanup_error":   "",
 	}
+	if result.SHA1 != "" {
+		updates["sha1"] = result.SHA1
+	}
+	if result.Size > 0 {
+		updates["size"] = result.Size
+	}
 	return database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignmentID).Updates(updates).Error
 }
 
@@ -498,6 +495,8 @@ type transferSingleResult struct {
 	FileID     string
 	PickCode   string
 	TargetPath string
+	SHA1       string
+	Size       int64
 }
 
 func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignment *model.Match302BalanceAssignment) (transferSingleResult, error) {
@@ -518,12 +517,6 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 	if err != nil {
 		return transferSingleResult{}, err
 	}
-	if sourceInfo.SHA1 == "" || sourceInfo.Size <= 0 {
-		return transferSingleResult{}, fmt.Errorf("源文件 sha1 或 size 缺失")
-	}
-	if sourceInfo.Size >= 115*1024*1024 && isCollectLike(sourceInfo) {
-		return transferSingleResult{}, fmt.Errorf("特殊资源或合集资源暂不支持秒传")
-	}
 
 	fromClient, err := s.web115Svc.NewClient(source.Cookie)
 	if err != nil {
@@ -532,6 +525,19 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 	toClient, err := s.web115Svc.NewClient(target.Cookie)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("子账号 Cookie 无效: %w", err)
+	}
+
+	if err := s.enrichSourceFileFromSupervision(fromClient, &sourceInfo); err != nil {
+		return transferSingleResult{}, err
+	}
+	if sourceInfo.Size >= 115*1024*1024 && isCollectLike(sourceInfo) {
+		return transferSingleResult{}, fmt.Errorf("特殊资源或合集资源暂不支持秒传")
+	}
+	if err := s.updateAssignmentSourceInfo(assignment, sourceInfo); err != nil {
+		return transferSingleResult{}, err
+	}
+	if err := s.cleanupStorageCacheForQuota(ctx, assignment); err != nil {
+		return transferSingleResult{}, err
 	}
 
 	targetRoot := s.targetRootPath(assignment.Match302ID, assignment.PlaybackStorageID)
@@ -548,6 +554,8 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 			FileID:     existing.FileID,
 			PickCode:   existing.PickCode,
 			TargetPath: joinCloudPath(targetDir, targetName),
+			SHA1:       sourceInfo.SHA1,
+			Size:       sourceInfo.Size,
 		}, nil
 	}
 
@@ -556,7 +564,7 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 		return transferSingleResult{}, fmt.Errorf("获取源账号直链失败: %w", err)
 	}
 	reader := newHTTPRangeReadSeeker(downloadInfo.Url.Url, downloadInfo.Header, sourceInfo.Size)
-	uploadResp, err := toClient.RapidUpload(sourceInfo.Size, targetName, targetDirID, "", sourceInfo.SHA1, reader)
+	uploadResp, err := s.web115Svc.RapidUploadWithP115ClientVersion(toClient, sourceInfo.Size, targetName, targetDirID, "", sourceInfo.SHA1, reader)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("秒传请求失败: %w", err)
 	}
@@ -575,13 +583,72 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 		return transferSingleResult{
 			PickCode:   uploadResp.PickCode,
 			TargetPath: joinCloudPath(targetDir, targetName),
+			SHA1:       sourceInfo.SHA1,
+			Size:       sourceInfo.Size,
 		}, nil
 	}
 	return transferSingleResult{
 		FileID:     targetFile.FileID,
 		PickCode:   targetFile.PickCode,
 		TargetPath: joinCloudPath(targetDir, targetName),
+		SHA1:       sourceInfo.SHA1,
+		Size:       sourceInfo.Size,
 	}, nil
+}
+
+func (s *BalanceAssignmentService) enrichSourceFileFromSupervision(client *driver.Pan115Client, sourceInfo *BalanceSourceFile) error {
+	if sourceInfo == nil {
+		return fmt.Errorf("源文件信息为空")
+	}
+	info, err := s.web115Svc.GetFileSupervisionWithClient(client, sourceInfo.PickCode)
+	if err != nil {
+		return fmt.Errorf("源文件 supervision 失败: %w", err)
+	}
+	if info.FileID != "" {
+		sourceInfo.FileID = info.FileID
+	}
+	if info.PickCode != "" {
+		sourceInfo.PickCode = info.PickCode
+	}
+	if info.Name != "" {
+		sourceInfo.FileName = info.Name
+	}
+	if info.SHA1 != "" {
+		sourceInfo.SHA1 = info.SHA1
+	}
+	if info.Size > 0 {
+		sourceInfo.Size = info.Size
+	}
+	sourceInfo.IsCollect = info.IsCollect
+	sourceInfo.FileType = info.FileType
+	return nil
+}
+
+func (s *BalanceAssignmentService) updateAssignmentSourceInfo(assignment *model.Match302BalanceAssignment, sourceInfo BalanceSourceFile) error {
+	if assignment == nil {
+		return nil
+	}
+	updates := make(map[string]any)
+	if sourceInfo.PickCode != "" && assignment.SourcePickcode != sourceInfo.PickCode {
+		assignment.SourcePickcode = sourceInfo.PickCode
+		updates["source_pickcode"] = sourceInfo.PickCode
+	}
+	if sourceInfo.FileID != "" && assignment.SourceFileID != sourceInfo.FileID {
+		assignment.SourceFileID = sourceInfo.FileID
+		updates["source_file_id"] = sourceInfo.FileID
+	}
+	if sourceInfo.SHA1 != "" && assignment.SHA1 != sourceInfo.SHA1 {
+		assignment.SHA1 = sourceInfo.SHA1
+		updates["sha1"] = sourceInfo.SHA1
+	}
+	if sourceInfo.Size > 0 && assignment.Size != sourceInfo.Size {
+		assignment.Size = sourceInfo.Size
+		updates["size"] = sourceInfo.Size
+	}
+	if len(updates) == 0 {
+		return nil
+	}
+	return database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignment.ID).Updates(updates).Error
 }
 
 func (s *BalanceAssignmentService) cleanupStorageCacheForQuota(ctx context.Context, assignment *model.Match302BalanceAssignment) error {
@@ -1026,10 +1093,12 @@ func (s *BalanceAssignmentService) ensureDirPath(client *driver.Pan115Client, di
 
 func (s *BalanceAssignmentService) findExistingTarget(client *driver.Pan115Client, dirID, fileName string, sourceInfo BalanceSourceFile) (Web115File, bool, error) {
 	if existing, ok := s.findFileByName(client, dirID, fileName); ok {
-		if strings.EqualFold(existing.SHA1, sourceInfo.SHA1) && existing.Size == sourceInfo.Size {
-			return existing, true, nil
+		if sourceInfo.SHA1 != "" && sourceInfo.Size > 0 {
+			if strings.EqualFold(existing.SHA1, sourceInfo.SHA1) && existing.Size == sourceInfo.Size {
+				return existing, true, nil
+			}
+			return Web115File{}, false, fmt.Errorf("目标路径已存在同名文件但 sha1/size 不一致: %s", fileName)
 		}
-		return Web115File{}, false, fmt.Errorf("目标路径已存在同名文件但 sha1/size 不一致: %s", fileName)
 	}
 	return Web115File{}, false, nil
 }
@@ -1187,7 +1256,7 @@ func splitCloudPath(p string) []string {
 }
 
 func isCollectLike(sourceInfo BalanceSourceFile) bool {
-	return false
+	return sourceInfo.IsCollect
 }
 
 type httpRangeReadSeeker struct {
