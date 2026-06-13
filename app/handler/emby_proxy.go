@@ -12,6 +12,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
+	"film-fusion/app/store/embyplayback"
 	"film-fusion/app/store/embyproxylog"
 	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
@@ -175,6 +176,7 @@ func (h *EmbyProxyHandler) log302Entry(entry embyproxylog.Entry) {
 		entry.Target,
 	)
 	embyproxylog.Default().Append(entry)
+	embyplayback.Default().AttachRedirect(entry)
 }
 
 // ProxyRequest 代理所有Emby请求的主要处理函数
@@ -187,8 +189,8 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 		removeEmbyRequestPath := strings.Replace(u.Path, "/emby", "", 1)
 
 		// 特殊路径处理
-		if removeEmbyRequestPath == "/Sessions/Playing" {
-			h.handlePlaying(c)
+		if isEmbyPlayingEventPath(removeEmbyRequestPath) {
+			h.handlePlaying(c, removeEmbyRequestPath)
 			return
 		}
 	}
@@ -285,23 +287,22 @@ func (h *EmbyProxyHandler) preheatPlaybackInfo(requestURI string, body []byte) {
 }
 
 // handlePlaying 处理播放会话请求
-func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
+func (h *EmbyProxyHandler) handlePlaying(c *gin.Context, embyPath string) {
 	h.logger.Debug("处理播放会话请求")
 
-	// 创建记录器来存储响应内容
-	recorder := httptest.NewRecorder()
-
-	var startInfo SimpleStartInfo
-
-	// 使用 io.Copy 复制请求正文到 recorder
-	io.Copy(recorder, c.Request.Body)
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		h.logger.Warnf("读取播放会话请求失败: %v", err)
+		body = nil
+	}
 
 	// 将请求正文指针重置到开头
-	c.Request.Body = io.NopCloser(bytes.NewReader(recorder.Body.Bytes()))
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
 
-	if err := json.Unmarshal(recorder.Body.Bytes(), &startInfo); err == nil {
+	playEvent := h.parsePlayingEvent(c, body)
+	if strings.EqualFold(embyPath, "/Sessions/Playing") && playEvent.ItemID != "" {
 		if h.config.Emby.AddCurrentMediaInfo {
-			err := h.GETPlaybackInfo(startInfo.ItemId)
+			err := h.GETPlaybackInfo(playEvent.ItemID)
 			if err != nil {
 				h.logger.Warnf("补充媒体信息失败了: %v", err)
 			}
@@ -309,12 +310,19 @@ func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
 
 		// 使用 goroutine 获取下一集的媒体信息
 		go func() {
-			h.GetNextMediaInfo(startInfo.ItemId)
+			h.GetNextMediaInfo(playEvent.ItemID)
 		}()
 	}
 
+	// 创建记录器来存储响应内容
+	recorder := httptest.NewRecorder()
+
 	// 代理请求
 	h.proxy.ServeHTTP(recorder, c.Request)
+
+	if recorder.Code < http.StatusBadRequest {
+		h.recordPlayingEvent(embyPath, playEvent)
+	}
 
 	// 将记录器的响应写回给客户端
 	for key, values := range recorder.Header() {
@@ -324,6 +332,54 @@ func (h *EmbyProxyHandler) handlePlaying(c *gin.Context) {
 	}
 	c.Status(recorder.Code)
 	c.Writer.Write(recorder.Body.Bytes())
+}
+
+func isEmbyPlayingEventPath(path string) bool {
+	normalized := strings.ToLower(path)
+	return normalized == "/sessions/playing" ||
+		normalized == "/sessions/playing/progress" ||
+		normalized == "/sessions/playing/stopped"
+}
+
+func (h *EmbyProxyHandler) parsePlayingEvent(c *gin.Context, body []byte) embyplayback.Event {
+	var payload map[string]any
+	_ = json.Unmarshal(body, &payload)
+	return embyplayback.Event{
+		ItemID:        stringValue(payload, "ItemId", "ItemID"),
+		MediaSourceID: stringValue(payload, "MediaSourceId", "MediaSourceID"),
+		PlaySessionID: stringValue(payload, "PlaySessionId", "PlaySessionID"),
+		RemoteIP:      c.ClientIP(),
+		UserAgent:     c.Request.UserAgent(),
+	}
+}
+
+func (h *EmbyProxyHandler) recordPlayingEvent(embyPath string, event embyplayback.Event) {
+	switch strings.ToLower(embyPath) {
+	case "/sessions/playing", "/sessions/playing/progress":
+		embyplayback.Default().MarkActive(event)
+	case "/sessions/playing/stopped":
+		embyplayback.Default().MarkStopped(event)
+	}
+}
+
+func stringValue(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := payload[key]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if strings.TrimSpace(typed) != "" {
+				return strings.TrimSpace(typed)
+			}
+		case fmt.Stringer:
+			if strings.TrimSpace(typed.String()) != "" {
+				return strings.TrimSpace(typed.String())
+			}
+		}
+	}
+	return ""
 }
 
 // proxyPlay 代理播放请求，返回重定向URL、日志条目和是否跳过标志

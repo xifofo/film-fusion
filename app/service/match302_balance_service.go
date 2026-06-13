@@ -16,18 +16,12 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
-	"film-fusion/app/store/embyproxylog"
+	"film-fusion/app/store/embyplayback"
 	"film-fusion/app/utils/pathhelper"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 	"gorm.io/gorm"
-)
-
-const (
-	balanceActiveWindow     = 2 * time.Minute
-	balanceRecentWindow     = 15 * time.Minute
-	defaultTransferCooldown = 10 * time.Minute
 )
 
 var errNoBalanceCandidate = errors.New("no balance candidate")
@@ -466,7 +460,7 @@ func (s *BalanceAssignmentService) RunTransfer(ctx context.Context, assignmentID
 			"last_error_at": now,
 		}
 		_ = database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignmentID).Updates(updates).Error
-		s.cooldownMember(assignment.Match302ID, assignment.PlaybackStorageID, err)
+		s.recordMemberError(assignment.Match302ID, assignment.PlaybackStorageID, err)
 		return err
 	}
 
@@ -479,7 +473,7 @@ func (s *BalanceAssignmentService) RunTransfer(ctx context.Context, assignmentID
 			"last_error_at": now,
 		}
 		_ = database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignmentID).Updates(updates).Error
-		s.cooldownMember(assignment.Match302ID, assignment.PlaybackStorageID, err)
+		s.recordMemberError(assignment.Match302ID, assignment.PlaybackStorageID, err)
 		return err
 	}
 
@@ -796,7 +790,6 @@ func (s *BalanceAssignmentService) rematerializeAssignment(assignment *model.Mat
 
 func (s *BalanceAssignmentService) candidates(match *model.Match302, excludeKey string) ([]balanceCandidate, string) {
 	var out []balanceCandidate
-	now := time.Now()
 	activeCounts := activePlaybackCountsByStorageExcept(excludeKey)
 	skippedByLimit := false
 
@@ -820,9 +813,6 @@ func (s *BalanceAssignmentService) candidates(match *model.Match302, excludeKey 
 	for i := range members {
 		member := members[i]
 		if !member.Enabled || member.CloudStorage == nil {
-			continue
-		}
-		if member.CooldownUntil != nil && member.CooldownUntil.After(now) {
 			continue
 		}
 		storage := *member.CloudStorage
@@ -979,15 +969,14 @@ func (s *BalanceAssignmentService) MarkAssignmentPlayed(assignmentID uint) {
 	s.markPlayed(assignmentID)
 }
 
-func (s *BalanceAssignmentService) cooldownMember(matchID, storageID uint, err error) {
+func (s *BalanceAssignmentService) recordMemberError(matchID, storageID uint, err error) {
 	now := time.Now()
-	until := now.Add(defaultTransferCooldown)
 	_ = database.DB.Model(&model.Match302BalanceMember{}).
 		Where("match302_id = ? AND cloud_storage_id = ?", matchID, storageID).
 		Updates(map[string]any{
 			"last_error":     err.Error(),
 			"last_error_at":  now,
-			"cooldown_until": until,
+			"cooldown_until": nil,
 		}).Error
 }
 
@@ -1151,27 +1140,7 @@ func activePlaybackCountsByStorage() map[uint]int {
 }
 
 func activePlaybackCountsByStorageExcept(excludeKey string) map[uint]int {
-	counts := make(map[uint]int)
-	now := time.Now()
-	seen := map[string]bool{}
-	for _, entry := range embyproxylog.Default().Snapshot(0) {
-		if entry.ActualStorageID == 0 || now.Sub(entry.Timestamp) > balanceActiveWindow {
-			continue
-		}
-		key := entry.PlaybackKey()
-		if key == "" {
-			key = fmt.Sprintf("%d:%s:%s", entry.ActualStorageID, entry.RemoteIP, entry.UserAgent)
-		}
-		if key != "" && key == excludeKey {
-			continue
-		}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		counts[entry.ActualStorageID]++
-	}
-	return counts
+	return embyplayback.Default().ActiveCountsByStorageExcept(excludeKey)
 }
 
 func relativeMediaPath(targetRoot, matchedPath, fileName string) string {

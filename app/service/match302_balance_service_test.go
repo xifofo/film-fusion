@@ -7,6 +7,8 @@ import (
 
 	"film-fusion/app/database"
 	"film-fusion/app/model"
+	"film-fusion/app/store/embyplayback"
+	"film-fusion/app/store/embyproxylog"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -119,6 +121,126 @@ func TestFindReadyPlaybackCacheByPathSkipsUnusableAssignments(t *testing.T) {
 		}
 		if got != nil {
 			t.Fatalf("FindReadyPlaybackCacheByPath(%q) returned assignment %d, want nil", input, got.ID)
+		}
+	}
+}
+
+func TestCandidatesDoNotSkipMembersWithCooldownUntil(t *testing.T) {
+	embyplayback.Default().Clear()
+	t.Cleanup(func() {
+		embyplayback.Default().Clear()
+	})
+
+	future := time.Now().Add(time.Hour)
+	source := model.CloudStorage{
+		ID:          1,
+		StorageType: model.StorageType115Open,
+		StorageName: "source",
+		Cookie:      "source-cookie",
+		Status:      model.StatusActive,
+	}
+	target := model.CloudStorage{
+		ID:          2,
+		StorageType: model.StorageType115Open,
+		StorageName: "target",
+		Cookie:      "target-cookie",
+		Status:      model.StatusActive,
+	}
+	match := &model.Match302{
+		ID:               1,
+		CloudStorageID:   source.ID,
+		CloudStorage:     &source,
+		BalanceEnabled:   true,
+		BalanceLimitMode: model.Match302BalanceLimitModeLoose,
+		PoolMembers: []model.Match302BalanceMember{
+			{
+				Match302ID:     1,
+				CloudStorageID: target.ID,
+				Enabled:        true,
+				Weight:         1,
+				CooldownUntil:  &future,
+				CloudStorage:   &target,
+			},
+		},
+	}
+
+	candidates, reason := NewBalanceAssignmentService(nil).candidates(match, "")
+	if reason != "" {
+		t.Fatalf("candidates returned reason %q, want empty", reason)
+	}
+	foundTarget := false
+	for _, candidate := range candidates {
+		if candidate.Storage.ID == target.ID {
+			foundTarget = true
+			break
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("member with cooldown_until was skipped, candidates=%v", candidates)
+	}
+}
+
+func TestCandidatesUseCurrentPlaybackStoreForActiveCounts(t *testing.T) {
+	embyplayback.Default().Clear()
+	t.Cleanup(func() {
+		embyplayback.Default().Clear()
+	})
+
+	source := model.CloudStorage{
+		ID:          1,
+		StorageType: model.StorageType115Open,
+		StorageName: "source",
+		Cookie:      "source-cookie",
+		Status:      model.StatusActive,
+	}
+	target := model.CloudStorage{
+		ID:                2,
+		StorageType:       model.StorageType115Open,
+		StorageName:       "target",
+		Cookie:            "target-cookie",
+		Status:            model.StatusActive,
+		Match302MaxActive: 1,
+	}
+	match := &model.Match302{
+		ID:               1,
+		CloudStorageID:   source.ID,
+		CloudStorage:     &source,
+		BalanceEnabled:   true,
+		BalanceLimitMode: model.Match302BalanceLimitModeLoose,
+		PoolMembers: []model.Match302BalanceMember{
+			{
+				Match302ID:     1,
+				CloudStorageID: target.ID,
+				Enabled:        true,
+				Weight:         1,
+				CloudStorage:   &target,
+			},
+		},
+	}
+	now := time.Now()
+	embyplayback.Default().MarkActive(embyplayback.Event{
+		ItemID:        "item-1",
+		MediaSourceID: "media-1",
+		RemoteIP:      "127.0.0.1",
+		UserAgent:     "test-player",
+		Timestamp:     now,
+	})
+	embyplayback.Default().AttachRedirect(embyproxylog.Entry{
+		Timestamp:       now,
+		ItemID:          "item-1",
+		MediaSourceID:   "media-1",
+		RemoteIP:        "127.0.0.1",
+		UserAgent:       "test-player",
+		ActualStorageID: target.ID,
+	})
+
+	candidates, reason := NewBalanceAssignmentService(nil).candidates(match, "")
+	if reason != "" {
+		t.Fatalf("candidates returned reason %q, want empty because source is still available", reason)
+	}
+	for _, candidate := range candidates {
+		if candidate.Storage.ID == target.ID {
+			t.Fatalf("target storage with active current playback was not skipped")
 		}
 	}
 }

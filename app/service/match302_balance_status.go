@@ -11,6 +11,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"film-fusion/app/store/embyplayback"
 	"film-fusion/app/store/embyproxylog"
 
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
@@ -50,7 +51,6 @@ type BalanceAccountLoadView struct {
 	PendingCount      int64      `json:"pending_count"`
 	TransferringCount int64      `json:"transferring_count"`
 	FailedCount       int64      `json:"failed_count"`
-	CooldownUntil     *time.Time `json:"cooldown_until"`
 	LastReadyAt       *time.Time `json:"last_ready_at"`
 	LastErrorAt       *time.Time `json:"last_error_at"`
 	LastError         string     `json:"last_error"`
@@ -109,8 +109,7 @@ func NewBalanceStatusService() *BalanceStatusService {
 
 func (s *BalanceStatusService) Snapshot() BalanceStatusView {
 	entries := embyproxylog.Default().Snapshot(0)
-	now := time.Now()
-	active := s.activePlaybacks(entries, now)
+	active := s.activePlaybacks(embyplayback.Default().Snapshot())
 	loads := s.accountLoads(active)
 	return BalanceStatusView{
 		ActivePlaybacks: active,
@@ -122,44 +121,31 @@ func (s *BalanceStatusService) Snapshot() BalanceStatusView {
 	}
 }
 
-func (s *BalanceStatusService) activePlaybacks(entries []embyproxylog.Entry, now time.Time) []BalanceActivePlaybackView {
-	latest := make(map[string]embyproxylog.Entry)
-	for _, entry := range entries {
-		if entry.ActualStorageID == 0 || now.Sub(entry.Timestamp) > balanceRecentWindow {
-			continue
-		}
-		key := entry.PlaybackKey()
-		if key == "" {
-			continue
-		}
-		if current, ok := latest[key]; !ok || entry.Timestamp.After(current.Timestamp) {
-			latest[key] = entry
-		}
-	}
-	out := make([]BalanceActivePlaybackView, 0, len(latest))
-	for key, entry := range latest {
-		state := "recent"
-		if now.Sub(entry.Timestamp) <= balanceActiveWindow {
-			state = "active"
+func (s *BalanceStatusService) activePlaybacks(sessions []embyplayback.Session) []BalanceActivePlaybackView {
+	out := make([]BalanceActivePlaybackView, 0, len(sessions))
+	for _, session := range sessions {
+		lastRequestAt := session.LastRequestAt
+		if lastRequestAt.IsZero() {
+			lastRequestAt = session.LastEventAt
 		}
 		out = append(out, BalanceActivePlaybackView{
-			Key:                 key,
-			State:               state,
-			MediaPath:           entry.MediaPath,
-			EmbyItemID:          entry.ItemID,
-			MediaSourceID:       entry.MediaSourceID,
-			RemoteIP:            entry.RemoteIP,
-			UserAgent:           entry.UserAgent,
-			Match302ID:          entry.Match302ID,
-			AssignmentID:        entry.AssignmentID,
-			AssignedStorageID:   entry.AssignedStorageID,
-			AssignedStorageName: entry.AssignedStorageName,
-			ActualStorageID:     entry.ActualStorageID,
-			ActualStorageName:   entry.ActualStorageName,
-			AccountType:         entry.AccountType,
-			Status:              entry.BalanceStatus,
-			FallbackReason:      entry.FallbackReason,
-			LastRequestAt:       entry.Timestamp,
+			Key:                 session.Key,
+			State:               "active",
+			MediaPath:           session.MediaPath,
+			EmbyItemID:          session.ItemID,
+			MediaSourceID:       session.MediaSourceID,
+			RemoteIP:            session.RemoteIP,
+			UserAgent:           session.UserAgent,
+			Match302ID:          session.Match302ID,
+			AssignmentID:        session.AssignmentID,
+			AssignedStorageID:   session.AssignedStorageID,
+			AssignedStorageName: session.AssignedStorageName,
+			ActualStorageID:     session.ActualStorageID,
+			ActualStorageName:   session.ActualStorageName,
+			AccountType:         session.AccountType,
+			Status:              session.Status,
+			FallbackReason:      session.FallbackReason,
+			LastRequestAt:       lastRequestAt,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -249,7 +235,6 @@ func (s *BalanceStatusService) accountLoad(matchID uint, storage model.CloudStor
 		view.LastError = failed.LastError
 	}
 	if member != nil {
-		view.CooldownUntil = member.CooldownUntil
 		if view.LastError == "" {
 			view.LastError = member.LastError
 			view.LastErrorAt = member.LastErrorAt
@@ -586,9 +571,8 @@ func findRecycleItemID(client *driver.Pan115Client, fileID string, assignment *m
 }
 
 func activeAssignment(assignmentID uint) bool {
-	now := time.Now()
-	for _, entry := range embyproxylog.Default().Snapshot(0) {
-		if entry.AssignmentID == assignmentID && now.Sub(entry.Timestamp) <= balanceActiveWindow {
+	for _, session := range embyplayback.Default().Snapshot() {
+		if session.AssignmentID == assignmentID {
 			return true
 		}
 	}
