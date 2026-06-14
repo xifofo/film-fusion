@@ -229,6 +229,7 @@ func (s *Server) setupRoutes() {
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
+	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 
 	// API路由组
@@ -422,6 +423,16 @@ func (s *Server) setupRoutes() {
 			embyProxyLog.GET("/302-logs", embyProxyLogHandler.List)
 			embyProxyLog.DELETE("/302-logs", embyProxyLogHandler.Clear)
 			embyProxyLog.GET("/balance-status", embyProxyLogHandler.BalanceStatus)
+		}
+
+		// Emby 账号 -> 115 存储 绑定（指定账号强制走指定 cookie）
+		embyBindings := protected.Group("/emby-bindings")
+		{
+			embyBindings.GET("", embyBindingHandler.ListBindings)
+			embyBindings.POST("", embyBindingHandler.CreateBinding)
+			embyBindings.GET("/emby-users", embyBindingHandler.ListEmbyUsers)
+			embyBindings.PUT("/:id", embyBindingHandler.UpdateBinding)
+			embyBindings.DELETE("/:id", embyBindingHandler.DeleteBinding)
 		}
 
 		// Match302 匹配配置相关路由

@@ -311,6 +311,9 @@ func (h *CloudStorageHandler) DeleteCloudStorage(c *gin.Context) {
 		return
 	}
 
+	// 清理引用该存储的 Emby 账号绑定，避免悬挂
+	_ = database.DB.Where("cloud_storage_id = ?", id).Delete(&model.EmbyAccountBinding{}).Error
+
 	h.success(c, nil, "删除成功")
 }
 

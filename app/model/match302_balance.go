@@ -54,7 +54,8 @@ type Match302BalanceAssignment struct {
 	MediaSourceID     string     `gorm:"size:160;index" json:"media_source_id"`
 	SourceFilePath    string     `gorm:"size:1000;not null;uniqueIndex:uk_match302_balance_assignment,priority:2" json:"source_file_path"`
 	SourceStorageID   uint       `gorm:"not null;index" json:"source_storage_id"`
-	PlaybackStorageID uint       `gorm:"not null;index" json:"playback_storage_id"`
+	PlaybackStorageID uint       `gorm:"not null;index;uniqueIndex:uk_match302_balance_assignment,priority:3" json:"playback_storage_id"`
+	Forced            bool       `gorm:"default:false;index;uniqueIndex:uk_match302_balance_assignment,priority:4;comment:是否由Emby账号绑定强制指定" json:"forced"`
 	IsSourcePlayback  bool       `gorm:"default:false" json:"is_source_playback"`
 	SourcePickcode    string     `gorm:"size:120;index" json:"source_pickcode"`
 	TargetPickcode    string     `gorm:"size:120;index" json:"target_pickcode"`

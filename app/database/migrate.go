@@ -21,6 +21,12 @@ func AutoMigrate() error {
 		return fmt.Errorf("移除云存储唯一索引失败: %v", err)
 	}
 
+	// Match302 负载均衡 assignment 唯一索引扩维(增加 playback_storage_id, forced)
+	// 旧索引仅 (match302_id, source_file_path)，AutoMigrate 不会修改已存在索引，需先删除再重建
+	if err := migrateMatch302AssignmentUniqueIndex(); err != nil {
+		return fmt.Errorf("迁移Match302负载均衡唯一索引失败: %v", err)
+	}
+
 	// 自动迁移表结构
 	if err := DB.AutoMigrate(
 		&model.SystemConfig{},
@@ -33,6 +39,7 @@ func AutoMigrate() error {
 		&model.Match302{},
 		&model.Match302BalanceMember{},
 		&model.Match302BalanceAssignment{},
+		&model.EmbyAccountBinding{},
 		&model.Web115AppVersionCache{},
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},
@@ -85,6 +92,40 @@ func removeCloudStorageProviderUniqueIndex() error {
 	}
 
 	return nil
+}
+
+// migrateMatch302AssignmentUniqueIndex 处理 match302_balance_assignments 唯一索引扩维。
+// 旧唯一索引 uk_match302_balance_assignment = (match302_id, source_file_path)。
+// 新增 playback_storage_id, forced 两个维度以支持"按账号区分"的绑定分配。
+// AutoMigrate 不会修改已存在的索引，这里检测旧索引列数不足则删除，交由 AutoMigrate 重建。
+func migrateMatch302AssignmentUniqueIndex() error {
+	if !DB.Migrator().HasTable(&model.Match302BalanceAssignment{}) {
+		return nil
+	}
+
+	var count int64
+	if err := DB.Raw(
+		"SELECT count(*) FROM pragma_index_list('match302_balance_assignments') WHERE name = ?",
+		"uk_match302_balance_assignment",
+	).Scan(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
+		return nil
+	}
+
+	var colCount int64
+	if err := DB.Raw(
+		"SELECT count(*) FROM pragma_index_info('uk_match302_balance_assignment')",
+	).Scan(&colCount).Error; err != nil {
+		return err
+	}
+	// 已是新结构(4 列)则无需处理
+	if colCount >= 4 {
+		return nil
+	}
+
+	return DB.Exec("DROP INDEX IF EXISTS uk_match302_balance_assignment").Error
 }
 
 func removeDeprecatedMatch302Columns() error {

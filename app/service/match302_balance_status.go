@@ -189,6 +189,35 @@ func (s *BalanceStatusService) accountLoads(active []BalanceActivePlaybackView) 
 			out = append(out, s.accountLoad(match.ID, *member.CloudStorage, "member", &member, activeByStorage[member.CloudStorage.ID]))
 		}
 	}
+
+	// 纳入"仅作为 Emby 账号绑定目标"的存储：它们可能不在源账号/子账号池里，
+	// 甚至所在 Match302 未开启负载均衡，但仍承载了 forced 秒传缓存与播放负载。
+	type forcedPair struct {
+		Match302ID        uint
+		PlaybackStorageID uint
+	}
+	var forcedPairs []forcedPair
+	if err := database.DB.Model(&model.Match302BalanceAssignment{}).
+		Where("forced = ?", true).
+		Distinct("match302_id", "playback_storage_id").
+		Find(&forcedPairs).Error; err == nil {
+		for _, pair := range forcedPairs {
+			if pair.PlaybackStorageID == 0 {
+				continue
+			}
+			key := fmt.Sprintf("%d:%d", pair.Match302ID, pair.PlaybackStorageID)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			var storage model.CloudStorage
+			if err := database.DB.First(&storage, pair.PlaybackStorageID).Error; err != nil {
+				continue
+			}
+			out = append(out, s.accountLoad(pair.Match302ID, storage, "binding", nil, activeByStorage[pair.PlaybackStorageID]))
+		}
+	}
+
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Match302ID != out[j].Match302ID {
 			return out[i].Match302ID < out[j].Match302ID

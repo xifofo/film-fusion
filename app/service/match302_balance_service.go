@@ -47,6 +47,9 @@ type BalancePlaybackRequest struct {
 	MediaSourceID string
 	UserAgent     string
 	RemoteIP      string
+	// ForcedStorageID 非 0 时表示该 Emby 账号被绑定到指定 115 存储，强制走该存储播放，
+	// 不依赖 Match302 的负载均衡开关；不可用/并发满/秒传未就绪时回退到正常流程。
+	ForcedStorageID uint
 }
 
 type BalancePlaybackDecision struct {
@@ -185,6 +188,14 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 		}
 	}
 
+	// Emby 账号绑定：强制走指定 115 存储，不依赖负载均衡开关。
+	// 命中则直接返回；不可用/并发满/秒传未就绪时返回 handled=false，继续走下方正常流程(负载均衡或源播放)。
+	if req.ForcedStorageID != 0 {
+		if decision, handled := s.resolveForcedPlayback(ctx, match, sourceInfo, req, playbackKey); handled {
+			return decision, nil
+		}
+	}
+
 	if !match.BalanceEnabled {
 		return sourceDecision("未启用负载均衡", "未启用负载均衡"), nil
 	}
@@ -315,6 +326,182 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 	return decision, nil
 }
 
+// resolveForcedPlayback 处理 Emby 账号绑定的强制存储播放。
+// 返回 handled=false 表示指定账号不可用/并发满/秒传未就绪，调用方应回退到正常流程。
+func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, req BalancePlaybackRequest, playbackKey string) (*BalancePlaybackDecision, bool) {
+	forcedID := req.ForcedStorageID
+	if forcedID == 0 || match.CloudStorage == nil {
+		return nil, false
+	}
+
+	// 指定账号即源账号 -> 直接源播放(无需秒传)
+	if forcedID == match.CloudStorageID {
+		if strings.TrimSpace(match.CloudStorage.Cookie) == "" || !storageUsable(*match.CloudStorage) {
+			return nil, false
+		}
+		return &BalancePlaybackDecision{
+			UseBalance:       true,
+			Status:           "指定账号播放(源)",
+			Match:            match,
+			SourceStorage:    match.CloudStorage,
+			PlaybackStorage:  match.CloudStorage,
+			SourceFile:       sourceInfo,
+			ActualPickCode:   sourceInfo.PickCode,
+			IsSourcePlayback: true,
+			AccountType:      "binding",
+		}, true
+	}
+
+	// 指定账号为其它存储 -> 需要从源账号秒传过去，源账号必须可用
+	if strings.TrimSpace(match.CloudStorage.Cookie) == "" || !storageUsable(*match.CloudStorage) {
+		return nil, false
+	}
+
+	var forcedStorage model.CloudStorage
+	if err := database.DB.First(&forcedStorage, forcedID).Error; err != nil {
+		return nil, false
+	}
+	if forcedStorage.StorageType != model.StorageType115Open ||
+		!storageUsable(forcedStorage) ||
+		strings.TrimSpace(forcedStorage.Cookie) == "" {
+		return nil, false
+	}
+
+	// 指定账号并发已满 -> 回退到正常负载均衡
+	if over, _, _ := s.accountOverLimit(match, forcedStorage.ID, playbackKey); over {
+		return nil, false
+	}
+
+	assignment, err := s.ensureForcedAssignment(ctx, match, sourceInfo, forcedStorage, req.EmbyItemID, req.MediaSourceID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warnf("[match302-balance] 绑定账号分配失败 match=%d storage=%d err=%v", match.ID, forcedStorage.ID, err)
+		}
+		return nil, false
+	}
+
+	if assignment.Status == model.BalanceAssignmentStatusPending {
+		s.StartTransferAsync(assignment.ID)
+	}
+	if ready := s.waitReady(ctx, assignment.ID, 3*time.Second); ready != nil {
+		assignment = ready
+	}
+
+	if assignment.Status != model.BalanceAssignmentStatusReady || strings.TrimSpace(assignment.TargetPickcode) == "" {
+		// 秒传未就绪 / 失败 -> 回退到正常流程
+		return nil, false
+	}
+
+	s.markPlayed(assignment.ID)
+	return &BalancePlaybackDecision{
+		UseBalance:       true,
+		Status:           "指定账号播放",
+		Match:            match,
+		Assignment:       assignment,
+		SourceStorage:    match.CloudStorage,
+		PlaybackStorage:  &forcedStorage,
+		SourceFile:       sourceInfo,
+		ActualPickCode:   assignment.TargetPickcode,
+		IsSourcePlayback: false,
+		AccountType:      "binding",
+	}, true
+}
+
+// ensureForcedAssignment 获取或创建绑定账号(forced=true)的秒传分配，按 (match, file, storage) 维度区分。
+func (s *BalanceAssignmentService) ensureForcedAssignment(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, target model.CloudStorage, embyItemID, mediaSourceID string) (*model.Match302BalanceAssignment, error) {
+	var existing model.Match302BalanceAssignment
+	err := database.DB.Where("match302_id = ? AND source_file_path = ? AND playback_storage_id = ? AND forced = ?",
+		match.ID, sourceInfo.SourceFilePath, target.ID, true).First(&existing).Error
+	if err == nil {
+		if assignmentCacheReusable(&existing, time.Now()) {
+			if existing.SourcePickcode == "" || existing.SHA1 == "" || existing.Size == 0 {
+				_ = database.DB.Model(&existing).Updates(map[string]any{
+					"source_pickcode": sourceInfo.PickCode,
+					"source_file_id":  sourceInfo.FileID,
+					"sha1":            sourceInfo.SHA1,
+					"size":            sourceInfo.Size,
+				}).Error
+				_ = database.DB.First(&existing, existing.ID).Error
+			}
+			if existing.Status == model.BalanceAssignmentStatusPending {
+				s.StartTransferAsync(existing.ID)
+			}
+			return &existing, nil
+		}
+		if err := s.rematerializeForcedAssignment(&existing, match, sourceInfo, target, embyItemID, mediaSourceID); err != nil {
+			return nil, err
+		}
+		s.StartTransferAsync(existing.ID)
+		return &existing, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(match.RetentionHours) * time.Hour)
+	assignment := &model.Match302BalanceAssignment{
+		Match302ID:        match.ID,
+		EmbyItemID:        embyItemID,
+		MediaSourceID:     mediaSourceID,
+		SourceFilePath:    sourceInfo.SourceFilePath,
+		SourceStorageID:   match.CloudStorageID,
+		PlaybackStorageID: target.ID,
+		Forced:            true,
+		IsSourcePlayback:  false,
+		SourcePickcode:    sourceInfo.PickCode,
+		SourceFileID:      sourceInfo.FileID,
+		SHA1:              sourceInfo.SHA1,
+		Size:              sourceInfo.Size,
+		Status:            model.BalanceAssignmentStatusPending,
+		CleanupStatus:     model.BalanceCleanupStatusNone,
+		ExpiresAt:         &expiresAt,
+	}
+	if err := database.DB.Create(assignment).Error; err != nil {
+		if qErr := database.DB.Where("match302_id = ? AND source_file_path = ? AND playback_storage_id = ? AND forced = ?",
+			match.ID, sourceInfo.SourceFilePath, target.ID, true).First(&existing).Error; qErr == nil {
+			return &existing, nil
+		}
+		return nil, err
+	}
+	s.StartTransferAsync(assignment.ID)
+	_ = ctx
+	return assignment, nil
+}
+
+func (s *BalanceAssignmentService) rematerializeForcedAssignment(assignment *model.Match302BalanceAssignment, match *model.Match302, sourceInfo BalanceSourceFile, target model.CloudStorage, embyItemID, mediaSourceID string) error {
+	now := time.Now()
+	expiresAt := now.Add(time.Duration(match.RetentionHours) * time.Hour)
+	updates := map[string]any{
+		"emby_item_id":        embyItemID,
+		"media_source_id":     mediaSourceID,
+		"source_storage_id":   match.CloudStorageID,
+		"playback_storage_id": target.ID,
+		"forced":              true,
+		"is_source_playback":  false,
+		"source_pickcode":     sourceInfo.PickCode,
+		"source_file_id":      sourceInfo.FileID,
+		"sha1":                sourceInfo.SHA1,
+		"size":                sourceInfo.Size,
+		"status":              model.BalanceAssignmentStatusPending,
+		"attempts":            0,
+		"last_error":          "",
+		"last_error_at":       nil,
+		"last_ready_at":       nil,
+		"expires_at":          &expiresAt,
+		"cleanup_status":      model.BalanceCleanupStatusNone,
+		"cleanup_error":       "",
+		"cleaned_at":          nil,
+		"target_pickcode":     "",
+		"target_file_id":      "",
+		"target_path":         "",
+	}
+	if err := database.DB.Model(assignment).Updates(updates).Error; err != nil {
+		return err
+	}
+	return database.DB.First(assignment, assignment.ID).Error
+}
+
 func (s *BalanceAssignmentService) PreheatAssignment(ctx context.Context, req BalancePlaybackRequest) error {
 	if req.Match == nil || !req.Match.BalanceEnabled {
 		return nil
@@ -357,8 +544,9 @@ func (s *BalanceAssignmentService) FindReadyPlaybackCacheByPath(filePath string)
 		Preload("Match302.PoolMembers.CloudStorage").
 		Preload("SourceStorage").
 		Preload("PlaybackStorage").
-		Where("status = ? AND is_source_playback = ? AND target_pickcode <> ?",
+		Where("status = ? AND is_source_playback = ? AND forced = ? AND target_pickcode <> ?",
 			model.BalanceAssignmentStatusReady,
+			false,
 			false,
 			"",
 		).
@@ -727,7 +915,7 @@ func (s *BalanceAssignmentService) cleanupStorageCacheForQuota(ctx context.Conte
 
 func (s *BalanceAssignmentService) ensureAssignment(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, candidates []balanceCandidate, embyItemID, mediaSourceID, playbackKey string) (*model.Match302BalanceAssignment, error) {
 	var existing model.Match302BalanceAssignment
-	err := database.DB.Where("match302_id = ? AND source_file_path = ?", match.ID, sourceInfo.SourceFilePath).First(&existing).Error
+	err := database.DB.Where("match302_id = ? AND source_file_path = ? AND forced = ?", match.ID, sourceInfo.SourceFilePath, false).First(&existing).Error
 	if err == nil {
 		if assignmentCacheReusable(&existing, time.Now()) {
 			if existing.SourcePickcode == "" || existing.SHA1 == "" || existing.Size == 0 {
@@ -792,7 +980,7 @@ func (s *BalanceAssignmentService) ensureAssignment(ctx context.Context, match *
 	}
 
 	if err := database.DB.Create(assignment).Error; err != nil {
-		if qErr := database.DB.Where("match302_id = ? AND source_file_path = ?", match.ID, sourceInfo.SourceFilePath).First(&existing).Error; qErr == nil {
+		if qErr := database.DB.Where("match302_id = ? AND source_file_path = ? AND forced = ?", match.ID, sourceInfo.SourceFilePath, false).First(&existing).Error; qErr == nil {
 			return &existing, nil
 		}
 		return nil, err
