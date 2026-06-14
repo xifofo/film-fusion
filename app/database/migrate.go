@@ -15,6 +15,12 @@ func AutoMigrate() error {
 		return fmt.Errorf("移除Match302废弃字段失败: %v", err)
 	}
 
+	// 移除 cloud_storages 上 (storage_type, provider_uid) 的唯一索引
+	// 改为应用层判重：不同115账号可随意新增，同账号已绑定时由业务层拒绝
+	if err := removeCloudStorageProviderUniqueIndex(); err != nil {
+		return fmt.Errorf("移除云存储唯一索引失败: %v", err)
+	}
+
 	// 自动迁移表结构
 	if err := DB.AutoMigrate(
 		&model.SystemConfig{},
@@ -55,6 +61,25 @@ func removeEmailUniqueIndex() error {
 	if count > 0 {
 		// SQLite中删除索引的语法
 		if err := DB.Exec("DROP INDEX IF EXISTS idx_users_email").Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// removeCloudStorageProviderUniqueIndex 移除 cloud_storages 表上历史遗留的
+// (storage_type, provider_uid) 唯一索引 uk_user_type_provider。
+// 新模型已改为普通索引，但 AutoMigrate 不会自动删除旧的唯一索引，需在此显式处理。
+func removeCloudStorageProviderUniqueIndex() error {
+	var count int64
+	err := DB.Raw("SELECT count(*) FROM pragma_index_list('cloud_storages') WHERE name = 'uk_user_type_provider'").Scan(&count).Error
+	if err != nil {
+		return err
+	}
+
+	if count > 0 {
+		if err := DB.Exec("DROP INDEX IF EXISTS uk_user_type_provider").Error; err != nil {
 			return err
 		}
 	}

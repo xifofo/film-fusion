@@ -39,27 +39,65 @@ func (h *CloudStorageHandler) error(c *gin.Context, statusCode int, errorCode in
 
 // CreateCloudStorage 创建网盘存储配置
 func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
-	var req model.CloudStorage
+	// 仅绑定允许由客户端设置的字段，避免越权写入 user_id / provider_uid / status 等服务端控制字段
+	var req struct {
+		StorageType        string `json:"storage_type"`
+		StorageName        string `json:"storage_name"`
+		AppID              string `json:"app_id"`
+		AppSecret          string `json:"app_secret"`
+		AccessToken        string `json:"access_token"`
+		RefreshToken       string `json:"refresh_token"`
+		Cookie             string `json:"cookie"`
+		AutoRefresh        *bool  `json:"auto_refresh"`
+		RefreshBeforeMin   *int   `json:"refresh_before_min"`
+		Config             string `json:"config"`
+		SortOrder          int    `json:"sort_order"`
+		Match302MaxActive  int    `json:"match302_max_active"`
+		Match302CacheMaxGB int64  `json:"match302_cache_max_gb"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
-	// 获取当前用户ID（假设从JWT中间件获取）
+	// 获取当前用户ID（从JWT中间件获取）
 	userID, exists := c.Get("user_id")
 	if !exists {
 		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
-	req.UserID = userID.(uint)
-	req.NormalizeMatch302Defaults()
 
-	if err := database.DB.Create(&req).Error; err != nil {
+	storage := model.CloudStorage{
+		UserID:             userID.(uint),
+		StorageType:        req.StorageType,
+		StorageName:        req.StorageName,
+		AppID:              req.AppID,
+		AppSecret:          req.AppSecret,
+		AccessToken:        req.AccessToken,
+		RefreshToken:       req.RefreshToken,
+		Cookie:             req.Cookie,
+		Config:             req.Config,
+		SortOrder:          req.SortOrder,
+		Match302MaxActive:  req.Match302MaxActive,
+		Match302CacheMaxGB: req.Match302CacheMaxGB,
+		Status:             model.StatusActive,
+		AutoRefresh:        true,
+		RefreshBeforeMin:   30,
+	}
+	if req.AutoRefresh != nil {
+		storage.AutoRefresh = *req.AutoRefresh
+	}
+	if req.RefreshBeforeMin != nil {
+		storage.RefreshBeforeMin = *req.RefreshBeforeMin
+	}
+	storage.NormalizeMatch302Defaults()
+
+	if err := database.DB.Create(&storage).Error; err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "创建存储配置失败")
 		return
 	}
 
-	h.success(c, req, "创建存储配置成功")
+	h.success(c, storage, "创建存储配置成功")
 }
 
 // GetCloudStorages 获取网盘存储列表

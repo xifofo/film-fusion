@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
@@ -152,7 +153,10 @@ func maskToken(token string) string {
 }
 
 // 存储会话信息
-var authSessions = make(map[string]*authSession)
+var (
+	authSessions   = make(map[string]*authSession)
+	authSessionsMu sync.Mutex
+)
 
 // 简化的设备码结构体
 type DeviceCode struct {
@@ -217,6 +221,7 @@ func (h *Auth115Handler) GetQrCode(c *gin.Context) {
 	sessionID := fmt.Sprintf("%d_%d", userID.(uint), time.Now().UnixNano())
 
 	// 保存会话信息
+	authSessionsMu.Lock()
 	authSessions[sessionID] = &authSession{
 		DeviceCode:   deviceCode,
 		CodeVerifier: codeVerifier,
@@ -225,6 +230,7 @@ func (h *Auth115Handler) GetQrCode(c *gin.Context) {
 		UserID:       userID.(uint),
 		CreatedAt:    time.Now(),
 	}
+	authSessionsMu.Unlock()
 
 	// 清理过期会话（15分钟）
 	go h.cleanExpiredSessions()
@@ -244,7 +250,9 @@ func (h *Auth115Handler) CheckStatus(c *gin.Context) {
 	}
 
 	// 获取会话信息
+	authSessionsMu.Lock()
 	session, exists := authSessions[req.SessionID]
+	authSessionsMu.Unlock()
 	if !exists {
 		h.error(c, http.StatusNotFound, 404, "会话不存在或已过期")
 		return
@@ -252,7 +260,9 @@ func (h *Auth115Handler) CheckStatus(c *gin.Context) {
 
 	// 检查会话是否过期（15分钟）
 	if time.Since(session.CreatedAt) > 15*time.Minute {
+		authSessionsMu.Lock()
 		delete(authSessions, req.SessionID)
+		authSessionsMu.Unlock()
 		h.error(c, http.StatusGone, 410, "会话已过期")
 		return
 	}
@@ -294,7 +304,9 @@ func (h *Auth115Handler) CheckStatus(c *gin.Context) {
 	case -2:
 		message = "已取消登录"
 		// 清理会话
+		authSessionsMu.Lock()
 		delete(authSessions, req.SessionID)
+		authSessionsMu.Unlock()
 	default:
 		message = fmt.Sprintf("未知状态: %d", qrResponse.Data.Status)
 	}
@@ -320,7 +332,9 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 	}
 
 	// 获取会话信息
+	authSessionsMu.Lock()
 	session, exists := authSessions[req.SessionID]
+	authSessionsMu.Unlock()
 	if !exists {
 		h.error(c, http.StatusNotFound, 404, "会话不存在或已过期")
 		return
@@ -359,51 +373,43 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 	}
 	providerUID := strconv.FormatInt(userInfo.UserID, 10)
 
-	// 按优先级定位目标记录：
-	// 1) 若请求显式指定 storage_id（重新登录场景），按 id 定位，且必须属于当前用户
-	// 2) 否则按 (user_id, storage_type, provider_uid) 定位同一个115账号
-	// 3) 仍未命中，兼容尚未回填 provider_uid 的旧数据：按 (user_id, storage_type, app_id) 定位 provider_uid 为空的记录
+	// 定位目标记录：
+	// - 重新登录(storage_id>0)：按 id 定位并更新指定记录，且必须属于当前用户
+	// - 新建(storage_id==0)：始终新建一条；若该115账号已绑定到当前用户的某条配置，则拒绝，避免重复或覆盖
 	var cloudStorage model.CloudStorage
 	var found bool
 
 	if req.StorageID > 0 {
 		if err := database.DB.
 			Where("id = ? AND user_id = ? AND storage_type = ?", req.StorageID, userID.(uint), model.StorageType115Open).
-			First(&cloudStorage).Error; err == nil {
-			found = true
-			// 防止误操作：指定的记录若已绑定另一个115账号，则拒绝更新
-			if cloudStorage.ProviderUID != "" && cloudStorage.ProviderUID != providerUID {
-				h.error(c, http.StatusConflict, 409,
-					fmt.Sprintf("扫码使用的115账号(user_id=%s)与当前存储配置绑定的账号(%s)不一致，请使用原账号扫码", providerUID, cloudStorage.ProviderUID))
+			First(&cloudStorage).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				h.error(c, http.StatusNotFound, 404, "指定的存储配置不存在")
 				return
 			}
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 			h.logger.Errorf("查询指定云存储失败: %v", err)
 			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
 			return
 		}
-	}
-
-	if !found {
-		if err := database.DB.
-			Where("user_id = ? AND storage_type = ? AND provider_uid = ?", userID.(uint), model.StorageType115Open, providerUID).
-			First(&cloudStorage).Error; err == nil {
-			found = true
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			h.logger.Errorf("按 provider_uid 查询云存储失败: %v", err)
-			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
+		found = true
+		// 防止误操作：指定的记录若已绑定另一个115账号，则拒绝更新
+		if cloudStorage.ProviderUID != "" && cloudStorage.ProviderUID != providerUID {
+			h.error(c, http.StatusConflict, 409,
+				fmt.Sprintf("扫码使用的115账号(user_id=%s)与当前存储配置绑定的账号(%s)不一致，请使用原账号扫码", providerUID, cloudStorage.ProviderUID))
 			return
 		}
-	}
-
-	if !found {
-		if err := database.DB.
-			Where("user_id = ? AND storage_type = ? AND app_id = ? AND (provider_uid IS NULL OR provider_uid = '')",
-				userID.(uint), model.StorageType115Open, session.ClientID).
-			First(&cloudStorage).Error; err == nil {
-			found = true
+	} else {
+		// 新建场景：应用层判重——同一用户下该115账号若已绑定则拒绝
+		var existing model.CloudStorage
+		err := database.DB.
+			Where("user_id = ? AND storage_type = ? AND provider_uid = ?", userID.(uint), model.StorageType115Open, providerUID).
+			First(&existing).Error
+		if err == nil {
+			h.error(c, http.StatusConflict, 409,
+				fmt.Sprintf("该115账号(user_id=%s)已绑定到存储配置「%s」，如需更新令牌请使用「重新登录」", providerUID, existing.StorageName))
+			return
 		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			h.logger.Errorf("按 app_id 兼容查询云存储失败: %v", err)
+			h.logger.Errorf("校验115账号是否已绑定失败: %v", err)
 			h.error(c, http.StatusInternalServerError, 500, "查询存储配置失败")
 			return
 		}
@@ -448,7 +454,9 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 	}
 
 	// 清理会话
+	authSessionsMu.Lock()
 	delete(authSessions, req.SessionID)
+	authSessionsMu.Unlock()
 
 	var successMessage string
 	if isUpdate {
@@ -469,6 +477,8 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 // cleanExpiredSessions 清理过期会话
 func (h *Auth115Handler) cleanExpiredSessions() {
 	now := time.Now()
+	authSessionsMu.Lock()
+	defer authSessionsMu.Unlock()
 	for sessionID, session := range authSessions {
 		if now.Sub(session.CreatedAt) > 15*time.Minute {
 			delete(authSessions, sessionID)
@@ -485,6 +495,7 @@ func (h *Auth115Handler) GetAuthSessions(c *gin.Context) {
 	}
 
 	var sessions []gin.H
+	authSessionsMu.Lock()
 	for sessionID, session := range authSessions {
 		if session.UserID == userID.(uint) {
 			sessions = append(sessions, gin.H{
@@ -496,6 +507,7 @@ func (h *Auth115Handler) GetAuthSessions(c *gin.Context) {
 			})
 		}
 	}
+	authSessionsMu.Unlock()
 
 	h.success(c, gin.H{
 		"sessions": sessions,
