@@ -29,6 +29,7 @@ type Server struct {
 	embyCoverService       *service.EmbyCoverService
 	embySortNameService    *service.EmbySortNameService
 	embyStatsService       *service.EmbyStatsService
+	embyMissingService     *service.EmbyMissingService
 	balanceCleanupSvc      *service.BalanceCleanupService
 	embyClient             *embyhelper.EmbyClient
 	organizeLogCleaner     *service.OrganizeLogCleaner
@@ -69,6 +70,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	embyCoverService := service.NewEmbyCoverService(cfg, log, embyClient)
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
+	embyMissingService := service.NewEmbyMissingService(cfg, log, embyClient)
 
 	s := &Server{
 		gin: router,
@@ -85,6 +87,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		embyCoverService:       embyCoverService,
 		embySortNameService:    embySortNameService,
 		embyStatsService:       embyStatsService,
+		embyMissingService:     embyMissingService,
 		balanceCleanupSvc:      service.NewBalanceCleanupService(log),
 		embyClient:             embyClient,
 		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
@@ -136,6 +139,9 @@ func (s *Server) Start() error {
 	// 启动 Match302 子账号缓存清理器
 	s.balanceCleanupSvc.Start()
 
+	// 启动 Emby 缺集定时扫描调度
+	s.embyMissingService.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -169,6 +175,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.balanceCleanupSvc != nil {
 		s.balanceCleanupSvc.Stop()
+	}
+
+	if s.embyMissingService != nil {
+		s.embyMissingService.Stop()
 	}
 
 	// 停止Emby代理服务器
@@ -230,6 +240,7 @@ func (s *Server) setupRoutes() {
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
+	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 
 	// API路由组
@@ -433,6 +444,19 @@ func (s *Server) setupRoutes() {
 			embyBindings.GET("/emby-users", embyBindingHandler.ListEmbyUsers)
 			embyBindings.PUT("/:id", embyBindingHandler.UpdateBinding)
 			embyBindings.DELETE("/:id", embyBindingHandler.DeleteBinding)
+		}
+
+		// Emby 缺集扫描（含定时扫描与黑名单）
+		embyMissing := protected.Group("/emby-missing")
+		{
+			embyMissing.GET("", embyMissingHandler.List)
+			embyMissing.POST("/scan", embyMissingHandler.Scan)
+			embyMissing.GET("/libraries", embyMissingHandler.ListLibraries)
+			embyMissing.GET("/setting", embyMissingHandler.GetSetting)
+			embyMissing.PUT("/setting", embyMissingHandler.UpdateSetting)
+			embyMissing.GET("/blacklist", embyMissingHandler.ListBlacklist)
+			embyMissing.POST("/blacklist", embyMissingHandler.AddBlacklist)
+			embyMissing.DELETE("/blacklist/:id", embyMissingHandler.RemoveBlacklist)
 		}
 
 		// Match302 匹配配置相关路由

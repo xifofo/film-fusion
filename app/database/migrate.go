@@ -44,6 +44,9 @@ func AutoMigrate() error {
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},
 		&model.OrganizeLog{},
+		&model.EmbyMissingEpisode{},
+		&model.EmbyMissingBlacklist{},
+		&model.EmbyMissingSetting{},
 	); err != nil {
 		return err
 	}
