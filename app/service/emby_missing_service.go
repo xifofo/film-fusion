@@ -385,6 +385,7 @@ type CloudPathOption struct {
 	StorageType    string `json:"storage_type"`
 	SourcePath     string `json:"source_path"`
 	LocalPath      string `json:"local_path"`
+	EmbyPathPrefix string `json:"emby_path_prefix"`
 }
 
 // ResolveSeriesResult 由 Emby 剧集反推出的云端目录定位结果。
@@ -405,12 +406,13 @@ type ResolveSeriesResult struct {
 // ResolveSeriesCloudPath 取 Emby 剧集路径，反推云端源目录（供前端确认/手动修正），并返回全部可选映射。
 //
 // Emby 多以容器形式部署，其上报的路径前缀与 FilmFusion 写 STRM 的本地路径前缀往往不一致，
-// 直接拿 Emby 路径前缀匹配 LocalPath 会失败。因此主路径改为「从本地 STRM 文件着手」：
-//  1. 用 Emby 路径的「后缀」在各映射 LocalPath 下定位真实存在的本地剧集目录（绕开错误前缀）；
-//  2. 读取该目录内首个 .strm 文件内容（= ContentPrefix + 云端路径），剥离 ContentPrefix 反推云端目录。
+// 直接拿 Emby 路径前缀匹配 LocalPath 会失败。定位真实本地目录按以下优先级尝试：
+//  1. 若该映射配置了 EmbyPathPrefix：把 Emby 路径前缀替换为 LocalPath，确定性地定位本地剧集目录（最可靠）；
+//  2. 否则用 Emby 路径的「后缀」在各映射 LocalPath 下试探真实存在的本地剧集目录（绕开错误前缀）；
+//  3. 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 LocalPath。
 //
-// STRM 内容里的云端路径才是权威来源，不受容器挂载差异影响。仅当本地定位/读取失败时，
-// 才回退到旧的「embyPath 前缀匹配 LocalPath」逻辑（Emby 与 FilmFusion 同挂载时仍可命中）。
+// 定位到本地目录后，读取目录内首个 .strm 文件内容（= ContentPrefix + 云端路径），剥离 ContentPrefix
+// 反推云端目录；STRM 内容里的云端路径才是权威来源，不受容器挂载差异影响。
 func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string) (*ResolveSeriesResult, error) {
 	seriesID = strings.TrimSpace(seriesID)
 	if seriesID == "" {
@@ -439,6 +441,7 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 			CloudStorageID: p.CloudStorageID,
 			SourcePath:     p.SourcePath,
 			LocalPath:      p.LocalPath,
+			EmbyPathPrefix: p.EmbyPathPrefix,
 		}
 		if p.CloudStorage != nil {
 			opt.StorageName = p.CloudStorage.StorageName
@@ -447,7 +450,12 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 		result.Options = append(result.Options, opt)
 	}
 
-	// 主路径：本地 STRM 反推
+	// 优先：显式 Emby 路径前缀映射（确定性，把 Emby 前缀替换为 LocalPath 定位本地目录）
+	if s.resolveByEmbyPrefix(embyPathLinux, paths, result) {
+		return result, nil
+	}
+
+	// 次选：本地 STRM 后缀试探反推
 	if s.resolveByLocalStrm(embyPathLinux, paths, result) {
 		return result, nil
 	}
@@ -456,6 +464,69 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 	resolveByLocalPathPrefix(embyPathLinux, paths, result)
 
 	return result, nil
+}
+
+// resolveByEmbyPrefix 用各映射配置的 EmbyPathPrefix 把 Emby 上报路径前缀替换为 LocalPath，
+// 确定性地定位真实本地剧集目录（取匹配前缀最长者）。命中且本地目录存在时返回 true。
+func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []model.CloudPath, result *ResolveSeriesResult) bool {
+	if embyPathLinux == "" {
+		return false
+	}
+
+	var (
+		bestPath  *model.CloudPath
+		bestLocal string
+		bestRel   string // 相对 LocalPath 的子路径(带前导 /)，命中后作为云端目录兜底
+		bestLen   = -1
+	)
+	for i := range paths {
+		p := &paths[i]
+		prefix := strings.TrimRight(pathhelper.ConvertToLinuxPath(strings.TrimSpace(p.EmbyPathPrefix)), "/")
+		if prefix == "" || strings.TrimSpace(p.LocalPath) == "" {
+			continue
+		}
+
+		var rel string
+		switch {
+		case embyPathLinux == prefix:
+			rel = ""
+		case strings.HasPrefix(embyPathLinux, prefix+"/"):
+			rel = strings.TrimPrefix(embyPathLinux, prefix) // 形如 /剧名 (2020)
+		default:
+			continue
+		}
+
+		if len(prefix) <= bestLen {
+			continue
+		}
+		localDir := p.LocalPath
+		if rel != "" {
+			localDir = pathhelper.SafeFilePathJoin(p.LocalPath, rel)
+		}
+		bestLen = len(prefix)
+		bestPath = p
+		bestLocal = localDir
+		if rel == "" {
+			bestRel = "/"
+		} else {
+			bestRel = rel
+		}
+	}
+
+	if bestPath == nil {
+		return false
+	}
+
+	// 校验替换后的本地目录是否真实存在；不存在则视为未命中，交给后续启发式继续尝试
+	if info, err := os.Stat(bestLocal); err != nil || !info.IsDir() {
+		s.log.Warnf("[emby-missing] Emby 前缀映射定位的本地目录不存在: %s (cloud_path_id=%d)", bestLocal, bestPath.ID)
+		return false
+	}
+
+	s.fillResultFromLocalDir(bestLocal, bestRel, bestPath, result)
+	s.log.Infof("[emby-missing] 反推云端目录(Emby前缀映射): emby=%s -> local=%s -> cloud=%s (cloud_path_id=%d)",
+		embyPathLinux, bestLocal, result.CloudDir, bestPath.ID)
+	return true
 }
 
 // resolveByLocalStrm 用 Emby 路径后缀在各映射 LocalPath 下定位本地剧集目录，
@@ -499,11 +570,20 @@ func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []mo
 		return false
 	}
 
-	// 命中本地目录，先把诊断信息写入结果（含 strm 路径与内容），便于前端排查
-	result.CloudPathID = bestPath.ID
-	result.LocalDir = bestDir
+	s.fillResultFromLocalDir(bestDir, bestSuffix, bestPath, result)
+	s.log.Infof("[emby-missing] 反推云端目录(本地后缀试探): emby=%s -> local=%s -> cloud=%s (cloud_path_id=%d)",
+		embyPathLinux, bestDir, result.CloudDir, bestPath.ID)
+	return true
+}
 
-	strmFile := findFirstStrm(bestDir)
+// fillResultFromLocalDir 已定位到本地剧集目录(localDir)后统一完成：写诊断信息、读取首个 .strm、
+// 剥离 ContentPrefix 反推云端目录；若无 strm/读取失败/剥离失败，则以 relSuffix(本地相对 LocalPath
+// 的子路径，带前导 /)作为云端目录兜底。
+func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, p *model.CloudPath, result *ResolveSeriesResult) {
+	result.CloudPathID = p.ID
+	result.LocalDir = localDir
+
+	strmFile := findFirstStrm(localDir)
 	var strmContent string
 	if strmFile != "" {
 		result.StrmFile = strmFile
@@ -515,25 +595,20 @@ func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []mo
 		}
 	}
 
-	// 目录内有 strm 内容，剥离 ContentPrefix 反推云端目录
+	// 目录内有 strm 内容，剥离 ContentPrefix 反推云端目录（权威来源，不受挂载差异影响）
 	if strmContent != "" {
-		if cloudDir, ok := deriveCloudDirFromStrm(bestDir, strmFile, strmContent, *bestPath); ok {
+		if cloudDir, ok := deriveCloudDirFromStrm(localDir, strmFile, strmContent, *p); ok {
 			result.Matched = true
 			result.CloudDir = cloudDir
-			s.log.Infof("[emby-missing] 反推云端目录(STRM): emby=%s -> local=%s -> strm=%s -> cloud=%s (cloud_path_id=%d)",
-				embyPathLinux, bestDir, strmContent, cloudDir, bestPath.ID)
-			return true
+			return
 		}
 		s.log.Warnf("[emby-missing] strm 内容剥离 ContentPrefix 失败: content=%s content_prefix=%s",
-			strmContent, bestPath.ContentPrefix)
+			strmContent, p.ContentPrefix)
 	}
 
 	// 无 strm / 读取失败 / 剥离失败：本地目录相对 LocalPath 的路径即云端目录（兜底）
 	result.Matched = true
-	result.CloudDir = bestSuffix
-	s.log.Infof("[emby-missing] 反推云端目录(本地相对路径): emby=%s -> local=%s -> cloud=%s (cloud_path_id=%d)",
-		embyPathLinux, bestDir, bestSuffix, bestPath.ID)
-	return true
+	result.CloudDir = relSuffix
 }
 
 // deriveCloudDirFromStrm 由 strm 内容剥离 ContentPrefix 得到云端文件路径，

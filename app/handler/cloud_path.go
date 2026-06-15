@@ -230,6 +230,7 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 		ContentPrefix    string `json:"content_prefix"`
 		ContentEncodeURI *bool  `json:"content_encode_uri"`
 		LocalPath        string `json:"local_path"`
+		EmbyPathPrefix   string `json:"emby_path_prefix"`
 		LinkType         string `json:"link_type"`
 		FilterRules      string `json:"filter_rules"`
 		StrmContentType  string `json:"strm_content_type"`
@@ -300,6 +301,10 @@ func (h *CloudPathHandler) UpdateCloudPath(c *gin.Context) {
 	}
 	if req.LocalPath != "" {
 		updates["local_path"] = req.LocalPath
+	}
+	// Emby 路径前缀允许置空，故按"与当前值不同"判断是否更新
+	if req.EmbyPathPrefix != path.EmbyPathPrefix {
+		updates["emby_path_prefix"] = req.EmbyPathPrefix
 	}
 	if req.LinkType != "" {
 		updates["link_type"] = req.LinkType
@@ -412,6 +417,7 @@ func (h *CloudPathHandler) GetSyncStatus(c *gin.Context) {
 		"source_path":       path.SourcePath,
 		"content_prefix":    path.ContentPrefix,
 		"local_path":        path.LocalPath,
+		"emby_path_prefix":  path.EmbyPathPrefix,
 		"link_type":         path.LinkType,
 		"filter_rules":      path.FilterRules,
 		"strm_content_type": path.StrmContentType,
@@ -770,6 +776,7 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			SourceType      string `json:"source_type"`
 			ContentPrefix   string `json:"content_prefix"`
 			LocalPath       string `json:"local_path"`
+			EmbyPathPrefix  string `json:"emby_path_prefix"`
 			LinkType        string `json:"link_type"`
 			FilterRules     string `json:"filter_rules"`
 			StrmContentType string `json:"strm_content_type"`
@@ -849,6 +856,7 @@ func (h *CloudPathHandler) ImportPaths(c *gin.Context) {
 			SourceType:      sourceType,
 			ContentPrefix:   pathData.ContentPrefix,
 			LocalPath:       pathData.LocalPath,
+			EmbyPathPrefix:  pathData.EmbyPathPrefix,
 			LinkType:        pathData.LinkType,
 			FilterRules:     pathData.FilterRules,
 			StrmContentType: pathData.StrmContentType,
