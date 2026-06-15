@@ -951,7 +951,33 @@ func (s *EmbyWatchService) AnnualShareImage(embyUserID string, year int) ([]byte
 	} else {
 		userName = embyUserID
 	}
-	return renderAnnualShareImage(rep, userName, s.cfg.Emby.Cover.FontCN, s.cfg.Emby.Cover.FontEN)
+	// 取年度最常看的剧/片海报作为背景底图（失败则在渲染层回退纯色渐变）
+	var hero []byte
+	if pid := s.pickSharePosterID(embyUserID, year, rep); pid != "" {
+		if data, _, derr := s.emby.DownloadImage(pid, "Primary", 800); derr == nil {
+			hero = data
+		}
+	}
+	return renderAnnualShareImage(rep, userName, hero, s.cfg.Emby.Cover.FontCN, s.cfg.Emby.Cover.FontEN)
+}
+
+// pickSharePosterID 选一张代表性海报的条目ID：优先年度最爱剧集，其次年度最近看的电影。
+func (s *EmbyWatchService) pickSharePosterID(embyUserID string, year int, rep *AnnualReport) string {
+	if rep != nil {
+		for _, t := range rep.TopSeries {
+			if strings.TrimSpace(t.SeriesID) != "" {
+				return t.SeriesID
+			}
+		}
+	}
+	var r struct{ ItemID string }
+	s.baseScope(embyUserID, year).
+		Where("item_type = ?", "Movie").
+		Select("item_id").
+		Order("watched_at desc").
+		Limit(1).
+		Scan(&r)
+	return strings.TrimSpace(r.ItemID)
 }
 
 // ---------------- 辅助 ----------------
