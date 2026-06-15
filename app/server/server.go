@@ -225,8 +225,9 @@ func (s *Server) setupRoutes() {
 	// 观看记录服务（被 webhook 与统计接口共用）
 	embyWatchService := service.NewEmbyWatchService(s.Config, s.Logger, s.embyClient)
 
-	// 创建处理器实例
-	systemConfigHandler := handler.NewSystemConfigHandler()
+		// 创建处理器实例
+		systemConfigHandler := handler.NewSystemConfigHandler()
+		appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
 	authHandler := handler.NewAuthHandler(s.Config)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
@@ -281,6 +282,10 @@ func (s *Server) setupRoutes() {
 		protected.GET("/me", authHandler.Me)
 
 		// 系统配置相关路由
+		// 应用配置（config.yaml 在线编辑 + 热重载）
+		protected.GET("/app-config", appConfigHandler.Get)
+		protected.PUT("/app-config", appConfigHandler.Update)
+
 		config := protected.Group("/config")
 		{
 			config.GET("/categories", systemConfigHandler.GetConfigCategories)

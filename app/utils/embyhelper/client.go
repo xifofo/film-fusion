@@ -25,6 +25,16 @@ func New(cfg *config.Config) *EmbyClient {
 	}
 }
 
+// Reload 根据当前配置重新应用连接参数（地址/APIKey），用于配置热更新后无需重启即可生效。
+// 由于各服务共享同一 *EmbyClient 指针，这里就地更新即可对所有调用方生效。
+func (e *EmbyClient) Reload() {
+	if e == nil || e.client == nil || e.config == nil {
+		return
+	}
+	e.client.SetBaseURL(e.config.Emby.URL)
+	e.client.SetQueryParam("api_key", e.config.Emby.APIKey)
+}
+
 // GetPlaybackInfo 获取播放信息
 func (e *EmbyClient) GetPlaybackInfo(itemID string) ([]interface{}, error) {
 	var response map[string]any

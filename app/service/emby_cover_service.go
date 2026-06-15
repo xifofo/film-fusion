@@ -359,6 +359,12 @@ func (s *EmbyCoverService) runScheduledJob() {
 	}
 }
 
+// Restart 在配置热更新后重新调度 cron（先停后启，读取最新 cfg）。
+func (s *EmbyCoverService) Restart() {
+	s.Stop()
+	s.Start()
+}
+
 // Stop 停止 cron
 func (s *EmbyCoverService) Stop() {
 	s.mu.Lock()

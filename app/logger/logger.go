@@ -18,26 +18,33 @@ import (
 type Logger struct {
 	*zap.Logger
 	sugar      *zap.SugaredLogger
+	level      zap.AtomicLevel // 运行时可调级别，支持热更新
 	cancelFunc context.CancelFunc
 	wg         sync.WaitGroup
 }
 
+// parseLevel 把字符串级别解析为 zapcore.Level（默认 info）
+func parseLevel(s string) zapcore.Level {
+	switch s {
+	case "debug":
+		return zapcore.DebugLevel
+	case "info":
+		return zapcore.InfoLevel
+	case "warn":
+		return zapcore.WarnLevel
+	case "error":
+		return zapcore.ErrorLevel
+	case "fatal":
+		return zapcore.FatalLevel
+	default:
+		return zapcore.InfoLevel
+	}
+}
+
 // New 使用给定配置创建新的日志记录器实例
 func New(cfg config.LogConfig) *Logger {
-	// 设置日志级别
-	level := zapcore.InfoLevel
-	switch cfg.Level {
-	case "debug":
-		level = zapcore.DebugLevel
-	case "info":
-		level = zapcore.InfoLevel
-	case "warn":
-		level = zapcore.WarnLevel
-	case "error":
-		level = zapcore.ErrorLevel
-	case "fatal":
-		level = zapcore.FatalLevel
-	}
+	// 设置日志级别（用 AtomicLevel 以支持运行时热更新）
+	atom := zap.NewAtomicLevelAt(parseLevel(cfg.Level))
 
 	// 设置编码器配置
 	encoderConfig := zapcore.EncoderConfig{
@@ -71,7 +78,7 @@ func New(cfg config.LogConfig) *Logger {
 	switch cfg.Output {
 	case "stdout":
 		writeSyncer = zapcore.AddSync(os.Stdout)
-		core = zapcore.NewCore(encoder, writeSyncer, level)
+		core = zapcore.NewCore(encoder, writeSyncer, atom)
 	case "file":
 		// 确保日志目录存在
 		logDir := filepath.Dir("data/logs/app.log")
@@ -101,17 +108,18 @@ func New(cfg config.LogConfig) *Logger {
 			consoleEncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 			consoleEncoder := zapcore.NewConsoleEncoder(consoleEncoderConfig)
 
-			fileCore := zapcore.NewCore(encoder, fileWriter, level)
-			consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), level)
+			fileCore := zapcore.NewCore(encoder, fileWriter, atom)
+			consoleCore := zapcore.NewCore(consoleEncoder, zapcore.AddSync(os.Stdout), atom)
 			core = zapcore.NewTee(fileCore, consoleCore)
 		} else {
-			core = zapcore.NewCore(encoder, fileWriter, level)
+			core = zapcore.NewCore(encoder, fileWriter, atom)
 		}
 
 		// 启动定时任务，每天凌晨检查是否需要创建新的日志文件
 		ctx, cancel := context.WithCancel(context.Background())
 		logger := &Logger{
 			Logger:     zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)),
+			level:      atom,
 			cancelFunc: cancel,
 		}
 		logger.sugar = logger.Logger.Sugar()
@@ -122,7 +130,7 @@ func New(cfg config.LogConfig) *Logger {
 		return logger
 	default:
 		writeSyncer = zapcore.AddSync(os.Stdout)
-		core = zapcore.NewCore(encoder, writeSyncer, level)
+		core = zapcore.NewCore(encoder, writeSyncer, atom)
 	}
 
 	// 创建 logger
@@ -131,7 +139,13 @@ func New(cfg config.LogConfig) *Logger {
 	return &Logger{
 		Logger: logger,
 		sugar:  logger.Sugar(),
+		level:  atom,
 	}
+}
+
+// SetLevel 运行时调整日志级别（热生效，无需重启）。
+func (l *Logger) SetLevel(levelStr string) {
+	l.level.SetLevel(parseLevel(levelStr))
 }
 
 // dailyRotateRoutine 每日日志轮转的后台任务
