@@ -222,6 +222,9 @@ func (s *Server) setupRoutes() {
 		c.HTML(200, "index.html", nil)
 	})
 
+	// 观看记录服务（被 webhook 与统计接口共用）
+	embyWatchService := service.NewEmbyWatchService(s.Config, s.Logger, s.embyClient)
+
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	authHandler := handler.NewAuthHandler(s.Config)
@@ -230,7 +233,7 @@ func (s *Server) setupRoutes() {
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
-	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService)
+	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService, embyWatchService)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
@@ -241,6 +244,7 @@ func (s *Server) setupRoutes() {
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
+	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 
@@ -469,6 +473,26 @@ func (s *Server) setupRoutes() {
 			embyMissing.GET("/blacklist", embyMissingHandler.ListBlacklist)
 			embyMissing.POST("/blacklist", embyMissingHandler.AddBlacklist)
 			embyMissing.DELETE("/blacklist/:id", embyMissingHandler.RemoveBlacklist)
+		}
+
+		// Emby 观看记录（多用户隔离：配置统计用户 + 历史回填 + 实时采集）
+		embyWatch := protected.Group("/emby-watch")
+		{
+			embyWatch.GET("/users", embyWatchHandler.ListUsers)
+			embyWatch.PUT("/users", embyWatchHandler.SaveTrackedUsers)
+			embyWatch.GET("/setting", embyWatchHandler.GetSetting)
+			embyWatch.PUT("/setting", embyWatchHandler.UpdateSetting)
+			embyWatch.POST("/backfill", embyWatchHandler.Backfill)
+			embyWatch.GET("/backfill/status", embyWatchHandler.BackfillStatus)
+			embyWatch.GET("/records", embyWatchHandler.ListRecords)
+			embyWatch.DELETE("/records/:id", embyWatchHandler.DeleteRecord)
+			embyWatch.DELETE("/records", embyWatchHandler.ClearRecords)
+			embyWatch.GET("/gallery", embyWatchHandler.Gallery)
+			embyWatch.GET("/calendar", embyWatchHandler.Calendar)
+			embyWatch.GET("/summary", embyWatchHandler.Summary)
+			embyWatch.GET("/annual-report", embyWatchHandler.AnnualReport)
+			embyWatch.GET("/annual-report/share-image", embyWatchHandler.AnnualShareImage)
+			embyWatch.GET("/image", embyWatchHandler.Image)
 		}
 
 		// Match302 匹配配置相关路由

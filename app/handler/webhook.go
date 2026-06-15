@@ -8,9 +8,11 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
+	"film-fusion/app/utils/embyhelper"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,16 +25,18 @@ type WebhookHandler struct {
 	cd2NotifySvc *service.CD2NotifyService
 	md2NotifySvc *service.MoviePilot2NotifyService
 	sortNameSvc  *service.EmbySortNameService
+	watchSvc     *service.EmbyWatchService
 }
 
 // NewWebhookHandler 创建新的 WebhookHandler
-func NewWebhookHandler(log *logger.Logger, cfg *config.Config, download115Svc *service.Download115Service, sortNameSvc *service.EmbySortNameService) *WebhookHandler {
+func NewWebhookHandler(log *logger.Logger, cfg *config.Config, download115Svc *service.Download115Service, sortNameSvc *service.EmbySortNameService, watchSvc *service.EmbyWatchService) *WebhookHandler {
 	return &WebhookHandler{
 		logger:       log,
 		config:       cfg,
 		cd2NotifySvc: service.NewCD2NotifyService(log, download115Svc),
 		md2NotifySvc: service.NewMoviePilot2NotifyService(log, download115Svc),
 		sortNameSvc:  sortNameSvc,
+		watchSvc:     watchSvc,
 	}
 }
 
@@ -123,13 +127,27 @@ func (h *WebhookHandler) MoviePilotV2Webhook(c *gin.Context) {
 
 // EmbyWebhookRequest 定义 Emby webhook 请求的数据结构
 type EmbyWebhookRequest struct {
-	Title       string     `json:"Title"`
-	Description string     `json:"Description,omitempty"`
-	Date        time.Time  `json:"Date"`
-	Event       string     `json:"Event"`
-	Severity    string     `json:"Severity"`
-	Item        EmbyItem   `json:"Item"`
-	Server      EmbyServer `json:"Server"`
+	Title        string            `json:"Title"`
+	Description  string            `json:"Description,omitempty"`
+	Date         time.Time         `json:"Date"`
+	Event        string            `json:"Event"`
+	Severity     string            `json:"Severity"`
+	Item         EmbyItem          `json:"Item"`
+	Server       EmbyServer        `json:"Server"`
+	User         *EmbyWebhookUser  `json:"User,omitempty"`
+	PlaybackInfo *EmbyPlaybackInfo `json:"PlaybackInfo,omitempty"`
+}
+
+// EmbyWebhookUser 播放事件里的用户信息
+type EmbyWebhookUser struct {
+	Id   string `json:"Id"`
+	Name string `json:"Name"`
+}
+
+// EmbyPlaybackInfo 播放事件里的播放进度信息
+type EmbyPlaybackInfo struct {
+	PositionTicks      int64 `json:"PositionTicks"`
+	PlayedToCompletion bool  `json:"PlayedToCompletion"`
 }
 
 // EmbyItem 定义 Emby 媒体项目的数据结构
@@ -172,6 +190,7 @@ type EmbyItem struct {
 	ParentThumbItemId       string                 `json:"ParentThumbItemId,omitempty"`
 	ParentThumbImageTag     string                 `json:"ParentThumbImageTag,omitempty"`
 	MediaType               string                 `json:"MediaType"`
+	RunTimeTicks            int64                  `json:"RunTimeTicks,omitempty"`
 }
 
 // ExternalURL 定义外部链接的数据结构
@@ -220,6 +239,8 @@ func (h *WebhookHandler) HandleEmbyWebhook(c *gin.Context) {
 	switch webhookData.Event {
 	case "library.new":
 		h.handleLibraryNew(webhookData)
+	case "playback.stop", "item.markplayed":
+		h.handlePlaybackEvent(webhookData)
 	default:
 		h.logger.Infof("收到事件类型: %s，暂不处理", webhookData.Event)
 	}
@@ -262,6 +283,85 @@ func (h *WebhookHandler) handleLibraryNew(data EmbyWebhookRequest) {
 		h.logger.Errorf("添加媒体处理任务失败: %v", err)
 	} else {
 		h.logger.Infof("媒体处理任务已添加到队列: ItemID=%s", data.Item.Id)
+	}
+}
+
+// handlePlaybackEvent 处理 Emby 播放事件，记录被统计用户的观看记录。
+//   - playback.stop：需完成度达标(PlayedToCompletion 或进度≥90%)才计；
+//   - item.markplayed：标记已看，直接计。
+func (h *WebhookHandler) handlePlaybackEvent(data EmbyWebhookRequest) {
+	if h.watchSvc == nil {
+		return
+	}
+	if data.User == nil || strings.TrimSpace(data.User.Id) == "" {
+		return
+	}
+	// 仅统计已配置(启用)的 Emby 用户
+	if _, ok := h.watchSvc.GetTrackedUser(data.User.Id); !ok {
+		return
+	}
+
+	item := data.Item
+	itemType := strings.TrimSpace(item.Type)
+	if itemType != "Movie" && itemType != "Episode" {
+		return
+	}
+
+	// 采集规则（阈值/事件开关）可配置，读取失败时回退到默认值
+	threshold := 0.9
+	countStop, countMark := true, true
+	if setting, err := h.watchSvc.GetSetting(); err == nil && setting != nil {
+		threshold = setting.CompletionThreshold
+		countStop = setting.CountPlaybackStop
+		countMark = setting.CountMarkPlayed
+	}
+
+	switch data.Event {
+	case "playback.stop":
+		if !countStop {
+			return
+		}
+		completed := false
+		if data.PlaybackInfo != nil {
+			if data.PlaybackInfo.PlayedToCompletion {
+				completed = true
+			} else if item.RunTimeTicks > 0 && data.PlaybackInfo.PositionTicks > 0 &&
+				float64(data.PlaybackInfo.PositionTicks)/float64(item.RunTimeTicks) >= threshold {
+				completed = true
+			}
+		}
+		if !completed {
+			return
+		}
+	case "item.markplayed":
+		if !countMark {
+			return
+		}
+	}
+
+	watchedAt := data.Date
+	if watchedAt.IsZero() {
+		watchedAt = time.Now()
+	}
+
+	in := service.WatchEventInput{
+		EmbyUserID:     data.User.Id,
+		EmbyUserName:   data.User.Name,
+		ItemID:         item.Id,
+		ItemType:       itemType,
+		Title:          item.Name,
+		ProductionYear: item.ProductionYear,
+		RuntimeMinutes: embyhelper.RuntimeMinutesFromTicks(item.RunTimeTicks),
+		WatchedAt:      watchedAt,
+	}
+	if itemType == "Episode" {
+		in.SeriesID = item.SeriesId
+		in.SeriesName = item.SeriesName
+		in.SeasonNumber = item.ParentIndexNumber
+		in.EpisodeNumber = item.IndexNumber
+	}
+	if err := h.watchSvc.RecordWatch(in); err != nil {
+		h.logger.Warnf("[emby-watch] 记录观看失败: %v", err)
 	}
 }
 

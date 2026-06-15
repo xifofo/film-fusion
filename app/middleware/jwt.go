@@ -14,8 +14,24 @@ func JWTAuth(cfg *config.Config) gin.HandlerFunc {
 	jwtService := auth.NewJWTService(cfg)
 
 	return func(c *gin.Context) {
+		var token string
 		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
+		if authHeader != "" {
+			// 检查Bearer前缀
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || parts[0] != "Bearer" {
+				c.JSON(http.StatusUnauthorized, gin.H{
+					"code":    401,
+					"message": "Authorization header format must be Bearer {token}",
+				})
+				c.Abort()
+				return
+			}
+			token = parts[1]
+		} else if q := strings.TrimSpace(c.Query("token")); q != "" {
+			// 允许通过查询参数携带 token：用于 <img>、下载等无法设置请求头的场景
+			token = q
+		} else {
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"code":    401,
 				"message": "Authorization header is required",
@@ -24,18 +40,6 @@ func JWTAuth(cfg *config.Config) gin.HandlerFunc {
 			return
 		}
 
-		// 检查Bearer前缀
-		parts := strings.SplitN(authHeader, " ", 2)
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"code":    401,
-				"message": "Authorization header format must be Bearer {token}",
-			})
-			c.Abort()
-			return
-		}
-
-		token := parts[1]
 		claims, err := jwtService.ValidateToken(token)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{
