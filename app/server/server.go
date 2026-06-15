@@ -242,6 +242,7 @@ func (s *Server) setupRoutes() {
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
+	logHandler := handler.NewLogHandler()
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -385,6 +386,13 @@ func (s *Server) setupRoutes() {
 			organizeLogs.GET("", organizeLogHandler.List)
 			organizeLogs.GET("/stats", organizeLogHandler.Stats)
 			organizeLogs.POST("/clear", organizeLogHandler.Clear)
+		}
+
+		// 运行日志（server 进程日志文件查看）
+		logs := protected.Group("/logs")
+		{
+			logs.GET("", logHandler.GetLogs)
+			logs.GET("/files", logHandler.ListFiles)
 		}
 
 		// Pickcode 缓存相关路由
