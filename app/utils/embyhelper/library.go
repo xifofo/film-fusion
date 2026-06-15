@@ -83,6 +83,46 @@ func (e *EmbyClient) ListLibraries() ([]EmbyLibrary, error) {
 	return out, nil
 }
 
+// itemPathResp /Items?Ids=... 取条目 Path 的响应
+type itemPathResp struct {
+	Items []struct {
+		ID   string `json:"Id"`
+		Name string `json:"Name"`
+		Type string `json:"Type"`
+		Path string `json:"Path"`
+	} `json:"Items"`
+}
+
+// GetItemPath 按条目ID取其在 Emby 中的本地路径（如剧集/影片所在目录或文件）。
+// 用于由 Emby 路径反推云端源目录（缺集重生成 STRM）。
+func (e *EmbyClient) GetItemPath(itemID string) (string, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return "", fmt.Errorf("itemID 不能为空")
+	}
+	var resp itemPathResp
+	r, err := e.client.R().
+		SetQueryParam("Ids", itemID).
+		SetQueryParam("Fields", "Path").
+		SetQueryParam("Limit", "1").
+		SetResult(&resp).
+		Get("/Items")
+	if err != nil {
+		return "", fmt.Errorf("请求 Emby 条目信息失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return "", fmt.Errorf("Emby 条目信息 HTTP %d: %s", r.StatusCode(), r.String())
+	}
+	if len(resp.Items) == 0 {
+		return "", fmt.Errorf("未找到 Emby 条目: %s", itemID)
+	}
+	path := strings.TrimSpace(resp.Items[0].Path)
+	if path == "" {
+		return "", fmt.Errorf("Emby 条目无路径信息(可能为虚拟/合集条目): %s", itemID)
+	}
+	return path, nil
+}
+
 // ListLatestItems 取某个库下最新入库的 N 个 Movie / Series（按 DateCreated 降序）
 // 需要 admin_user_id 才能正确过滤；如未配置则用 /Items 顶层接口（要求 api_key 是管理员密钥）
 func (e *EmbyClient) ListLatestItems(libraryID string, limit int, includeTypes []string) ([]EmbyItem, error) {

@@ -366,6 +366,8 @@ func (s *Server) setupRoutes() {
 		{
 			// 根据 115 目录树与 world 文件生成 STRM 文件
 			strm.POST("/gen/115-directory-tree", strmHandler.GenStrmWith115DirectoryTree)
+			// 按云路径映射与云端源目录递归重生成 STRM
+			strm.POST("/regenerate-directory", strmHandler.RegenerateDirectory)
 		}
 
 		// 整理文件相关路由
@@ -451,6 +453,7 @@ func (s *Server) setupRoutes() {
 		{
 			embyMissing.GET("", embyMissingHandler.List)
 			embyMissing.POST("/scan", embyMissingHandler.Scan)
+			embyMissing.POST("/resolve-cloud-path", embyMissingHandler.ResolveCloudPath)
 			embyMissing.GET("/libraries", embyMissingHandler.ListLibraries)
 			embyMissing.GET("/setting", embyMissingHandler.GetSetting)
 			embyMissing.PUT("/setting", embyMissingHandler.UpdateSetting)

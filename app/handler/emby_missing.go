@@ -78,6 +78,34 @@ func (h *EmbyMissingHandler) Scan(c *gin.Context) {
 	h.success(c, nil, "扫描已开始")
 }
 
+type resolveCloudPathPayload struct {
+	SeriesID string `json:"series_id"`
+}
+
+// ResolveCloudPath POST /api/emby-missing/resolve-cloud-path
+// 由剧集ID取 Emby 本地路径，反推云端源目录与可用的云路径映射。
+func (h *EmbyMissingHandler) ResolveCloudPath(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	userID := userIDVal.(uint)
+
+	var payload resolveCloudPathPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "请求参数错误: "+err.Error())
+		return
+	}
+
+	res, err := h.svc.ResolveSeriesCloudPath(userID, payload.SeriesID)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, res, "解析完成")
+}
+
 // GetSetting GET /api/emby-missing/setting
 func (h *EmbyMissingHandler) GetSetting(c *gin.Context) {
 	setting, err := h.svc.GetSetting()

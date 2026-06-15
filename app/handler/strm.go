@@ -185,6 +185,77 @@ func (h *StrmHandler) GenStrmWith115DirectoryTree(c *gin.Context) {
 	}, "任务已提交，后台处理")
 }
 
+type regenerateDirectoryPayload struct {
+	CloudPathID uint   `json:"cloud_path_id" binding:"required"`
+	CloudDir    string `json:"cloud_dir" binding:"required"`
+}
+
+// RegenerateDirectory POST /api/strm/regenerate-directory
+// 按指定云路径映射(CloudPath)与云端源目录递归重生成 STRM（复用文件监控的 WalkDir 逻辑，异步执行，结果写整理日志）。
+func (h *StrmHandler) RegenerateDirectory(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	userID := userIDVal.(uint)
+
+	var payload regenerateDirectoryPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "参数错误: "+err.Error())
+		return
+	}
+
+	cloudDir := strings.TrimSpace(payload.CloudDir)
+	if cloudDir == "" {
+		h.error(c, http.StatusBadRequest, 400, "云端目录不能为空")
+		return
+	}
+
+	var cloudPath model.CloudPath
+	if err := database.DB.Preload("CloudStorage").
+		Where("id = ? AND user_id = ?", payload.CloudPathID, userID).
+		First(&cloudPath).Error; err != nil {
+		h.error(c, http.StatusBadRequest, 400, "云路径映射不存在或无权限")
+		return
+	}
+
+	if cloudPath.CloudStorage == nil {
+		h.error(c, http.StatusBadRequest, 400, "关联的云存储不存在")
+		return
+	}
+	if cloudPath.CloudStorage.StorageType != model.StorageType115Open {
+		h.error(c, http.StatusBadRequest, 400, "仅支持 115open 存储类型的云路径映射")
+		return
+	}
+	if !cloudPath.CloudStorage.IsAvailable() {
+		h.error(c, http.StatusBadRequest, 400, "云存储不可用或令牌已过期")
+		return
+	}
+	if strings.TrimSpace(cloudPath.LocalPath) == "" {
+		h.error(c, http.StatusBadRequest, 400, "该云路径映射未配置本地路径，无法生成 STRM")
+		return
+	}
+
+	strmSvc := service.NewStrmService(h.logger, h.download115Svc)
+	go func(dir string, cp model.CloudPath) {
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.Errorf("[regenerate-strm] 重生成 STRM panic: %v", r)
+			}
+		}()
+		h.logger.Infof("[regenerate-strm] 开始重生成 STRM: dir=%s cloud_path_id=%d", dir, cp.ID)
+		strmSvc.WalkDirWith115OpenAPI(dir, cp)
+		h.logger.Infof("[regenerate-strm] 重生成 STRM 完成: dir=%s cloud_path_id=%d", dir, cp.ID)
+	}(cloudDir, cloudPath)
+
+	h.success(c, gin.H{
+		"cloud_path_id": cloudPath.ID,
+		"cloud_dir":     cloudDir,
+		"status":        "accepted",
+	}, "任务已提交，后台重生成 STRM，结果见整理日志")
+}
+
 func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, storage model.CloudStorage, contentPrefix, saveLocalPath, filterRules, linkType string) (map[string]any, error) {
 	// 读取并按 UTF-16(含BOM优先) -> UTF-8 解码；若失败则按 UTF-8 原样读取
 	decoded, err := readFileUTF16(worldFilePath)

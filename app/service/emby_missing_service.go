@@ -13,6 +13,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/embyhelper"
+	"film-fusion/app/utils/pathhelper"
 
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
@@ -370,6 +371,86 @@ func (s *EmbyMissingService) ListMissing() (*MissingListResult, error) {
 		return nil, err
 	}
 	return &MissingListResult{Setting: st, Groups: groups}, nil
+}
+
+// CloudPathOption 可用于重生成 STRM 的云路径映射选项（供前端选择/手动修正）。
+type CloudPathOption struct {
+	ID             uint   `json:"id"`
+	CloudStorageID uint   `json:"cloud_storage_id"`
+	StorageName    string `json:"storage_name"`
+	StorageType    string `json:"storage_type"`
+	SourcePath     string `json:"source_path"`
+	LocalPath      string `json:"local_path"`
+}
+
+// ResolveSeriesResult 由 Emby 剧集反推出的云端目录定位结果。
+type ResolveSeriesResult struct {
+	SeriesID    string            `json:"series_id"`
+	EmbyPath    string            `json:"emby_path"`
+	Matched     bool              `json:"matched"`
+	CloudPathID uint              `json:"cloud_path_id,omitempty"`
+	CloudDir    string            `json:"cloud_dir,omitempty"`
+	Options     []CloudPathOption `json:"options"`
+}
+
+// ResolveSeriesCloudPath 取 Emby 剧集本地路径，并用云路径映射的「本地路径前缀」反推出云端源目录。
+// 返回匹配到的云路径映射与云端目录（供前端确认/手动修正），以及全部可选映射。
+func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string) (*ResolveSeriesResult, error) {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return nil, fmt.Errorf("剧集ID不能为空")
+	}
+
+	embyPath, err := s.emby.GetItemPath(seriesID)
+	if err != nil {
+		return nil, err
+	}
+	embyPathLinux := strings.TrimRight(pathhelper.ConvertToLinuxPath(embyPath), "/")
+
+	var paths []model.CloudPath
+	if err := s.db.Preload("CloudStorage").Where("user_id = ?", userID).Find(&paths).Error; err != nil {
+		return nil, err
+	}
+
+	result := &ResolveSeriesResult{
+		SeriesID: seriesID,
+		EmbyPath: embyPath,
+		Options:  make([]CloudPathOption, 0, len(paths)),
+	}
+
+	bestLen := -1
+	for _, p := range paths {
+		opt := CloudPathOption{
+			ID:             p.ID,
+			CloudStorageID: p.CloudStorageID,
+			SourcePath:     p.SourcePath,
+			LocalPath:      p.LocalPath,
+		}
+		if p.CloudStorage != nil {
+			opt.StorageName = p.CloudStorage.StorageName
+			opt.StorageType = p.CloudStorage.StorageType
+		}
+		result.Options = append(result.Options, opt)
+
+		local := strings.TrimRight(pathhelper.ConvertToLinuxPath(p.LocalPath), "/")
+		if local == "" || embyPathLinux == "" {
+			continue
+		}
+		if embyPathLinux == local || strings.HasPrefix(embyPathLinux, local+"/") {
+			if len(local) > bestLen {
+				bestLen = len(local)
+				rel := strings.TrimPrefix(embyPathLinux, local)
+				if !strings.HasPrefix(rel, "/") {
+					rel = "/" + rel
+				}
+				result.Matched = true
+				result.CloudPathID = p.ID
+				result.CloudDir = rel
+			}
+		}
+	}
+
+	return result, nil
 }
 
 // ListBlacklist 列出黑名单
