@@ -749,6 +749,44 @@ func decodeURIPath(p string) string {
 	return strings.Join(parts, "/")
 }
 
+// SeriesExternalLinks 剧集的外部站点链接（仅返回 Emby 中存在对应 ProviderId 的项）。
+type SeriesExternalLinks struct {
+	SeriesID string `json:"series_id"`
+	Tmdb     string `json:"tmdb,omitempty"`
+	Tvdb     string `json:"tvdb,omitempty"`
+	Imdb     string `json:"imdb,omitempty"`
+}
+
+// GetSeriesExternalLinks 按剧集ID查询其 Emby ProviderIds，拼接 TMDB/TVDB/IMDB 跳转链接（按需查询）。
+func (s *EmbyMissingService) GetSeriesExternalLinks(seriesID string) (*SeriesExternalLinks, error) {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return nil, fmt.Errorf("剧集ID不能为空")
+	}
+
+	ids, err := s.emby.GetItemProviderIDs(seriesID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &SeriesExternalLinks{SeriesID: seriesID}
+	for key, val := range ids {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "tmdb":
+			out.Tmdb = "https://www.themoviedb.org/tv/" + val
+		case "tvdb":
+			out.Tvdb = "https://thetvdb.com/dereferrer/series/" + val
+		case "imdb":
+			out.Imdb = "https://www.imdb.com/title/" + val
+		}
+	}
+	return out, nil
+}
+
 // ListBlacklist 列出黑名单
 func (s *EmbyMissingService) ListBlacklist() ([]model.EmbyMissingBlacklist, error) {
 	var out []model.EmbyMissingBlacklist

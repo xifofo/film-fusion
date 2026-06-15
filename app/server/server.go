@@ -462,6 +462,7 @@ func (s *Server) setupRoutes() {
 			embyMissing.GET("", embyMissingHandler.List)
 			embyMissing.POST("/scan", embyMissingHandler.Scan)
 			embyMissing.POST("/resolve-cloud-path", embyMissingHandler.ResolveCloudPath)
+			embyMissing.GET("/external-links", embyMissingHandler.ExternalLinks)
 			embyMissing.GET("/libraries", embyMissingHandler.ListLibraries)
 			embyMissing.GET("/setting", embyMissingHandler.GetSetting)
 			embyMissing.PUT("/setting", embyMissingHandler.UpdateSetting)

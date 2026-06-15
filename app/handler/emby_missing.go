@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"film-fusion/app/logger"
 	"film-fusion/app/service"
@@ -104,6 +105,22 @@ func (h *EmbyMissingHandler) ResolveCloudPath(c *gin.Context) {
 		return
 	}
 	h.success(c, res, "解析完成")
+}
+
+// ExternalLinks GET /api/emby-missing/external-links?series_id=xxx
+// 按需查询剧集的 TMDB/TVDB/IMDB 外部站点链接（仅返回 Emby 中存在的项）。
+func (h *EmbyMissingHandler) ExternalLinks(c *gin.Context) {
+	seriesID := strings.TrimSpace(c.Query("series_id"))
+	if seriesID == "" {
+		h.error(c, http.StatusBadRequest, 400, "series_id 不能为空")
+		return
+	}
+	links, err := h.svc.GetSeriesExternalLinks(seriesID)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, links, "获取成功")
 }
 
 // GetSetting GET /api/emby-missing/setting

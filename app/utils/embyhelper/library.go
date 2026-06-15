@@ -123,6 +123,42 @@ func (e *EmbyClient) GetItemPath(itemID string) (string, error) {
 	return path, nil
 }
 
+// itemProviderIDsResp /Items?Ids=...&Fields=ProviderIds 取条目外部站点 ID 的响应
+type itemProviderIDsResp struct {
+	Items []struct {
+		ID          string            `json:"Id"`
+		Name        string            `json:"Name"`
+		Type        string            `json:"Type"`
+		ProviderIDs map[string]string `json:"ProviderIds"`
+	} `json:"Items"`
+}
+
+// GetItemProviderIDs 按条目ID取其外部站点 ID（ProviderIds，如 Tmdb/Tvdb/Imdb）。
+// 用于缺集列表按需查询并跳转 TMDB/TVDB/IMDB。
+func (e *EmbyClient) GetItemProviderIDs(itemID string) (map[string]string, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil, fmt.Errorf("itemID 不能为空")
+	}
+	var resp itemProviderIDsResp
+	r, err := e.client.R().
+		SetQueryParam("Ids", itemID).
+		SetQueryParam("Fields", "ProviderIds").
+		SetQueryParam("Limit", "1").
+		SetResult(&resp).
+		Get("/Items")
+	if err != nil {
+		return nil, fmt.Errorf("请求 Emby 条目信息失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("Emby 条目信息 HTTP %d: %s", r.StatusCode(), truncate(r.String(), 256))
+	}
+	if len(resp.Items) == 0 {
+		return nil, fmt.Errorf("未找到 Emby 条目: %s", itemID)
+	}
+	return resp.Items[0].ProviderIDs, nil
+}
+
 // ListLatestItems 取某个库下最新入库的 N 个 Movie / Series（按 DateCreated 降序）
 // 需要 admin_user_id 才能正确过滤；如未配置则用 /Items 顶层接口（要求 api_key 是管理员密钥）
 func (e *EmbyClient) ListLatestItems(libraryID string, limit int, includeTypes []string) ([]EmbyItem, error) {
