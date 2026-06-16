@@ -44,6 +44,7 @@ type missingScanPayload struct {
 	LibraryID       *string `json:"library_id"`
 	IncludeSpecials *bool   `json:"include_specials"`
 	IncludeUnaired  *bool   `json:"include_unaired"`
+	ForceFull       *bool   `json:"force_full"` // true=忽略「近期已扫」窗口，逐剧强制全量重查
 }
 
 // Scan POST /api/emby-missing/scan 手动触发扫描(异步)
@@ -58,9 +59,10 @@ func (h *EmbyMissingHandler) Scan(c *gin.Context) {
 	}
 
 	opts := service.ScanOptions{
-		LibraryID:       setting.LibraryID,
-		IncludeSpecials: setting.IncludeSpecials,
-		IncludeUnaired:  setting.IncludeUnaired,
+		LibraryID:          setting.LibraryID,
+		IncludeSpecials:    setting.IncludeSpecials,
+		IncludeUnaired:     setting.IncludeUnaired,
+		RescanIntervalDays: setting.RescanIntervalDays,
 	}
 	if payload.LibraryID != nil {
 		opts.LibraryID = *payload.LibraryID
@@ -70,6 +72,9 @@ func (h *EmbyMissingHandler) Scan(c *gin.Context) {
 	}
 	if payload.IncludeUnaired != nil {
 		opts.IncludeUnaired = *payload.IncludeUnaired
+	}
+	if payload.ForceFull != nil {
+		opts.ForceFull = *payload.ForceFull
 	}
 
 	if err := h.svc.Trigger(opts); err != nil {
@@ -134,11 +139,12 @@ func (h *EmbyMissingHandler) GetSetting(c *gin.Context) {
 }
 
 type missingSettingPayload struct {
-	ScheduleEnabled *bool   `json:"schedule_enabled"`
-	Cron            *string `json:"cron"`
-	LibraryID       *string `json:"library_id"`
-	IncludeSpecials *bool   `json:"include_specials"`
-	IncludeUnaired  *bool   `json:"include_unaired"`
+	ScheduleEnabled    *bool   `json:"schedule_enabled"`
+	Cron               *string `json:"cron"`
+	LibraryID          *string `json:"library_id"`
+	IncludeSpecials    *bool   `json:"include_specials"`
+	IncludeUnaired     *bool   `json:"include_unaired"`
+	RescanIntervalDays *int    `json:"rescan_interval_days"`
 }
 
 // UpdateSetting PUT /api/emby-missing/setting
@@ -170,6 +176,9 @@ func (h *EmbyMissingHandler) UpdateSetting(c *gin.Context) {
 	}
 	if payload.IncludeUnaired != nil {
 		merged.IncludeUnaired = *payload.IncludeUnaired
+	}
+	if payload.RescanIntervalDays != nil {
+		merged.RescanIntervalDays = *payload.RescanIntervalDays
 	}
 
 	updated, err := h.svc.UpdateSetting(merged)

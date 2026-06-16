@@ -47,6 +47,7 @@ func AutoMigrate() error {
 		&model.EmbyMissingEpisode{},
 		&model.EmbyMissingBlacklist{},
 		&model.EmbyMissingSetting{},
+		&model.EmbyMissingSeriesScan{},
 		&model.EmbyWatchUser{},
 		&model.EmbyWatchRecord{},
 		&model.EmbyWatchSetting{},

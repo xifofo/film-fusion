@@ -47,13 +47,14 @@ type EmbyMissingService struct {
 const scanConcurrency = 5
 
 // ScanProgress 单次扫描的实时进度(内存态，随扫描更新，供前端轮询展示)。
-// 多个库/分页并发拉取，进度采用「聚合计数」：已处理/总数均为各库累加的全局值。
+// 按剧增量扫描：先枚举所有剧，再逐剧并发查询(或按窗口跳过)，进度按「已处理剧 / 剧总数」估算。
 type ScanProgress struct {
 	Phase          string `json:"phase"`           // preparing / scanning / saving / done / failed
-	LibraryTotal   int    `json:"library_total"`   // 待扫描库总数
-	ProcessedCount int    `json:"processed_count"` // 已从 Emby 拉取的缺集条数(各库累加)
-	TotalCount     int    `json:"total_count"`     // 缺集总数(各库 TotalRecordCount 之和，0=未知)
-	CollectedCount int    `json:"collected_count"` // 累计已收集(去黑名单后)缺集条数
+	SeriesTotal    int    `json:"series_total"`    // 本次需处理的剧总数(枚举得到，已去黑名单)
+	SeriesDone     int    `json:"series_done"`     // 已处理剧数(实际查询 + 跳过)
+	SeriesScanned  int    `json:"series_scanned"`  // 本次实际查询 Emby 的剧数
+	SeriesSkipped  int    `json:"series_skipped"`  // 因近期已扫而跳过的剧数
+	CollectedCount int    `json:"collected_count"` // 累计收集的缺集条数
 	Percent        int    `json:"percent"`         // 0-100 估算进度
 }
 
@@ -72,6 +73,18 @@ type ScanOptions struct {
 	LibraryID       string
 	IncludeSpecials bool
 	IncludeUnaired  bool
+	// RescanIntervalDays 同一剧多少天内不重复扫描(0=每次都扫)。ForceFull=true 时忽略。
+	RescanIntervalDays int
+	// ForceFull 强制全量扫描：忽略「近期已扫」窗口，逐剧重查。
+	ForceFull bool
+}
+
+// missingSeriesRef 枚举到的一部剧(用于逐剧缺集查询)。
+type missingSeriesRef struct {
+	seriesID    string
+	seriesName  string
+	libraryID   string
+	libraryName string
 }
 
 // ScanResult 扫描结果汇总
@@ -135,7 +148,11 @@ func (s *EmbyMissingService) ListTvLibraries() ([]TvLibrary, error) {
 	return out, nil
 }
 
-// ScanOnce 同步执行一次扫描并整表覆盖快照。
+// ScanOnce 同步执行一次「按剧增量」扫描。
+//
+// 流程：枚举目标库下所有剧(去黑名单) → 按「近期已扫窗口 + 口径」分流为「需查/跳过」
+// → 并发逐剧查询 Emby 缺集 → 事务内增量合并(刷新重查的剧、保留跳过的剧、清理已删除的剧)。
+// opts.ForceFull=true 或 RescanIntervalDays<=0 时退化为全量逐剧重查。
 func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (ScanResult, error) {
 	s.setProgress(ScanProgress{Phase: "preparing", Percent: 0})
 
@@ -170,33 +187,95 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 		return ScanResult{}, err
 	}
 
-	// 统一并发信号量：黑名单校验与各库分页拉取共用，限制对 Emby 的在途请求数(默认 5)。
+	// 统一并发信号量：黑名单校验与逐剧缺集查询共用，限制对 Emby 的在途请求数(默认 5)。
 	sem := make(chan struct{}, scanConcurrency)
 
-	// 顺带清理黑名单中 Emby 已不存在的剧集，避免死数据长期残留；
-	// 返回仍然有效的剧集ID集合用于本次扫描跳过(并发校验)。
+	// 顺带清理黑名单中 Emby 已不存在的剧集；返回仍有效的剧集ID集合，枚举时跳过(并发校验)。
 	blackset := s.pruneStaleBlacklist(ctx, bl, sem)
 
-	libTotal := len(targets)
+	// 第一步：枚举目标库下所有剧(分页)，去黑名单。
+	var allSeries []missingSeriesRef
+	for _, t := range targets {
+		start := 0
+		for page := 0; page < 1000; page++ {
+			if err := ctx.Err(); err != nil {
+				return ScanResult{}, err
+			}
+			items, total, err := s.emby.ListItemsForSort(t.ID, []string{"Series"}, start, 500)
+			if err != nil {
+				return ScanResult{}, fmt.Errorf("列出媒体库 %s 的剧集失败: %w", t.Name, err)
+			}
+			for _, it := range items {
+				sid := strings.TrimSpace(it.ID)
+				if sid == "" || blackset[sid] {
+					continue
+				}
+				allSeries = append(allSeries, missingSeriesRef{
+					seriesID:    sid,
+					seriesName:  it.Name,
+					libraryID:   t.ID,
+					libraryName: t.Name,
+				})
+			}
+			start += len(items)
+			if len(items) == 0 || (total > 0 && start >= total) {
+				break
+			}
+		}
+	}
 
-	// 聚合进度计数(并发安全)：processed=已拉取条数，grandTotal=各库缺集总数之和，collected=去黑名单后保留条数。
-	var processed, grandTotal, collected int64
+	// 第二步：加载「每剧最近检查时间」，按窗口 + 口径分流为「需查 toScan / 跳过 skip」。
+	optionsKey := buildMissingOptionsKey(opts)
+	incremental := !opts.ForceFull && opts.RescanIntervalDays > 0
+	window := time.Duration(opts.RescanIntervalDays) * 24 * time.Hour
+	now := time.Now()
+
+	lastChecked := map[string]model.EmbyMissingSeriesScan{}
+	if incremental {
+		var scans []model.EmbyMissingSeriesScan
+		if err := s.db.Find(&scans).Error; err != nil {
+			return ScanResult{}, err
+		}
+		for _, sc := range scans {
+			lastChecked[sc.SeriesID] = sc
+		}
+	}
+
+	var toScan []missingSeriesRef
+	skipped := 0
+	for _, sr := range allSeries {
+		if incremental {
+			if sc, ok := lastChecked[sr.seriesID]; ok &&
+				sc.OptionsKey == optionsKey &&
+				now.Sub(sc.LastCheckedAt) < window {
+				skipped++
+				continue
+			}
+		}
+		toScan = append(toScan, sr)
+	}
+
+	// 进度初值：跳过的剧直接算作已处理。
+	seriesTotal := len(allSeries)
+	var seriesDone, seriesScanned, collected int64
+	atomic.StoreInt64(&seriesDone, int64(skipped))
 	setAgg := func(phase string, percent int) {
 		s.setProgress(ScanProgress{
 			Phase:          phase,
-			LibraryTotal:   libTotal,
-			ProcessedCount: int(atomic.LoadInt64(&processed)),
-			TotalCount:     int(atomic.LoadInt64(&grandTotal)),
+			SeriesTotal:    seriesTotal,
+			SeriesDone:     int(atomic.LoadInt64(&seriesDone)),
+			SeriesScanned:  int(atomic.LoadInt64(&seriesScanned)),
+			SeriesSkipped:  skipped,
 			CollectedCount: int(atomic.LoadInt64(&collected)),
 			Percent:        percent,
 		})
 	}
 	refresh := func() {
-		setAgg("scanning", scanPercent(int(atomic.LoadInt64(&processed)), int(atomic.LoadInt64(&grandTotal))))
+		setAgg("scanning", scanPercent(int(atomic.LoadInt64(&seriesDone)), seriesTotal))
 	}
 	refresh()
 
-	// 扫描期间用子 ctx：任一请求失败即 cancel，让其余 goroutine 尽快收手。
+	// 第三步：并发逐剧查询缺集。任一请求失败即 cancel，让其余 goroutine 尽快收手。
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var (
@@ -222,75 +301,32 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 	}
 	release := func() { <-sem }
 
-	// 收集结果(并发写，加锁)。blackset 在此之后只读，可无锁并发读。
 	var (
-		mu        sync.Mutex
-		rows      []model.EmbyMissingEpisode
-		seriesSet = map[string]bool{}
+		mu   sync.Mutex
+		rows []model.EmbyMissingEpisode
 	)
-	processItems := func(libID, libName string, items []embyhelper.MissingEpisodeItem) {
-		local := make([]model.EmbyMissingEpisode, 0, len(items))
-		for _, it := range items {
-			if strings.TrimSpace(it.SeriesID) == "" || blackset[it.SeriesID] {
-				continue
-			}
-			season := 0
-			if it.ParentIndexNumber != nil {
-				season = *it.ParentIndexNumber
-			}
-			episode := 0
-			if it.IndexNumber != nil {
-				episode = *it.IndexNumber
-			}
-			local = append(local, model.EmbyMissingEpisode{
-				SeriesID:      it.SeriesID,
-				SeriesName:    it.SeriesName,
-				LibraryID:     libID,
-				LibraryName:   libName,
-				SeasonNumber:  season,
-				EpisodeNumber: episode,
-				EpisodeName:   it.Name,
-				PremiereDate:  it.PremiereDate,
-			})
-		}
-		mu.Lock()
-		rows = append(rows, local...)
-		for i := range local {
-			seriesSet[local[i].SeriesID] = true
-		}
-		mu.Unlock()
-		atomic.AddInt64(&processed, int64(len(items)))
-		atomic.AddInt64(&collected, int64(len(local)))
-		refresh()
-	}
-
-	const pageLimit = 200
-
-	// 第一阶段：并发拉取每个库的首页，借此拿到各库缺集总数(TotalRecordCount)，作为后续分页与进度分母。
-	type libTotalInfo struct {
-		id, name string
-		total    int
-	}
-	libInfos := make([]libTotalInfo, len(targets))
 	var wg sync.WaitGroup
-	for i := range targets {
-		i := i
-		t := targets[i]
+	for _, sr := range toScan {
+		sr := sr
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			if !acquire() {
 				return
 			}
-			items, total, err := s.emby.ListMissingEpisodes(t.ID, opts.IncludeSpecials, opts.IncludeUnaired, 0, pageLimit)
+			local, err := s.fetchSeriesMissing(sr, opts)
 			release()
 			if err != nil {
-				setErr(fmt.Errorf("扫描媒体库 %s 失败: %w", t.Name, err))
+				setErr(fmt.Errorf("扫描剧集 %s 缺集失败: %w", sr.seriesName, err))
 				return
 			}
-			atomic.AddInt64(&grandTotal, int64(total))
-			libInfos[i] = libTotalInfo{id: t.ID, name: t.Name, total: total}
-			processItems(t.ID, t.Name, items)
+			mu.Lock()
+			rows = append(rows, local...)
+			mu.Unlock()
+			atomic.AddInt64(&collected, int64(len(local)))
+			atomic.AddInt64(&seriesScanned, 1)
+			atomic.AddInt64(&seriesDone, 1)
+			refresh()
 		}()
 	}
 	wg.Wait()
@@ -301,54 +337,74 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 		return ScanResult{}, err
 	}
 
-	// 第二阶段：把各库「首页之后的剩余分页」摊平成任务，统一用同一信号量并发拉取。
-	type pageTask struct {
-		id, name   string
-		startIndex int
-	}
-	var tasks []pageTask
-	for _, li := range libInfos {
-		if li.id == "" {
-			continue
-		}
-		for start := pageLimit; start < li.total; start += pageLimit {
-			tasks = append(tasks, pageTask{id: li.id, name: li.name, startIndex: start})
-		}
-	}
-	var wg2 sync.WaitGroup
-	for _, tk := range tasks {
-		tk := tk
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			if !acquire() {
-				return
-			}
-			items, _, err := s.emby.ListMissingEpisodes(tk.id, opts.IncludeSpecials, opts.IncludeUnaired, tk.startIndex, pageLimit)
-			release()
-			if err != nil {
-				setErr(fmt.Errorf("扫描媒体库 %s 失败: %w", tk.name, err))
-				return
-			}
-			processItems(tk.id, tk.name, items)
-		}()
-	}
-	wg2.Wait()
-	if firstErr != nil {
-		return ScanResult{}, firstErr
-	}
-	if err := ctx.Err(); err != nil {
-		return ScanResult{}, err
-	}
-
 	setAgg("saving", 99)
 
+	// 第四步：事务内增量合并。
+	//   a. 清理 scope 内、已不再枚举到的剧(从 Emby 删除/新加入黑名单)的残留行与扫描记录；
+	//   b. 删除本次重查剧的旧行，写入新缺集行；
+	//   c. 刷新本次重查剧的「最近检查时间」记录。
+	rescannedIDs := make([]string, 0, len(toScan))
+	for _, sr := range toScan {
+		rescannedIDs = append(rescannedIDs, sr.seriesID)
+	}
+	validSet := make(map[string]bool, len(allSeries))
+	for _, sr := range allSeries {
+		validSet[sr.seriesID] = true
+	}
+	specificLibrary := strings.TrimSpace(opts.LibraryID) != ""
+
+	scanRecs := make([]model.EmbyMissingSeriesScan, 0, len(toScan))
+	for _, sr := range toScan {
+		scanRecs = append(scanRecs, model.EmbyMissingSeriesScan{
+			SeriesID:      sr.seriesID,
+			LibraryID:     sr.libraryID,
+			OptionsKey:    optionsKey,
+			LastCheckedAt: now,
+		})
+	}
+
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Exec("DELETE FROM emby_missing_episodes").Error; err != nil {
+		// a. 清理已删除/新黑名单的剧：仅限本次扫描 scope(指定库时只看该库)。
+		var snapSeriesIDs []string
+		q := tx.Model(&model.EmbyMissingEpisode{}).Distinct("series_id")
+		if specificLibrary {
+			q = q.Where("library_id = ?", strings.TrimSpace(opts.LibraryID))
+		}
+		if err := q.Pluck("series_id", &snapSeriesIDs).Error; err != nil {
 			return err
+		}
+		var staleIDs []string
+		for _, sid := range snapSeriesIDs {
+			if !validSet[sid] {
+				staleIDs = append(staleIDs, sid)
+			}
+		}
+		for _, batch := range chunkStrings(staleIDs, 400) {
+			if err := tx.Where("series_id IN ?", batch).Delete(&model.EmbyMissingEpisode{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("series_id IN ?", batch).Delete(&model.EmbyMissingSeriesScan{}).Error; err != nil {
+				return err
+			}
+		}
+
+		// b. 重查剧：删旧缺集行 + 旧扫描记录
+		for _, batch := range chunkStrings(rescannedIDs, 400) {
+			if err := tx.Where("series_id IN ?", batch).Delete(&model.EmbyMissingEpisode{}).Error; err != nil {
+				return err
+			}
+			if err := tx.Where("series_id IN ?", batch).Delete(&model.EmbyMissingSeriesScan{}).Error; err != nil {
+				return err
+			}
 		}
 		if len(rows) > 0 {
 			if err := tx.CreateInBatches(rows, 200).Error; err != nil {
+				return err
+			}
+		}
+		// c. 写入重查剧的最近检查时间
+		if len(scanRecs) > 0 {
+			if err := tx.CreateInBatches(scanRecs, 200).Error; err != nil {
 				return err
 			}
 		}
@@ -359,10 +415,105 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 
 	setAgg("done", 100)
 
-	return ScanResult{SeriesCount: len(seriesSet), MissingCount: len(rows)}, nil
+	// 结果汇总：当前快照(含本次跳过保留的剧)的去重剧数与缺集总数。
+	seriesCount, missingCount, err := s.snapshotCounts()
+	if err != nil {
+		// 统计失败不致命：退化为本次重查范围的计数
+		return ScanResult{SeriesCount: len(rescannedIDs), MissingCount: len(rows)}, nil
+	}
+	return ScanResult{SeriesCount: seriesCount, MissingCount: missingCount}, nil
 }
 
-// scanPercent 估算扫描总进度(0-99)：已处理条数 / 缺集总数(各库累加)。total<=0(未知)时返回 0。
+// fetchSeriesMissing 查询单部剧的全部缺集(分页)，转换为快照行。
+// SeriesID 一律取枚举到的剧ID(sr.seriesID)，保证与增量合并的删除/校验键一致。
+func (s *EmbyMissingService) fetchSeriesMissing(sr missingSeriesRef, opts ScanOptions) ([]model.EmbyMissingEpisode, error) {
+	const pageLimit = 200
+	var out []model.EmbyMissingEpisode
+	start := 0
+	for page := 0; page < 200; page++ {
+		items, total, err := s.emby.ListMissingEpisodes(sr.seriesID, opts.IncludeSpecials, opts.IncludeUnaired, start, pageLimit)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			season := 0
+			if it.ParentIndexNumber != nil {
+				season = *it.ParentIndexNumber
+			}
+			episode := 0
+			if it.IndexNumber != nil {
+				episode = *it.IndexNumber
+			}
+			name := sr.seriesName
+			if strings.TrimSpace(it.SeriesName) != "" {
+				name = it.SeriesName
+			}
+			out = append(out, model.EmbyMissingEpisode{
+				SeriesID:      sr.seriesID,
+				SeriesName:    name,
+				LibraryID:     sr.libraryID,
+				LibraryName:   sr.libraryName,
+				SeasonNumber:  season,
+				EpisodeNumber: episode,
+				EpisodeName:   it.Name,
+				PremiereDate:  it.PremiereDate,
+			})
+		}
+		start += len(items)
+		if len(items) == 0 || (total > 0 && start >= total) {
+			break
+		}
+	}
+	return out, nil
+}
+
+// snapshotCounts 统计当前缺集快照的去重剧数与缺集总数。
+func (s *EmbyMissingService) snapshotCounts() (int, int, error) {
+	var missingCount int64
+	if err := s.db.Model(&model.EmbyMissingEpisode{}).Count(&missingCount).Error; err != nil {
+		return 0, 0, err
+	}
+	var seriesCount int64
+	if err := s.db.Model(&model.EmbyMissingEpisode{}).Distinct("series_id").Count(&seriesCount).Error; err != nil {
+		return 0, 0, err
+	}
+	return int(seriesCount), int(missingCount), nil
+}
+
+// buildMissingOptionsKey 把影响缺集口径的开关编码为短字符串，口径变化即触发重扫。
+func buildMissingOptionsKey(opts ScanOptions) string {
+	key := "s0u0"
+	switch {
+	case opts.IncludeSpecials && opts.IncludeUnaired:
+		key = "s1u1"
+	case opts.IncludeSpecials:
+		key = "s1u0"
+	case opts.IncludeUnaired:
+		key = "s0u1"
+	}
+	return key
+}
+
+// chunkStrings 把字符串切片按 size 分批，规避 SQLite 的 IN 参数上限。
+func chunkStrings(in []string, size int) [][]string {
+	if len(in) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		return [][]string{in}
+	}
+	var out [][]string
+	for i := 0; i < len(in); i += size {
+		end := i + size
+		if end > len(in) {
+			end = len(in)
+		}
+		out = append(out, in[i:end])
+	}
+	return out
+}
+
+// scanPercent 估算扫描总进度(0-99)：已处理剧数 / 剧总数。total<=0(未知)时返回 0。
 func scanPercent(processed, total int) int {
 	if total <= 0 {
 		return 0
@@ -477,7 +628,7 @@ func (s *EmbyMissingService) getOrCreateSetting() (*model.EmbyMissingSetting, er
 	var st model.EmbyMissingSetting
 	err := s.db.First(&st, model.MissingSettingSingletonID).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		st = model.EmbyMissingSetting{ID: model.MissingSettingSingletonID}
+		st = model.EmbyMissingSetting{ID: model.MissingSettingSingletonID, RescanIntervalDays: 7}
 		if err := s.db.Create(&st).Error; err != nil {
 			return nil, err
 		}
@@ -510,12 +661,17 @@ func (s *EmbyMissingService) UpdateSetting(in model.EmbyMissingSetting) (*model.
 	if err != nil {
 		return nil, err
 	}
+	rescanDays := in.RescanIntervalDays
+	if rescanDays < 0 {
+		rescanDays = 0
+	}
 	updates := map[string]any{
-		"schedule_enabled": in.ScheduleEnabled,
-		"cron":             cronExpr,
-		"library_id":       strings.TrimSpace(in.LibraryID),
-		"include_specials": in.IncludeSpecials,
-		"include_unaired":  in.IncludeUnaired,
+		"schedule_enabled":     in.ScheduleEnabled,
+		"cron":                 cronExpr,
+		"library_id":           strings.TrimSpace(in.LibraryID),
+		"include_specials":     in.IncludeSpecials,
+		"include_unaired":      in.IncludeUnaired,
+		"rescan_interval_days": rescanDays,
 	}
 	if err := s.db.Model(&model.EmbyMissingSetting{}).Where("id = ?", st.ID).Updates(updates).Error; err != nil {
 		return nil, err
@@ -1016,12 +1172,28 @@ func (s *EmbyMissingService) AddBlacklist(seriesID, seriesName, remark string) (
 }
 
 // RemoveBlacklist 移除黑名单(下次扫描会重新纳入)。
+// 同时删除该剧的「最近检查时间」记录，确保下次扫描不会因增量窗口而跳过它。
 func (s *EmbyMissingService) RemoveBlacklist(id uint) error {
-	return s.db.Delete(&model.EmbyMissingBlacklist{}, id).Error
+	var b model.EmbyMissingBlacklist
+	if err := s.db.First(&b, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	if err := s.db.Delete(&model.EmbyMissingBlacklist{}, id).Error; err != nil {
+		return err
+	}
+	if sid := strings.TrimSpace(b.SeriesID); sid != "" {
+		_ = s.db.Where("series_id = ?", sid).Delete(&model.EmbyMissingSeriesScan{}).Error
+	}
+	return nil
 }
 
+// removeSeriesFromSnapshot 加入黑名单时移除该剧的缺集快照行与最近检查记录。
 func (s *EmbyMissingService) removeSeriesFromSnapshot(seriesID string) {
 	_ = s.db.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingEpisode{}).Error
+	_ = s.db.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingSeriesScan{}).Error
 }
 
 // pruneStaleBlacklist 清理黑名单中 Emby 已不存在的剧集。
@@ -1163,9 +1335,10 @@ func (s *EmbyMissingService) runScheduledJob() {
 		return
 	}
 	if err := s.Trigger(ScanOptions{
-		LibraryID:       st.LibraryID,
-		IncludeSpecials: st.IncludeSpecials,
-		IncludeUnaired:  st.IncludeUnaired,
+		LibraryID:          st.LibraryID,
+		IncludeSpecials:    st.IncludeSpecials,
+		IncludeUnaired:     st.IncludeUnaired,
+		RescanIntervalDays: st.RescanIntervalDays,
 	}); err != nil {
 		s.log.Warnf("[emby-missing] 定时任务触发失败: %v", err)
 	}
