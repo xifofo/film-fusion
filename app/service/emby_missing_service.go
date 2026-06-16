@@ -36,6 +36,21 @@ type EmbyMissingService struct {
 
 	scanMu   sync.Mutex
 	scanning bool
+
+	progMu   sync.Mutex
+	progress ScanProgress
+}
+
+// ScanProgress 单次扫描的实时进度(内存态，随扫描更新，供前端轮询展示)。
+type ScanProgress struct {
+	Phase             string `json:"phase"`               // preparing / scanning / saving / done / failed
+	LibraryIndex      int    `json:"library_index"`       // 当前扫描第几个库(1-based)
+	LibraryTotal      int    `json:"library_total"`       // 待扫描库总数
+	LibraryName       string `json:"library_name"`        // 当前库名
+	LibraryItems      int    `json:"library_items"`       // 当前库已处理缺集条数
+	LibraryTotalItems int    `json:"library_total_items"` // 当前库缺集总数(Emby 返回，0=未知)
+	CollectedCount    int    `json:"collected_count"`     // 累计已收集缺集条数
+	Percent           int    `json:"percent"`             // 0-100 估算进度
 }
 
 // NewEmbyMissingService 构造
@@ -79,10 +94,11 @@ type MissingSeriesGroup struct {
 	Episodes     []MissingEpisodeView `json:"episodes"`
 }
 
-// MissingListResult 缺集列表 + 设置/状态
+// MissingListResult 缺集列表 + 设置/状态 + 扫描进度
 type MissingListResult struct {
-	Setting *model.EmbyMissingSetting `json:"setting"`
-	Groups  []MissingSeriesGroup      `json:"groups"`
+	Setting  *model.EmbyMissingSetting `json:"setting"`
+	Groups   []MissingSeriesGroup      `json:"groups"`
+	Progress *ScanProgress             `json:"progress,omitempty"`
 }
 
 // TvLibrary 可扫描的电视剧媒体库
@@ -117,6 +133,8 @@ func (s *EmbyMissingService) ListTvLibraries() ([]TvLibrary, error) {
 
 // ScanOnce 同步执行一次扫描并整表覆盖快照。
 func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (ScanResult, error) {
+	s.setProgress(ScanProgress{Phase: "preparing", Percent: 0})
+
 	type lib struct{ ID, Name string }
 	var targets []lib
 
@@ -143,22 +161,32 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 		}
 	}
 
-	blackset := map[string]bool{}
 	var bl []model.EmbyMissingBlacklist
 	if err := s.db.Find(&bl).Error; err != nil {
 		return ScanResult{}, err
 	}
-	for _, b := range bl {
-		blackset[b.SeriesID] = true
-	}
+	// 顺带清理黑名单中 Emby 已不存在的剧集，避免死数据长期残留；
+	// 返回仍然有效的剧集ID集合用于本次扫描跳过。
+	blackset := s.pruneStaleBlacklist(ctx, bl)
+
+	libTotal := len(targets)
+	prog := ScanProgress{Phase: "scanning", LibraryTotal: libTotal}
+	s.setProgress(prog)
 
 	var rows []model.EmbyMissingEpisode
 	seriesSet := map[string]bool{}
 	const pageLimit = 200
-	for _, t := range targets {
+	for i, t := range targets {
 		if err := ctx.Err(); err != nil {
 			return ScanResult{}, err
 		}
+		prog.LibraryIndex = i + 1
+		prog.LibraryName = t.Name
+		prog.LibraryItems = 0
+		prog.LibraryTotalItems = 0
+		prog.Percent = scanPercent(i, 0, 0, libTotal)
+		s.setProgress(prog)
+
 		startIndex := 0
 		for page := 0; page < 500; page++ {
 			items, total, err := s.emby.ListMissingEpisodes(t.ID, opts.IncludeSpecials, opts.IncludeUnaired, startIndex, pageLimit)
@@ -190,11 +218,22 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 				seriesSet[it.SeriesID] = true
 			}
 			startIndex += len(items)
+
+			prog.LibraryItems = startIndex
+			prog.LibraryTotalItems = total
+			prog.CollectedCount = len(rows)
+			prog.Percent = scanPercent(i, startIndex, total, libTotal)
+			s.setProgress(prog)
+
 			if len(items) == 0 || (total > 0 && startIndex >= total) {
 				break
 			}
 		}
 	}
+
+	prog.Phase = "saving"
+	prog.Percent = 99
+	s.setProgress(prog)
 
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("DELETE FROM emby_missing_episodes").Error; err != nil {
@@ -210,7 +249,34 @@ func (s *EmbyMissingService) ScanOnce(ctx context.Context, opts ScanOptions) (Sc
 		return ScanResult{}, err
 	}
 
+	prog.Phase = "done"
+	prog.Percent = 100
+	s.setProgress(prog)
+
 	return ScanResult{SeriesCount: len(seriesSet), MissingCount: len(rows)}, nil
+}
+
+// scanPercent 估算扫描总进度(0-99)：以「库级进度 + 当前库内分页占比」加权。
+// libIndex 为当前库下标(0-based)；done/total 为当前库已处理/总条数(total<=0 视为未知)。
+func scanPercent(libIndex, done, total, libTotal int) int {
+	if libTotal <= 0 {
+		return 0
+	}
+	frac := 0.0
+	if total > 0 {
+		frac = float64(done) / float64(total)
+		if frac > 1 {
+			frac = 1
+		}
+	}
+	p := int(((float64(libIndex) + frac) / float64(libTotal)) * 100)
+	if p < 0 {
+		p = 0
+	}
+	if p > 99 {
+		p = 99
+	}
+	return p
 }
 
 // Trigger 异步触发一次扫描(带"正在扫描"互斥)。
@@ -224,6 +290,7 @@ func (s *EmbyMissingService) Trigger(opts ScanOptions) error {
 	s.scanMu.Unlock()
 	_, _ = s.getOrCreateSetting()
 	s.setScanningFlag(true)
+	s.setProgress(ScanProgress{Phase: "preparing", Percent: 0})
 
 	go func() {
 		defer func() {
@@ -258,6 +325,18 @@ func (s *EmbyMissingService) IsScanning() bool {
 	return s.scanning
 }
 
+func (s *EmbyMissingService) setProgress(p ScanProgress) {
+	s.progMu.Lock()
+	s.progress = p
+	s.progMu.Unlock()
+}
+
+func (s *EmbyMissingService) getProgress() ScanProgress {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	return s.progress
+}
+
 func (s *EmbyMissingService) setScanningFlag(scanning bool) {
 	_ = s.db.Model(&model.EmbyMissingSetting{}).
 		Where("id = ?", model.MissingSettingSingletonID).
@@ -281,6 +360,15 @@ func (s *EmbyMissingService) finishScan(success bool, res ScanResult, scanErr er
 			updates["last_error"] = scanErr.Error()
 		}
 	}
+	// 收尾进度态：成功置 done/100，失败标记 failed(保留已有计数供前端展示)
+	prog := s.getProgress()
+	if success {
+		prog.Phase = "done"
+		prog.Percent = 100
+	} else {
+		prog.Phase = "failed"
+	}
+	s.setProgress(prog)
 	_, _ = s.getOrCreateSetting()
 	_ = s.db.Model(&model.EmbyMissingSetting{}).
 		Where("id = ?", model.MissingSettingSingletonID).
@@ -374,7 +462,8 @@ func (s *EmbyMissingService) ListMissing() (*MissingListResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &MissingListResult{Setting: st, Groups: groups}, nil
+	prog := s.getProgress()
+	return &MissingListResult{Setting: st, Groups: groups, Progress: &prog}, nil
 }
 
 // CloudPathOption 可用于重生成 STRM 的云路径映射选项（供前端选择/手动修正）。
@@ -835,6 +924,43 @@ func (s *EmbyMissingService) RemoveBlacklist(id uint) error {
 
 func (s *EmbyMissingService) removeSeriesFromSnapshot(seriesID string) {
 	_ = s.db.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingEpisode{}).Error
+}
+
+// pruneStaleBlacklist 清理黑名单中 Emby 已不存在的剧集。
+// 仅当 Emby 明确返回"查不到该条目"时才删除对应黑名单项；接口报错(状态未知)或上下文取消时一律保留，避免误删。
+// 返回仍然有效(Emby 中仍存在)的剧集ID集合，供本次缺集扫描跳过。
+func (s *EmbyMissingService) pruneStaleBlacklist(ctx context.Context, bl []model.EmbyMissingBlacklist) map[string]bool {
+	blackset := make(map[string]bool, len(bl))
+	for _, b := range bl {
+		seriesID := strings.TrimSpace(b.SeriesID)
+		if seriesID == "" {
+			continue
+		}
+		// 上下文取消：剩余项一律按"有效"保留，避免误删
+		if ctx.Err() != nil {
+			blackset[seriesID] = true
+			continue
+		}
+		exists, err := s.emby.ItemExists(seriesID)
+		if err != nil {
+			// 查询失败，状态未知，保守保留
+			s.log.Warnf("[emby-missing] 校验黑名单剧集是否存在失败，保留: series_id=%s err=%v", seriesID, err)
+			blackset[seriesID] = true
+			continue
+		}
+		if exists {
+			blackset[seriesID] = true
+			continue
+		}
+		// Emby 已不存在该剧集，删除残留黑名单项
+		if delErr := s.db.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingBlacklist{}).Error; delErr != nil {
+			s.log.Warnf("[emby-missing] 清理失效黑名单失败，保留: series_id=%s err=%v", seriesID, delErr)
+			blackset[seriesID] = true
+			continue
+		}
+		s.log.Infof("[emby-missing] 已清理 Emby 中已不存在的黑名单剧集: series_id=%s name=%s", seriesID, b.SeriesName)
+	}
+	return blackset
 }
 
 // Start 启动定时调度(应用启动时调用)。

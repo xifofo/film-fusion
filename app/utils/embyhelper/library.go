@@ -123,6 +123,29 @@ func (e *EmbyClient) GetItemPath(itemID string) (string, error) {
 	return path, nil
 }
 
+// ItemExists 判断指定条目在 Emby 中是否仍然存在。
+// 仅依据 /Items?Ids= 是否命中判断，不依赖 Path（虚拟/合集条目无 Path 但仍存在，不能用 GetItemPath 误判）。
+// 返回 (false, nil) 表示 Emby 明确查不到该条目；返回 error 表示请求失败(状态未知，调用方不应据此删除数据)。
+func (e *EmbyClient) ItemExists(itemID string) (bool, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return false, fmt.Errorf("itemID 不能为空")
+	}
+	var resp itemPathResp
+	r, err := e.client.R().
+		SetQueryParam("Ids", itemID).
+		SetQueryParam("Limit", "1").
+		SetResult(&resp).
+		Get("/Items")
+	if err != nil {
+		return false, fmt.Errorf("请求 Emby 条目信息失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return false, fmt.Errorf("Emby 条目信息 HTTP %d: %s", r.StatusCode(), r.String())
+	}
+	return len(resp.Items) > 0, nil
+}
+
 // itemProviderIDsResp /Items?Ids=...&Fields=ProviderIds 取条目外部站点 ID 的响应
 type itemProviderIDsResp struct {
 	Items []struct {
