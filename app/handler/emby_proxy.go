@@ -38,6 +38,9 @@ import (
 // 命中表示这是一个播放流请求；未命中表示是其它 API/资源请求
 var videoPlayURIRegex = regexp.MustCompile(`/[Vv]ideos/(\S+)/(stream|original|master)`)
 
+// code115FileNotFound 是 115 开放平台「文件(夹)不存在或已删除」的错误码。
+const code115FileNotFound = 430004
+
 // SimpleStartInfo 播放开始信息结构体
 type SimpleStartInfo struct {
 	ItemId string `json:"ItemId"`
@@ -469,6 +472,10 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 
 	redirectURL, fromCache, err := h.getDownloadURLForStorage(*decision.PlaybackStorage, decision.ActualPickCode, c.Request.UserAgent())
 	if err != nil && decision.UseBalance && !decision.IsSourcePlayback {
+		if is115FileNotFound(err) && decision.Assignment != nil {
+			h.logger.Warnf("[EMBY PROXY] 子账号目标文件已删除(430004)，失效并重新秒传 assignment=%d", decision.Assignment.ID)
+			h.invalidateBalanceAssignment(decision.Assignment.Match302ID, decision.Assignment.ID)
+		}
 		if decision.SourceStorage == nil {
 			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，源账号信息缺失，无法回退: %v", err)
 			return "", baseEntry, true, "获取子账号直链失败，源账号信息缺失: " + err.Error()
@@ -660,7 +667,12 @@ func (h *EmbyProxyHandler) proxyReadyBalanceCache(c *gin.Context, baseEntry emby
 
 	redirectURL, _, err := h.getDownloadURLForStorage(*assignment.PlaybackStorage, assignment.TargetPickcode, c.Request.UserAgent())
 	if err != nil {
-		h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存命中但获取直链失败 assignment=%d err=%v", assignment.ID, err)
+		if is115FileNotFound(err) {
+			h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存目标文件已删除(430004)，失效并重新秒传 assignment=%d err=%v", assignment.ID, err)
+			h.invalidateBalanceAssignment(assignment.Match302ID, assignment.ID)
+		} else {
+			h.logger.Warnf("[EMBY PROXY] Match302 负载均衡缓存命中但获取直链失败 assignment=%d err=%v", assignment.ID, err)
+		}
 		return "", baseEntry, false
 	}
 
@@ -873,6 +885,38 @@ func (h *EmbyProxyHandler) getDownloadURLForStorage(storage model.CloudStorage, 
 	}
 	h.goCache.Set(cacheKey, redirectURL, h.downloadURLCacheTTL(redirectURL))
 	return redirectURL, false, nil
+}
+
+// is115FileNotFound 判断错误是否为 115 开放平台「文件(夹)不存在或已删除」(code 430004)。
+// SDK 在业务失败时返回结构化的 *sdk115.Error，可用 errors.As 可靠识别，无需脆弱的字符串匹配。
+func is115FileNotFound(err error) bool {
+	var sdkErr *sdk115.Error
+	if errors.As(err, &sdkErr) {
+		return sdkErr.Code == code115FileNotFound
+	}
+	return false
+}
+
+// invalidateBalanceAssignment 让失效的负载均衡 assignment 重新进入秒传流程。
+// 场景：子账号上的秒传目标文件已被 115 删除(430004)，但缓存仍标记为 ready 并指向它，
+// 导致每次播放都先命中失效缓存、调用 DownURL 失败再回退源账号。通过 RetryAssignment 将其
+// 重置为 pending 并后台重新秒传：本次请求回退源账号播放，重传完成后自动恢复负载均衡。
+func (h *EmbyProxyHandler) invalidateBalanceAssignment(matchID, assignmentID uint) {
+	if matchID == 0 || assignmentID == 0 {
+		return
+	}
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				h.logger.Errorf("[EMBY PROXY] 失效负载均衡 assignment=%d panic: %v", assignmentID, r)
+			}
+		}()
+		if _, err := h.balanceSvc.RetryAssignment(context.Background(), matchID, assignmentID); err != nil {
+			h.logger.Warnf("[EMBY PROXY] 失效负载均衡 assignment=%d 失败: %v", assignmentID, err)
+			return
+		}
+		h.logger.Infof("[EMBY PROXY] 负载均衡目标文件已删除，已触发重新秒传 assignment=%d", assignmentID)
+	}()
 }
 
 func (h *EmbyProxyHandler) downloadURLCacheTTL(rawURL string) time.Duration {
