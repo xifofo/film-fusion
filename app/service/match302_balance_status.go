@@ -475,6 +475,17 @@ func (s *BalanceCleanupService) cleanupAssignment(ctx context.Context, matchID, 
 		return fmt.Errorf("当前仍有 active 播放请求")
 	}
 
+	// 目标子账号已被删除：FilmFusion 已无该账号 Cookie，无法也无需删除其 115 上的缓存文件。
+	// 若按普通失败处理会写回 failed，而清理扫描不排除 failed，导致每轮 5 分钟反复重试并刷
+	// "目标账号不存在" 告警。直接终结为 cleaned，停止重试。
+	if assignment.PlaybackStorage == nil {
+		return database.DB.Model(&model.Match302BalanceAssignment{}).Where("id = ?", assignment.ID).Updates(map[string]any{
+			"cleanup_status": model.BalanceCleanupStatusCleaned,
+			"cleanup_error":  "目标账号已删除，跳过文件清理",
+			"cleaned_at":     time.Now(),
+		}).Error
+	}
+
 	updated := database.DB.Model(&model.Match302BalanceAssignment{}).
 		Where("id = ? AND cleanup_status != ?", assignment.ID, model.BalanceCleanupStatusCleaning).
 		Updates(map[string]any{
