@@ -191,7 +191,7 @@ type regenerateDirectoryPayload struct {
 }
 
 // RegenerateDirectory POST /api/strm/regenerate-directory
-// 按指定云路径映射(CloudPath)与云端源目录递归重生成 STRM（复用文件监控的 WalkDir 逻辑，异步执行，结果写整理日志）。
+// 按指定云路径映射(CloudPath)与云端源目录递归重生成 STRM（异步执行，结果写整理日志）。
 func (h *StrmHandler) RegenerateDirectory(c *gin.Context) {
 	userIDVal, exists := c.Get("user_id")
 	if !exists {

@@ -11,7 +11,7 @@ services:
     volumes:
       # 配置和数据目录
       - ./data:/app/data
-      # 下载目录（可选，如果使用文件监控功能）
+      # 下载目录（可选，如果需要容器访问本地下载文件）
       # - /path/to/downloads:/mnt/downloads
       # CloudDrive2挂载目录（可选）
       # - /mnt/clouddrive:/mnt/clouddrive:ro

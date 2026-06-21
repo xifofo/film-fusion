@@ -4,7 +4,6 @@ import (
 	"context"
 	"film-fusion/app/config"
 	"film-fusion/app/database"
-	"film-fusion/app/filewatcher"
 	"film-fusion/app/handler"
 	"film-fusion/app/logger"
 	"film-fusion/app/middleware"
@@ -33,7 +32,6 @@ type Server struct {
 	balanceCleanupSvc      *service.BalanceCleanupService
 	embyClient             *embyhelper.EmbyClient
 	organizeLogCleaner     *service.OrganizeLogCleaner
-	fileWatcher            *filewatcher.FileWatcherManager
 	embyProxyServer        *EmbyProxyServer
 	taskQueue              *service.PersistentTaskQueue
 }
@@ -96,9 +94,6 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	// 设置路由
 	s.setupRoutes()
-
-	// 初始化并启动文件监控器
-	s.setupFileWatcher()
 
 	// 开启一个 Emby 代理服务
 	if cfg.Emby.Enabled {
@@ -190,9 +185,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	s.taskQueue.Stop()
 
-	// 停止文件监控管理器
-	s.fileWatcher.Stop()
-
 	// 关闭数据库连接
 	if err := database.Close(); err != nil {
 		s.Logger.Errorf("关闭数据库连接失败: %v", err)
@@ -225,9 +217,9 @@ func (s *Server) setupRoutes() {
 	// 观看记录服务（被 webhook 与统计接口共用）
 	embyWatchService := service.NewEmbyWatchService(s.Config, s.Logger, s.embyClient)
 
-		// 创建处理器实例
-		systemConfigHandler := handler.NewSystemConfigHandler()
-		appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
+	// 创建处理器实例
+	systemConfigHandler := handler.NewSystemConfigHandler()
+	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
 	authHandler := handler.NewAuthHandler(s.Config)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
@@ -525,31 +517,4 @@ func (s *Server) setupRoutes() {
 			match302.DELETE("/:id", match302Handler.DeleteMatch302)
 		}
 	}
-}
-
-// setupFileWatcher 设置文件监控器
-func (s *Server) setupFileWatcher() {
-	if !s.Config.FileWatcher.Enabled {
-		s.Logger.Info("文件监控功能已禁用")
-		return
-	}
-
-	s.Logger.Info("正在初始化文件监控管理器...")
-
-	// 创建文件监控管理器
-	manager, err := filewatcher.NewFileWatcherManager(&s.Config.FileWatcher, s.Logger)
-	if err != nil {
-		s.Logger.Errorf("创建文件监控管理器失败: %v", err)
-		return
-	}
-
-	s.fileWatcher = manager
-
-	// 启动文件监控管理器
-	if err := s.fileWatcher.Start(); err != nil {
-		s.Logger.Errorf("启动文件监控管理器失败: %v", err)
-		return
-	}
-
-	s.Logger.Info("文件监控管理器初始化并启动成功")
 }

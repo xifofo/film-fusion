@@ -78,9 +78,6 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if strings.TrimSpace(in.MoviePilot.Password) == "" {
 		in.MoviePilot.Password = h.cfg.MoviePilot.Password
 	}
-	// 表单未管理 file_watcher，保留原值，避免被清空
-	in.FileWatcher = h.cfg.FileWatcher
-
 	// 基本校验
 	if strings.TrimSpace(in.Server.Port) == "" {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")

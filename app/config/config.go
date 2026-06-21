@@ -8,12 +8,11 @@ import (
 )
 
 type Config struct {
-	Server      ServerConfig       `mapstructure:"server" json:"server"`
-	Log         LogConfig          `mapstructure:"log" json:"log"`
-	JWT         JWTConfig          `mapstructure:"jwt" json:"jwt"`
-	FileWatcher FileWatcherConfigs `mapstructure:"file_watcher" json:"file_watcher"`
-	Emby        EmbyConfig         `mapstructure:"emby" json:"emby"`
-	MoviePilot  MoviePilotConfig   `mapstructure:"moviepilot" json:"moviepilot"`
+	Server     ServerConfig     `mapstructure:"server" json:"server"`
+	Log        LogConfig        `mapstructure:"log" json:"log"`
+	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
+	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
+	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 }
 
 type ServerConfig struct {
@@ -40,34 +39,16 @@ type JWTConfig struct {
 	Issuer     string `mapstructure:"issuer" json:"issuer"`           // 签发者
 }
 
-// FileWatcherConfigs 保存文件监控配置
-type FileWatcherConfigs struct {
-	Enabled bool                `mapstructure:"enabled" json:"enabled"` // 是否启用文件监控功能
-	Configs []FileWatcherConfig `mapstructure:"configs" json:"configs"` // 多个监控配置
-}
-
-// FileWatcherConfig 保存单个文件监控配置
-type FileWatcherConfig struct {
-	Name                 string   `mapstructure:"name" json:"name"`                                     // 监控配置名称
-	SourceDir            string   `mapstructure:"source_dir" json:"source_dir"`                         // 监控的源目录
-	TargetDir            string   `mapstructure:"target_dir" json:"target_dir"`                         // 目标复制目录
-	Extensions           []string `mapstructure:"extensions" json:"extensions"`                         // 监控的文件扩展名，空表示所有文件
-	Recursive            bool     `mapstructure:"recursive" json:"recursive"`                           // 是否递归监控子目录
-	CopyMode             string   `mapstructure:"copy_mode" json:"copy_mode"`                           // 复制模式: copy(复制), move(移动), link(硬链接)
-	CreateDirs           bool     `mapstructure:"create_dirs" json:"create_dirs"`                       // 是否自动创建目标目录
-	ProcessExistingFiles bool     `mapstructure:"process_existing_files" json:"process_existing_files"` // 是否在启动时处理已存在的文件
-}
-
 type EmbyConfig struct {
-	Enabled             bool            `mapstructure:"enabled" json:"enabled"`                                 // 是否启用 EMBY 服务
-	URL                 string          `mapstructure:"url" json:"url"`                                         // EMBY 服务器地址
-	APIKey              string          `mapstructure:"api_key" json:"api_key"`                                 // EMBY API 密钥
-	AdminUserID         string          `mapstructure:"admin_user_id" json:"admin_user_id"`                     // EMBY 管理员用户 ID
-	CacheTime           int             `mapstructure:"cache_time" json:"cache_time"`                           // API 请求超时时间（秒）
-	AddCurrentMediaInfo bool            `mapstructure:"add_current_media_info" json:"add_current_media_info"`   // 是否在开始播放时补充当前媒体信息
-	AddNextMediaInfo    bool            `mapstructure:"add_next_media_info" json:"add_next_media_info"`         // 是否添加下一部媒体信息
-	RunProxyPort        int             `mapstructure:"run_proxy_port" json:"run_proxy_port"`                   // 运行 Emby 代理端口
-	Cover               EmbyCoverConfig `mapstructure:"cover" json:"cover"`                                     // 媒体库封面生成器配置
+	Enabled             bool            `mapstructure:"enabled" json:"enabled"`                               // 是否启用 EMBY 服务
+	URL                 string          `mapstructure:"url" json:"url"`                                       // EMBY 服务器地址
+	APIKey              string          `mapstructure:"api_key" json:"api_key"`                               // EMBY API 密钥
+	AdminUserID         string          `mapstructure:"admin_user_id" json:"admin_user_id"`                   // EMBY 管理员用户 ID
+	CacheTime           int             `mapstructure:"cache_time" json:"cache_time"`                         // API 请求超时时间（秒）
+	AddCurrentMediaInfo bool            `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
+	AddNextMediaInfo    bool            `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
+	RunProxyPort        int             `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
+	Cover               EmbyCoverConfig `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
 }
 
 // EmbyCoverConfig 媒体库封面生成器配置
@@ -113,7 +94,7 @@ func Load() *Config {
 	return &config
 }
 
-// Save 把内存配置写回 config.yaml（仅覆盖已暴露的键，未暴露键如 file_watcher 会被保留）。
+// Save 把内存配置写回 config.yaml（仅覆盖已暴露的键，未暴露键会被保留）。
 // 通过全局 viper 设置各键后 WriteConfig，保持原有 yaml 键名与未管理项。
 func Save(c *Config) error {
 	viper.Set("server.port", c.Server.Port)
