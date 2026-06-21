@@ -32,6 +32,7 @@ type Server struct {
 	balanceCleanupSvc      *service.BalanceCleanupService
 	embyClient             *embyhelper.EmbyClient
 	organizeLogCleaner     *service.OrganizeLogCleaner
+	organizePreviewQueue   *service.OrganizePreviewQueue
 	embyProxyServer        *EmbyProxyServer
 	taskQueue              *service.PersistentTaskQueue
 }
@@ -131,6 +132,11 @@ func (s *Server) Start() error {
 	// 启动整理日志清理器（默认 7 天保留）
 	s.organizeLogCleaner.Start()
 
+	// 启动预整理队列
+	if s.organizePreviewQueue != nil {
+		s.organizePreviewQueue.Start()
+	}
+
 	// 启动 Match302 子账号缓存清理器
 	s.balanceCleanupSvc.Start()
 
@@ -166,6 +172,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// 停止整理日志清理器
 	if s.organizeLogCleaner != nil {
 		s.organizeLogCleaner.Stop()
+	}
+
+	if s.organizePreviewQueue != nil {
+		s.organizePreviewQueue.Stop()
 	}
 
 	if s.balanceCleanupSvc != nil {
@@ -231,6 +241,9 @@ func (s *Server) setupRoutes() {
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service, s.embyClient)
+	organizePreviewQueue := service.NewOrganizePreviewQueue(s.Logger, organizeHandler.ProcessPreviewTask)
+	organizeHandler.SetPreviewQueue(organizePreviewQueue)
+	s.organizePreviewQueue = organizePreviewQueue
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
@@ -379,6 +392,14 @@ func (s *Server) setupRoutes() {
 			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
 			organize.POST("/media-search", organizeHandler.SearchMedia)
 			organize.POST("/media-local-status", organizeHandler.CheckMediaLocalStatus)
+			previewTasks := organize.Group("/preview-tasks")
+			{
+				previewTasks.POST("", organizeHandler.CreatePreviewTasks)
+				previewTasks.GET("", organizeHandler.ListPreviewTasks)
+				previewTasks.GET("/:id", organizeHandler.GetPreviewTask)
+				previewTasks.POST("/:id/requeue", organizeHandler.RequeuePreviewTask)
+				previewTasks.DELETE("/:id", organizeHandler.DeletePreviewTask)
+			}
 		}
 
 		// 整理日志（STRM 生成 / 文件下载等业务事件）

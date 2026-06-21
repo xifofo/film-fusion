@@ -41,6 +41,7 @@ type OrganizeHandler struct {
 	download115Svc *service.Download115Service
 	dirCache       *service.Web115DirCache
 	embyClient     *embyhelper.EmbyClient
+	previewQueue   *service.OrganizePreviewQueue
 }
 
 func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, download115Svc *service.Download115Service, embyClient *embyhelper.EmbyClient) *OrganizeHandler {
@@ -53,6 +54,10 @@ func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotSer
 		dirCache:       service.NewWeb115DirCache(web115DirCacheTTL),
 		embyClient:     embyClient,
 	}
+}
+
+func (h *OrganizeHandler) SetPreviewQueue(queue *service.OrganizePreviewQueue) {
+	h.previewQueue = queue
 }
 
 func (h *OrganizeHandler) success(c *gin.Context, data any, message string) {
@@ -93,6 +98,18 @@ type Organize115CookieGroup struct {
 	DirDebug []Organize115DirDebug   `json:"dir_debug,omitempty"`
 	Items    []Organize115ItemResult `json:"items,omitempty"`
 	Error    string                  `json:"error,omitempty"`
+}
+
+type Organize115CookieResult struct {
+	CloudDirectoryID uint                     `json:"cloud_directory_id"`
+	CloudStorageID   uint                     `json:"cloud_storage_id"`
+	FolderID         string                   `json:"folder_id"`
+	FolderIDs        []string                 `json:"folder_ids,omitempty"`
+	DryRun           bool                     `json:"dry_run"`
+	Total            int                      `json:"total"`
+	DirDebug         []Organize115DirDebug    `json:"dir_debug,omitempty"`
+	Items            []Organize115ItemResult  `json:"items,omitempty"`
+	Groups           []Organize115CookieGroup `json:"groups,omitempty"`
 }
 
 type Organize115ItemResult struct {
@@ -137,6 +154,22 @@ type Organize115DirDebug struct {
 	FinalID     string                 `json:"final_id,omitempty"`
 	Lookups     []Organize115DirLookup `json:"lookups,omitempty"`
 	Error       string                 `json:"error,omitempty"`
+}
+
+type OrganizePreviewFolderRequest struct {
+	FolderID   string `json:"folder_id"`
+	FolderName string `json:"folder_name"`
+	FolderPath string `json:"folder_path"`
+}
+
+type OrganizePreviewTaskCreateRequest struct {
+	CloudDirectoryID         uint                           `json:"cloud_directory_id" binding:"required"`
+	Folders                  []OrganizePreviewFolderRequest `json:"folders" binding:"required"`
+	IntervalSeconds          int                            `json:"interval_seconds"`
+	RecursiveDepth           *int                           `json:"recursive_depth"`
+	FilenameRegexEnabled     bool                           `json:"filename_regex_enabled"`
+	FilenameRegexPattern     string                         `json:"filename_regex_pattern"`
+	FilenameRegexReplacement string                         `json:"filename_regex_replacement"`
 }
 
 type MediaLookupSearchRequest struct {
@@ -430,12 +463,41 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		return
 	}
 
-	folderIDs := normalizeFolderIDs(req.FolderIDs, req.FolderID)
-	if len(folderIDs) == 0 {
-		h.error(c, http.StatusBadRequest, 400, "115 目录ID为空")
+	result, err := h.buildOrganize115CookieResult(userID, req)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
-	fileIDSet := normalizeFileIDSet(req.FileIDs)
+
+	h.success(c, result, "整理完成")
+}
+
+func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	userID := userIDVal.(uint)
+
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+
+	var req OrganizePreviewTaskCreateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "参数错误")
+		return
+	}
+	if len(req.Folders) == 0 {
+		h.error(c, http.StatusBadRequest, 400, "请选择至少一个 115 目录")
+		return
+	}
+	if _, err := newFilenameRegexProcessor(req.FilenameRegexEnabled, req.FilenameRegexPattern, req.FilenameRegexReplacement); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 
 	var dir model.CloudDirectory
 	if err := database.DB.Preload("CloudStorage").
@@ -444,7 +506,6 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
 		return
 	}
-
 	storage := dir.CloudStorage
 	if storage == nil {
 		var storageModel model.CloudStorage
@@ -455,30 +516,384 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 		}
 		storage = &storageModel
 	}
-
 	if strings.TrimSpace(storage.Cookie) == "" {
 		h.error(c, http.StatusBadRequest, 400, "115 Cookie 为空")
 		return
 	}
-
-	categoryCfg, err := h.moviePilotSvc.GetCategoryConfig()
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "获取 MoviePilot 分类配置失败")
-		return
-	}
-
 	webClient, err := h.web115Svc.NewClient(storage.Cookie)
 	if err != nil {
 		h.error(c, http.StatusBadRequest, 400, "115 Cookie 无效")
 		return
 	}
 
+	recursiveDepth := 1
+	if req.RecursiveDepth != nil {
+		recursiveDepth = *req.RecursiveDepth
+	}
+	recursiveDepth = service.ClampOrganizePreviewMaxDepth(recursiveDepth)
+
+	inputs := make([]service.OrganizePreviewTaskInput, 0, len(req.Folders))
+	seen := make(map[string]struct{}, len(req.Folders))
+	for _, folder := range req.Folders {
+		folderID := strings.TrimSpace(folder.FolderID)
+		if folderID == "" {
+			continue
+		}
+		children, err := h.buildPreviewChildTaskInputs(buildPreviewChildTaskArgs{
+			userID:                   userID,
+			cloudDirectoryID:         req.CloudDirectoryID,
+			cloudStorageID:           dir.CloudStorageID,
+			webClient:                webClient,
+			parentFolderID:           folderID,
+			parentFolderName:         folder.FolderName,
+			parentFolderPath:         folder.FolderPath,
+			childDepth:               1,
+			maxDepth:                 recursiveDepth,
+			intervalSeconds:          req.IntervalSeconds,
+			filenameRegexEnabled:     req.FilenameRegexEnabled,
+			filenameRegexPattern:     req.FilenameRegexPattern,
+			filenameRegexReplacement: req.FilenameRegexReplacement,
+		})
+		if err != nil {
+			h.error(c, http.StatusBadRequest, 400, err.Error())
+			return
+		}
+		for _, child := range children {
+			if _, ok := seen[child.FolderID]; ok {
+				continue
+			}
+			seen[child.FolderID] = struct{}{}
+			inputs = append(inputs, child)
+		}
+	}
+	if len(inputs) == 0 {
+		h.error(c, http.StatusBadRequest, 400, "所选目录下没有可预整理的子目录")
+		return
+	}
+
+	tasks, err := h.previewQueue.Enqueue(inputs)
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "加入预整理队列失败: "+err.Error())
+		return
+	}
+
+	h.success(c, gin.H{
+		"list":      tasks,
+		"total":     len(tasks),
+		"interval":  service.ClampOrganizePreviewIntervalSeconds(req.IntervalSeconds),
+		"max_depth": recursiveDepth,
+	}, "已加入预整理队列")
+}
+
+func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+
+	cloudDirectoryID := uint(0)
+	if raw := strings.TrimSpace(c.Query("cloud_directory_id")); raw != "" {
+		id, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			h.error(c, http.StatusBadRequest, 400, "目录配置 ID 无效")
+			return
+		}
+		cloudDirectoryID = uint(id)
+	}
+	tasks, err := h.previewQueue.List(userIDVal.(uint), cloudDirectoryID, c.Query("status"))
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "获取预整理队列失败")
+		return
+	}
+	h.success(c, gin.H{
+		"list":  tasks,
+		"total": len(tasks),
+	}, "获取预整理队列成功")
+}
+
+func (h *OrganizeHandler) GetPreviewTask(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "任务 ID 无效")
+		return
+	}
+	task, err := h.previewQueue.Get(userIDVal.(uint), uint(id))
+	if err != nil {
+		h.error(c, http.StatusNotFound, 404, "预整理任务不存在")
+		return
+	}
+
+	var result any
+	if raw := strings.TrimSpace(task.ResultJSON); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &result); err != nil {
+			h.error(c, http.StatusInternalServerError, 500, "读取预整理结果失败")
+			return
+		}
+	}
+
+	h.success(c, gin.H{
+		"task":   task,
+		"result": result,
+	}, "获取预整理结果成功")
+}
+
+func (h *OrganizeHandler) RequeuePreviewTask(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "任务 ID 无效")
+		return
+	}
+	task, err := h.previewQueue.Requeue(userIDVal.(uint), uint(id))
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, task, "已重新加入预整理队列")
+}
+
+func (h *OrganizeHandler) DeletePreviewTask(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "任务 ID 无效")
+		return
+	}
+	if err := h.previewQueue.Delete(userIDVal.(uint), uint(id)); err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "删除预整理任务失败")
+		return
+	}
+	h.success(c, gin.H{"id": id}, "删除预整理任务成功")
+}
+
+func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (service.OrganizePreviewProcessResult, error) {
+	req := Organize115CookieRequest{
+		CloudDirectoryID:         task.CloudDirectoryID,
+		FolderIDs:                []string{task.FolderID},
+		DryRun:                   true,
+		FilenameRegexEnabled:     task.FilenameRegexEnabled,
+		FilenameRegexPattern:     task.FilenameRegexPattern,
+		FilenameRegexReplacement: task.FilenameRegexReplacement,
+	}
+	result, err := h.buildOrganize115CookieResult(task.UserID, req)
+	data, marshalErr := json.Marshal(result)
+	processResult := service.OrganizePreviewProcessResult{
+		ResultJSON: string(data),
+		Total:      result.Total,
+	}
+	if err != nil {
+		return processResult, err
+	}
+	if marshalErr != nil {
+		return processResult, marshalErr
+	}
+	for _, group := range result.Groups {
+		if strings.TrimSpace(group.Error) != "" {
+			return processResult, errors.New(group.Error)
+		}
+	}
+	children, err := h.buildPreviewChildTasks(task)
+	if err != nil {
+		return processResult, err
+	}
+	processResult.Children = children
+	return processResult, nil
+}
+
+func (h *OrganizeHandler) buildPreviewChildTasks(task model.OrganizePreviewTask) ([]service.OrganizePreviewTaskInput, error) {
+	if task.MaxDepth <= task.Depth {
+		return nil, nil
+	}
+
+	var dir model.CloudDirectory
+	if err := database.DB.Preload("CloudStorage").
+		Where("id = ? AND user_id = ?", task.CloudDirectoryID, task.UserID).
+		First(&dir).Error; err != nil {
+		return nil, fmt.Errorf("云盘目录不存在或无权限")
+	}
+	storage := dir.CloudStorage
+	if storage == nil {
+		var storageModel model.CloudStorage
+		if err := database.DB.Where("id = ? AND user_id = ?", dir.CloudStorageID, task.UserID).
+			First(&storageModel).Error; err != nil {
+			return nil, fmt.Errorf("云存储不存在或无权限")
+		}
+		storage = &storageModel
+	}
+	if strings.TrimSpace(storage.Cookie) == "" {
+		return nil, fmt.Errorf("115 Cookie 为空")
+	}
+	webClient, err := h.web115Svc.NewClient(storage.Cookie)
+	if err != nil {
+		return nil, fmt.Errorf("115 Cookie 无效")
+	}
+
+	return h.buildPreviewChildTaskInputs(buildPreviewChildTaskArgs{
+		userID:                   task.UserID,
+		cloudDirectoryID:         task.CloudDirectoryID,
+		cloudStorageID:           task.CloudStorageID,
+		webClient:                webClient,
+		parentFolderID:           task.FolderID,
+		parentFolderName:         task.FolderName,
+		parentFolderPath:         task.FolderPath,
+		childDepth:               task.Depth + 1,
+		maxDepth:                 task.MaxDepth,
+		intervalSeconds:          task.IntervalSeconds,
+		filenameRegexEnabled:     task.FilenameRegexEnabled,
+		filenameRegexPattern:     task.FilenameRegexPattern,
+		filenameRegexReplacement: task.FilenameRegexReplacement,
+	})
+}
+
+type buildPreviewChildTaskArgs struct {
+	userID                   uint
+	cloudDirectoryID         uint
+	cloudStorageID           uint
+	webClient                *driver.Pan115Client
+	parentFolderID           string
+	parentFolderName         string
+	parentFolderPath         string
+	childDepth               int
+	maxDepth                 int
+	intervalSeconds          int
+	filenameRegexEnabled     bool
+	filenameRegexPattern     string
+	filenameRegexReplacement string
+}
+
+func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTaskArgs) ([]service.OrganizePreviewTaskInput, error) {
+	children := make([]service.OrganizePreviewTaskInput, 0)
+	offset := 0
+	limit := 1150
+	for {
+		listResp, err := h.web115Svc.GetDirectoriesWithClient(args.webClient, args.parentFolderID, offset, limit)
+		if err != nil {
+			return nil, fmt.Errorf("获取子目录失败: %w", err)
+		}
+		for _, folder := range listResp.Items {
+			folderID := strings.TrimSpace(folder.FileID)
+			if folderID == "" {
+				continue
+			}
+			folderPath := strings.TrimSpace(args.parentFolderPath)
+			if folderPath == "" {
+				folderPath = strings.TrimSpace(args.parentFolderName)
+			}
+			if folderPath == "" {
+				folderPath = strings.TrimSpace(args.parentFolderID)
+			}
+			if name := strings.TrimSpace(folder.Name); name != "" {
+				if folderPath == "" {
+					folderPath = name
+				} else {
+					folderPath = folderPath + " / " + name
+				}
+			}
+			children = append(children, service.OrganizePreviewTaskInput{
+				UserID:                   args.userID,
+				CloudDirectoryID:         args.cloudDirectoryID,
+				CloudStorageID:           args.cloudStorageID,
+				FolderID:                 folderID,
+				ParentFolderID:           args.parentFolderID,
+				FolderName:               folder.Name,
+				FolderPath:               folderPath,
+				Depth:                    args.childDepth,
+				MaxDepth:                 args.maxDepth,
+				IntervalSeconds:          args.intervalSeconds,
+				FilenameRegexEnabled:     args.filenameRegexEnabled,
+				FilenameRegexPattern:     args.filenameRegexPattern,
+				FilenameRegexReplacement: args.filenameRegexReplacement,
+			})
+		}
+		pageLen := len(listResp.Items)
+		if pageLen == 0 {
+			break
+		}
+		if listResp.Total > 0 {
+			if int64(offset+pageLen) >= listResp.Total {
+				break
+			}
+		} else if pageLen < limit {
+			break
+		}
+		offset += pageLen
+	}
+	return children, nil
+}
+
+func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize115CookieRequest) (Organize115CookieResult, error) {
+	folderIDs := normalizeFolderIDs(req.FolderIDs, req.FolderID)
+	if len(folderIDs) == 0 {
+		return Organize115CookieResult{}, fmt.Errorf("115 目录ID为空")
+	}
+	fileIDSet := normalizeFileIDSet(req.FileIDs)
+
+	var dir model.CloudDirectory
+	if err := database.DB.Preload("CloudStorage").
+		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
+		First(&dir).Error; err != nil {
+		return Organize115CookieResult{}, fmt.Errorf("云盘目录不存在或无权限")
+	}
+
+	storage := dir.CloudStorage
+	if storage == nil {
+		var storageModel model.CloudStorage
+		if err := database.DB.Where("id = ? AND user_id = ?", dir.CloudStorageID, userID).
+			First(&storageModel).Error; err != nil {
+			return Organize115CookieResult{}, fmt.Errorf("云存储不存在或无权限")
+		}
+		storage = &storageModel
+	}
+
+	if strings.TrimSpace(storage.Cookie) == "" {
+		return Organize115CookieResult{}, fmt.Errorf("115 Cookie 为空")
+	}
+
+	categoryCfg, err := h.moviePilotSvc.GetCategoryConfig()
+	if err != nil {
+		return Organize115CookieResult{}, fmt.Errorf("获取 MoviePilot 分类配置失败")
+	}
+
+	webClient, err := h.web115Svc.NewClient(storage.Cookie)
+	if err != nil {
+		return Organize115CookieResult{}, fmt.Errorf("115 Cookie 无效")
+	}
+
 	includeExts := parseExtensions(dir.IncludeExtensions)
 	excludeExts := parseExtensions(dir.ExcludeExtensions)
 	filenameProcessor, err := newFilenameRegexProcessor(req.FilenameRegexEnabled, req.FilenameRegexPattern, req.FilenameRegexReplacement)
 	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
+		return Organize115CookieResult{}, err
 	}
 
 	groups := make([]Organize115CookieGroup, 0, len(folderIDs))
@@ -509,17 +924,17 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 
 	primaryFolderID := folderIDs[0]
 
-	h.success(c, gin.H{
-		"cloud_directory_id": req.CloudDirectoryID,
-		"cloud_storage_id":   dir.CloudStorageID,
-		"folder_id":          primaryFolderID,
-		"folder_ids":         folderIDs,
-		"dry_run":            req.DryRun,
-		"total":              totalFiles,
-		"dir_debug":          flatDirDebug,
-		"items":              flatItems,
-		"groups":             groups,
-	}, "整理完成")
+	return Organize115CookieResult{
+		CloudDirectoryID: req.CloudDirectoryID,
+		CloudStorageID:   dir.CloudStorageID,
+		FolderID:         primaryFolderID,
+		FolderIDs:        folderIDs,
+		DryRun:           req.DryRun,
+		Total:            totalFiles,
+		DirDebug:         flatDirDebug,
+		Items:            flatItems,
+		Groups:           groups,
+	}, nil
 }
 
 type processOrganizeArgs struct {
