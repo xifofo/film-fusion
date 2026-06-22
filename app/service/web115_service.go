@@ -248,6 +248,24 @@ func (s *Web115Service) MoveFiles(client *driver.Pan115Client, dirID string, fil
 	return client.Move(dirID, fileIDs...)
 }
 
+func (s *Web115Service) DeleteFilesWithClient(client *driver.Pan115Client, fileIDs []string) error {
+	if client == nil {
+		return fmt.Errorf("115 客户端未初始化")
+	}
+	ids := make([]string, 0, len(fileIDs))
+	for _, fileID := range fileIDs {
+		fileID = strings.TrimSpace(fileID)
+		if fileID == "" || fileID == "0" {
+			continue
+		}
+		ids = append(ids, fileID)
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("要删除的文件 ID 为空")
+	}
+	return client.Delete(ids...)
+}
+
 func (s *Web115Service) GetFileSupervisionWithClient(client *driver.Pan115Client, pickCode string) (Web115SupervisionInfo, error) {
 	pickCode = strings.TrimSpace(pickCode)
 	if pickCode == "" {

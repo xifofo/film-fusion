@@ -25,6 +25,7 @@ import (
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // web115DirCacheTTL 整理流程中「已存在目录」查找的进程内缓存 TTL。
@@ -689,11 +690,95 @@ func (h *OrganizeHandler) DeletePreviewTask(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "任务 ID 无效")
 		return
 	}
+	deleteSourceFolder := parseBoolQuery(c, "delete_source_folder")
+	if deleteSourceFolder {
+		if err := h.deletePreviewTaskSourceFolder(userIDVal.(uint), uint(id)); err != nil {
+			h.error(c, http.StatusBadRequest, 400, err.Error())
+			return
+		}
+	}
 	if err := h.previewQueue.Delete(userIDVal.(uint), uint(id)); err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "删除预整理任务失败")
 		return
 	}
-	h.success(c, gin.H{"id": id}, "删除预整理任务成功")
+	h.success(c, gin.H{
+		"id":                    id,
+		"source_folder_deleted": deleteSourceFolder,
+	}, "删除预整理任务成功")
+}
+
+func (h *OrganizeHandler) deletePreviewTaskSourceFolder(userID uint, id uint) error {
+	task, err := h.previewQueue.Get(userID, id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("预整理任务不存在")
+		}
+		return fmt.Errorf("读取预整理任务失败: %w", err)
+	}
+	if task.Status == model.OrganizePreviewStatusProcessing {
+		return errors.New("任务正在处理中，不能删除源文件夹")
+	}
+	folderID := strings.TrimSpace(task.FolderID)
+	if folderID == "" || folderID == "0" {
+		return errors.New("源文件夹 ID 无效，不能删除")
+	}
+
+	var storage model.CloudStorage
+	if err := database.DB.Where("id = ? AND user_id = ?", task.CloudStorageID, userID).First(&storage).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return errors.New("源存储配置不存在")
+		}
+		return fmt.Errorf("读取源存储配置失败: %w", err)
+	}
+	if strings.TrimSpace(storage.Cookie) == "" {
+		return errors.New("源存储 Cookie 缺失，不能删除源文件夹")
+	}
+	client, err := h.web115Svc.NewClient(storage.Cookie)
+	if err != nil {
+		return err
+	}
+	if err := h.web115Svc.DeleteFilesWithClient(client, []string{folderID}); err != nil {
+		return fmt.Errorf("删除源文件夹失败: %w", err)
+	}
+	return nil
+}
+
+func parseBoolQuery(c *gin.Context, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(c.Query(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *OrganizeHandler) ClearPreviewTasks(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+
+	cloudDirectoryID := uint(0)
+	if raw := strings.TrimSpace(c.Query("cloud_directory_id")); raw != "" {
+		id, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			h.error(c, http.StatusBadRequest, 400, "目录配置 ID 无效")
+			return
+		}
+		cloudDirectoryID = uint(id)
+	}
+
+	deletedCount, err := h.previewQueue.Clear(userIDVal.(uint), cloudDirectoryID, c.Query("status"))
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, gin.H{"deleted_count": deletedCount}, "清理预整理队列成功")
 }
 
 func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (service.OrganizePreviewProcessResult, error) {

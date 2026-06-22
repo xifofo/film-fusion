@@ -272,6 +272,38 @@ func (q *OrganizePreviewQueue) Delete(userID uint, id uint) error {
 	return q.db.Where("id = ? AND user_id = ?", id, userID).Delete(&model.OrganizePreviewTask{}).Error
 }
 
+func (q *OrganizePreviewQueue) Clear(userID uint, cloudDirectoryID uint, status string) (int64, error) {
+	if q == nil || q.db == nil {
+		return 0, errors.New("预整理队列未初始化")
+	}
+
+	query := q.db.Where("user_id = ?", userID)
+	if cloudDirectoryID > 0 {
+		query = query.Where("cloud_directory_id = ?", cloudDirectoryID)
+	}
+
+	switch strings.TrimSpace(status) {
+	case "":
+		query = query.Where("status <> ?", model.OrganizePreviewStatusProcessing)
+	case string(model.OrganizePreviewStatusPending):
+		query = query.Where("status = ?", model.OrganizePreviewStatusPending)
+	case string(model.OrganizePreviewStatusCompleted):
+		query = query.Where("status = ?", model.OrganizePreviewStatusCompleted)
+	case string(model.OrganizePreviewStatusFailed):
+		query = query.Where("status = ?", model.OrganizePreviewStatusFailed)
+	case string(model.OrganizePreviewStatusProcessing):
+		return 0, errors.New("不能清理正在处理中的任务")
+	default:
+		return 0, errors.New("任务状态无效")
+	}
+
+	res := query.Delete(&model.OrganizePreviewTask{})
+	if res.Error != nil {
+		return 0, res.Error
+	}
+	return res.RowsAffected, nil
+}
+
 func (q *OrganizePreviewQueue) worker() {
 	defer q.wg.Done()
 

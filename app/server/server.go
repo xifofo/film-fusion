@@ -396,6 +396,7 @@ func (s *Server) setupRoutes() {
 			{
 				previewTasks.POST("", organizeHandler.CreatePreviewTasks)
 				previewTasks.GET("", organizeHandler.ListPreviewTasks)
+				previewTasks.DELETE("", organizeHandler.ClearPreviewTasks)
 				previewTasks.GET("/:id", organizeHandler.GetPreviewTask)
 				previewTasks.POST("/:id/requeue", organizeHandler.RequeuePreviewTask)
 				previewTasks.DELETE("/:id", organizeHandler.DeletePreviewTask)
