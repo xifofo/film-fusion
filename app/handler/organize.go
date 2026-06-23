@@ -220,6 +220,12 @@ type MediaLookupSearchRequest struct {
 	Count   int    `json:"count"`
 }
 
+type OrganizeCategoryConfigResult struct {
+	Movie []string `json:"movie"`
+	TV    []string `json:"tv"`
+	All   []string `json:"all"`
+}
+
 func normalizeOrganizeMediaType(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "auto":
@@ -238,6 +244,56 @@ func resolveBestVersionEnabled(mediaType string, enabled *bool) bool {
 		return *enabled
 	}
 	return mediaType == "movie"
+}
+
+func (h *OrganizeHandler) GetCategoryConfig(c *gin.Context) {
+	cfg, err := h.moviePilotSvc.GetCategoryConfig()
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "获取 MoviePilot 分类配置失败: "+err.Error())
+		return
+	}
+
+	movie := sortedCategoryNames(cfg.Movie)
+	tv := sortedCategoryNames(cfg.TV)
+	h.success(c, OrganizeCategoryConfigResult{
+		Movie: movie,
+		TV:    tv,
+		All:   mergeCategoryNames(movie, tv),
+	}, "获取分类配置成功")
+}
+
+func sortedCategoryNames(categories map[string]*service.MoviePilotCategoryRule) []string {
+	if len(categories) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(categories))
+	for name := range categories {
+		name = strings.TrimSpace(name)
+		if name != "" {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mergeCategoryNames(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, group := range groups {
+		for _, name := range group {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if _, ok := seen[name]; ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 type MediaLookupLocalStatusRequest struct {

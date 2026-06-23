@@ -390,6 +390,7 @@ func (s *Server) setupRoutes() {
 		{
 			organize.POST("/115", organizeHandler.Organize115)
 			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
+			organize.GET("/category-config", organizeHandler.GetCategoryConfig)
 			organize.POST("/media-search", organizeHandler.SearchMedia)
 			organize.POST("/media-local-status", organizeHandler.CheckMediaLocalStatus)
 			previewTasks := organize.Group("/preview-tasks")
