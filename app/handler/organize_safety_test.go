@@ -104,3 +104,85 @@ func TestAnnotateOrganizeItemRisksMixedMedia(t *testing.T) {
 		}
 	}
 }
+
+func TestAnnotateOrganizeItemRisksExternalSubtitles(t *testing.T) {
+	matched := true
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:         "1",
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceSeason:   1,
+					SourceEpisode:  1,
+					TargetSeason:   1,
+					TargetEpisode:  1,
+					EpisodeMatched: &matched,
+					SubtitleFiles:  []string{"Show.S01E01.ass"},
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups)
+	if got := items[0].RiskLevel; got != "high" {
+		t.Fatalf("risk=%q want high", got)
+	}
+	if len(items[0].RiskReasons) == 0 {
+		t.Fatalf("expected subtitle risk reason")
+	}
+}
+
+func TestAnnotateOrganizeItemRisksNoRisk(t *testing.T) {
+	matched := true
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:         "1",
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceSeason:   1,
+					SourceEpisode:  1,
+					TargetSeason:   1,
+					TargetEpisode:  1,
+					EpisodeMatched: &matched,
+					LocalExists:    false,
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups)
+	if got := items[0].RiskLevel; got != "none" {
+		t.Fatalf("risk=%q want none", got)
+	}
+	if len(items[0].RiskReasons) != 0 {
+		t.Fatalf("risk reasons=%v want empty", items[0].RiskReasons)
+	}
+}
+
+func TestAnnotateOrganizeItemRisksIncompleteSeasonIsLow(t *testing.T) {
+	matched := true
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:         "1",
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceEpisode:  1,
+					TargetSeason:   1,
+					TargetEpisode:  1,
+					EpisodeMatched: &matched,
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups)
+	if got := items[0].RiskLevel; got != "low" {
+		t.Fatalf("risk=%q want low", got)
+	}
+}

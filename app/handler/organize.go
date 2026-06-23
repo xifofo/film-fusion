@@ -146,6 +146,7 @@ type Organize115ItemResult struct {
 	SubtitleError  string   `json:"subtitle_error,omitempty"`
 	LocalDir       string   `json:"local_dir,omitempty"`
 	LocalExists    bool     `json:"local_exists,omitempty"`
+	SubtitleFiles  []string `json:"external_subtitle_files,omitempty"`
 	SourceSeason   int      `json:"source_season,omitempty"`
 	SourceEpisode  int      `json:"source_episode,omitempty"`
 	TargetSeason   int      `json:"target_season,omitempty"`
@@ -1105,6 +1106,8 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	filenameProcessor := args.filename
 
 	results := make([]Organize115ItemResult, 0)
+	subtitleFiles := make([]string, 0)
+	subtitleFileSet := make(map[string]struct{})
 	totalFiles := 0
 	limit := 1150
 	offset := 0
@@ -1121,6 +1124,15 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		for _, file := range listResp.Items {
 			if !file.IsFile {
 				continue
+			}
+			if isSubtitleFile(file.Name) {
+				name := strings.TrimSpace(file.Name)
+				if name != "" {
+					if _, ok := subtitleFileSet[name]; !ok {
+						subtitleFileSet[name] = struct{}{}
+						subtitleFiles = append(subtitleFiles, name)
+					}
+				}
 			}
 			if len(fileIDs) > 0 {
 				if _, ok := fileIDs[strings.TrimSpace(file.FileID)]; !ok {
@@ -1229,6 +1241,13 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		}
 
 		offset += limit
+	}
+
+	if len(subtitleFiles) > 0 {
+		sort.Strings(subtitleFiles)
+		for i := range results {
+			results[i].SubtitleFiles = append([]string{}, subtitleFiles...)
+		}
 	}
 
 	group.Total = totalFiles
@@ -1385,7 +1404,7 @@ func annotateOrganizeItemRisks(groups []Organize115CookieGroup) []Organize115Ite
 }
 
 func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool) {
-	level := "low"
+	level := "none"
 	reasons := make([]string, 0, 4)
 	add := func(nextLevel, reason string) {
 		reasons = append(reasons, reason)
@@ -1406,6 +1425,9 @@ func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool) {
 	if item.LocalExists {
 		add("high", "目标剧集目录本地已存在")
 	}
+	if len(item.SubtitleFiles) > 0 {
+		add("high", "源目录包含外挂字幕文件")
+	}
 
 	if !isOrganizeTVMedia(item.MediaType, item.Category) {
 		add("medium", "识别结果不是剧集类型")
@@ -1422,6 +1444,12 @@ func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool) {
 		if item.SourceSeason > 0 && item.TargetSeason > 0 && item.SourceSeason != item.TargetSeason {
 			add("high", "源文件季号与转名季号不一致")
 		}
+		if item.SourceEpisode > 0 &&
+			item.TargetEpisode > 0 &&
+			item.SourceEpisode == item.TargetEpisode &&
+			(item.SourceSeason <= 0 || item.TargetSeason <= 0) {
+			add("low", "季号未完整解析")
+		}
 	}
 
 	item.RiskLevel = level
@@ -1436,6 +1464,8 @@ func organizeRiskRank(level string) int {
 		return 2
 	case "low":
 		return 1
+	case "none":
+		return 0
 	default:
 		return 0
 	}
