@@ -89,6 +89,9 @@ type Organize115CookieRequest struct {
 	FileIDs                  []string                   `json:"file_ids"`
 	FolderContexts           []Organize115FolderContext `json:"folder_contexts"`
 	DryRun                   bool                       `json:"dry_run"`
+	MediaType                string                     `json:"media_type"`
+	Category                 string                     `json:"category"`
+	BestVersionEnabled       *bool                      `json:"best_version_enabled"`
 	FilenameRegexEnabled     bool                       `json:"filename_regex_enabled"`
 	FilenameRegexPattern     string                     `json:"filename_regex_pattern"`
 	FilenameRegexReplacement string                     `json:"filename_regex_replacement"`
@@ -109,15 +112,31 @@ type Organize115CookieGroup struct {
 }
 
 type Organize115CookieResult struct {
-	CloudDirectoryID uint                     `json:"cloud_directory_id"`
-	CloudStorageID   uint                     `json:"cloud_storage_id"`
-	FolderID         string                   `json:"folder_id"`
-	FolderIDs        []string                 `json:"folder_ids,omitempty"`
-	DryRun           bool                     `json:"dry_run"`
-	Total            int                      `json:"total"`
-	DirDebug         []Organize115DirDebug    `json:"dir_debug,omitempty"`
-	Items            []Organize115ItemResult  `json:"items,omitempty"`
-	Groups           []Organize115CookieGroup `json:"groups,omitempty"`
+	CloudDirectoryID   uint                     `json:"cloud_directory_id"`
+	CloudStorageID     uint                     `json:"cloud_storage_id"`
+	FolderID           string                   `json:"folder_id"`
+	FolderIDs          []string                 `json:"folder_ids,omitempty"`
+	MediaType          string                   `json:"media_type,omitempty"`
+	Category           string                   `json:"category,omitempty"`
+	BestVersionEnabled bool                     `json:"best_version_enabled,omitempty"`
+	DryRun             bool                     `json:"dry_run"`
+	Total              int                      `json:"total"`
+	RiskSummary        OrganizeRiskSummary      `json:"risk_summary,omitempty"`
+	DirDebug           []Organize115DirDebug    `json:"dir_debug,omitempty"`
+	Items              []Organize115ItemResult  `json:"items,omitempty"`
+	Groups             []Organize115CookieGroup `json:"groups,omitempty"`
+}
+
+type OrganizeRiskSummary struct {
+	RiskLevel             string `json:"risk_level,omitempty"`
+	None                  int    `json:"none"`
+	Low                   int    `json:"low"`
+	Medium                int    `json:"medium"`
+	High                  int    `json:"high"`
+	Unknown               int    `json:"unknown"`
+	ExternalSubtitleCount int    `json:"external_subtitle_count"`
+	BestVersionCount      int    `json:"best_version_count"`
+	AlternateVersionCount int    `json:"alternate_version_count"`
 }
 
 type Organize115ItemResult struct {
@@ -147,6 +166,10 @@ type Organize115ItemResult struct {
 	LocalDir       string   `json:"local_dir,omitempty"`
 	LocalExists    bool     `json:"local_exists,omitempty"`
 	SubtitleFiles  []string `json:"external_subtitle_files,omitempty"`
+	VersionScore   int      `json:"version_score,omitempty"`
+	VersionReasons []string `json:"version_reasons,omitempty"`
+	BestVersion    bool     `json:"best_version,omitempty"`
+	AltVersion     bool     `json:"alternate_version,omitempty"`
 	SourceSeason   int      `json:"source_season,omitempty"`
 	SourceEpisode  int      `json:"source_episode,omitempty"`
 	TargetSeason   int      `json:"target_season,omitempty"`
@@ -184,6 +207,9 @@ type OrganizePreviewTaskCreateRequest struct {
 	Folders                  []OrganizePreviewFolderRequest `json:"folders" binding:"required"`
 	IntervalSeconds          int                            `json:"interval_seconds"`
 	RecursiveDepth           *int                           `json:"recursive_depth"`
+	MediaType                string                         `json:"media_type"`
+	Category                 string                         `json:"category"`
+	BestVersionEnabled       *bool                          `json:"best_version_enabled"`
 	FilenameRegexEnabled     bool                           `json:"filename_regex_enabled"`
 	FilenameRegexPattern     string                         `json:"filename_regex_pattern"`
 	FilenameRegexReplacement string                         `json:"filename_regex_replacement"`
@@ -192,6 +218,26 @@ type OrganizePreviewTaskCreateRequest struct {
 type MediaLookupSearchRequest struct {
 	Keyword string `json:"keyword" binding:"required"`
 	Count   int    `json:"count"`
+}
+
+func normalizeOrganizeMediaType(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return "", nil
+	case "movie", "movies", "film", "电影":
+		return "movie", nil
+	case "tv", "series", "show", "tvshow", "剧集", "电视剧", "番剧", "动漫":
+		return "tv", nil
+	default:
+		return "", fmt.Errorf("媒体类型无效")
+	}
+}
+
+func resolveBestVersionEnabled(mediaType string, enabled *bool) bool {
+	if enabled != nil {
+		return *enabled
+	}
+	return mediaType == "movie"
 }
 
 type MediaLookupLocalStatusRequest struct {
@@ -515,6 +561,13 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
+	mediaType, err := normalizeOrganizeMediaType(req.MediaType)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	category := strings.TrimSpace(req.Category)
+	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
 	var dir model.CloudDirectory
 	if err := database.DB.Preload("CloudStorage").
@@ -567,6 +620,9 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 			childDepth:               1,
 			maxDepth:                 recursiveDepth,
 			intervalSeconds:          req.IntervalSeconds,
+			mediaType:                mediaType,
+			category:                 category,
+			bestVersionEnabled:       bestVersionEnabled,
 			filenameRegexEnabled:     req.FilenameRegexEnabled,
 			filenameRegexPattern:     req.FilenameRegexPattern,
 			filenameRegexReplacement: req.FilenameRegexReplacement,
@@ -798,6 +854,7 @@ func (h *OrganizeHandler) ClearPreviewTasks(c *gin.Context) {
 }
 
 func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (service.OrganizePreviewProcessResult, error) {
+	bestVersionEnabled := task.BestVersionEnabled
 	req := Organize115CookieRequest{
 		CloudDirectoryID: task.CloudDirectoryID,
 		FolderIDs:        []string{task.FolderID},
@@ -807,6 +864,9 @@ func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (se
 			FolderPath: task.FolderPath,
 		}},
 		DryRun:                   true,
+		MediaType:                task.MediaType,
+		Category:                 task.Category,
+		BestVersionEnabled:       &bestVersionEnabled,
 		FilenameRegexEnabled:     task.FilenameRegexEnabled,
 		FilenameRegexPattern:     task.FilenameRegexPattern,
 		FilenameRegexReplacement: task.FilenameRegexReplacement,
@@ -814,8 +874,17 @@ func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (se
 	result, err := h.buildOrganize115CookieResult(task.UserID, req)
 	data, marshalErr := json.Marshal(result)
 	processResult := service.OrganizePreviewProcessResult{
-		ResultJSON: string(data),
-		Total:      result.Total,
+		ResultJSON:            string(data),
+		Total:                 result.Total,
+		RiskLevel:             result.RiskSummary.RiskLevel,
+		RiskNoneCount:         result.RiskSummary.None,
+		RiskLowCount:          result.RiskSummary.Low,
+		RiskMediumCount:       result.RiskSummary.Medium,
+		RiskHighCount:         result.RiskSummary.High,
+		RiskUnknownCount:      result.RiskSummary.Unknown,
+		ExternalSubtitleCount: result.RiskSummary.ExternalSubtitleCount,
+		BestVersionCount:      result.RiskSummary.BestVersionCount,
+		AlternateVersionCount: result.RiskSummary.AlternateVersionCount,
 	}
 	if err != nil {
 		return processResult, err
@@ -875,6 +944,9 @@ func (h *OrganizeHandler) buildPreviewChildTasks(task model.OrganizePreviewTask)
 		childDepth:               task.Depth + 1,
 		maxDepth:                 task.MaxDepth,
 		intervalSeconds:          task.IntervalSeconds,
+		mediaType:                task.MediaType,
+		category:                 task.Category,
+		bestVersionEnabled:       task.BestVersionEnabled,
 		filenameRegexEnabled:     task.FilenameRegexEnabled,
 		filenameRegexPattern:     task.FilenameRegexPattern,
 		filenameRegexReplacement: task.FilenameRegexReplacement,
@@ -892,6 +964,9 @@ type buildPreviewChildTaskArgs struct {
 	childDepth               int
 	maxDepth                 int
 	intervalSeconds          int
+	mediaType                string
+	category                 string
+	bestVersionEnabled       bool
 	filenameRegexEnabled     bool
 	filenameRegexPattern     string
 	filenameRegexReplacement string
@@ -936,6 +1011,9 @@ func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTask
 				Depth:                    args.childDepth,
 				MaxDepth:                 args.maxDepth,
 				IntervalSeconds:          args.intervalSeconds,
+				MediaType:                args.mediaType,
+				Category:                 args.category,
+				BestVersionEnabled:       args.bestVersionEnabled,
 				FilenameRegexEnabled:     args.filenameRegexEnabled,
 				FilenameRegexPattern:     args.filenameRegexPattern,
 				FilenameRegexReplacement: args.filenameRegexReplacement,
@@ -964,6 +1042,12 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	}
 	fileIDSet := normalizeFileIDSet(req.FileIDs)
 	folderContexts := normalizeFolderContexts(req.FolderContexts)
+	mediaType, err := normalizeOrganizeMediaType(req.MediaType)
+	if err != nil {
+		return Organize115CookieResult{}, err
+	}
+	category := strings.TrimSpace(req.Category)
+	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
 	var dir model.CloudDirectory
 	if err := database.DB.Preload("CloudStorage").
@@ -1010,52 +1094,66 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	for _, folderID := range folderIDs {
 		group := h.processOrganize115CookieFolder(
 			processOrganizeArgs{
-				dir:         dir,
-				storage:     storage,
-				webClient:   webClient,
-				categoryCfg: categoryCfg,
-				includeExts: includeExts,
-				excludeExts: excludeExts,
-				folderID:    folderID,
-				context:     folderContexts[folderID],
-				fileIDs:     fileIDSet,
-				dryRun:      req.DryRun,
-				filename:    filenameProcessor,
+				dir:                dir,
+				storage:            storage,
+				webClient:          webClient,
+				categoryCfg:        categoryCfg,
+				includeExts:        includeExts,
+				excludeExts:        excludeExts,
+				folderID:           folderID,
+				context:            folderContexts[folderID],
+				fileIDs:            fileIDSet,
+				dryRun:             req.DryRun,
+				mediaType:          mediaType,
+				category:           category,
+				bestVersionEnabled: bestVersionEnabled,
+				filename:           filenameProcessor,
 			},
 		)
 		totalFiles += group.Total
 		flatDirDebug = append(flatDirDebug, group.DirDebug...)
 		groups = append(groups, group)
 	}
-	flatItems := annotateOrganizeItemRisks(groups)
+	flatItems := annotateOrganizeItemRisks(groups, organizeRiskOptions{
+		expectedMediaType:  mediaType,
+		bestVersionEnabled: bestVersionEnabled,
+	})
+	riskSummary := summarizeOrganizeRisks(flatItems)
 
 	primaryFolderID := folderIDs[0]
 
 	return Organize115CookieResult{
-		CloudDirectoryID: req.CloudDirectoryID,
-		CloudStorageID:   dir.CloudStorageID,
-		FolderID:         primaryFolderID,
-		FolderIDs:        folderIDs,
-		DryRun:           req.DryRun,
-		Total:            totalFiles,
-		DirDebug:         flatDirDebug,
-		Items:            flatItems,
-		Groups:           groups,
+		CloudDirectoryID:   req.CloudDirectoryID,
+		CloudStorageID:     dir.CloudStorageID,
+		FolderID:           primaryFolderID,
+		FolderIDs:          folderIDs,
+		MediaType:          mediaType,
+		Category:           category,
+		BestVersionEnabled: bestVersionEnabled,
+		DryRun:             req.DryRun,
+		Total:              totalFiles,
+		RiskSummary:        riskSummary,
+		DirDebug:           flatDirDebug,
+		Items:              flatItems,
+		Groups:             groups,
 	}, nil
 }
 
 type processOrganizeArgs struct {
-	dir         model.CloudDirectory
-	storage     *model.CloudStorage
-	webClient   *driver.Pan115Client
-	categoryCfg service.MoviePilotCategoryConfig
-	includeExts []string
-	excludeExts []string
-	folderID    string
-	context     Organize115FolderContext
-	fileIDs     map[string]struct{}
-	dryRun      bool
-	filename    filenameRegexProcessor
+	dir                model.CloudDirectory
+	storage            *model.CloudStorage
+	webClient          *driver.Pan115Client
+	categoryCfg        service.MoviePilotCategoryConfig
+	includeExts        []string
+	excludeExts        []string
+	folderID           string
+	context            Organize115FolderContext
+	fileIDs            map[string]struct{}
+	dryRun             bool
+	mediaType          string
+	category           string
+	bestVersionEnabled bool
+	filename           filenameRegexProcessor
 }
 
 type filenameRegexProcessor struct {
@@ -1104,6 +1202,8 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	dryRun := args.dryRun
 	minSizeMB := dir.ExcludeSmallerThanMB
 	filenameProcessor := args.filename
+	expectedMediaType := args.mediaType
+	categoryOverride := strings.TrimSpace(args.category)
 
 	results := make([]Organize115ItemResult, 0)
 	subtitleFiles := make([]string, 0)
@@ -1203,13 +1303,19 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			}
 
 			item.MediaType = info.MediaType
+			if item.MediaType == "" && expectedMediaType != "" {
+				item.MediaType = expectedMediaType
+				info.MediaType = expectedMediaType
+			}
 			item.TmdbID = info.TmdbID
 			item.Title = info.Title
 			item.Year = info.Year
 			item.TitleYear = info.TitleYear
 			item.TransferName = transferName
 			item.Category = info.Category
-			if item.Category == "" {
+			if categoryOverride != "" {
+				item.Category = categoryOverride
+			} else if item.Category == "" {
 				item.Category = service.SelectMoviePilotCategory(info.MediaType, info, categoryCfg)
 			}
 			categoryForPath := item.Category
@@ -1324,13 +1430,13 @@ func buildRecognizeInputs(fileName, recognizeName string, context Organize115Fol
 		grandparent = parts[len(parts)-2]
 	}
 
-	out := make([]string, 0, 6)
+	out := make([]string, 0, 12)
 	seen := make(map[string]struct{})
 	add := func(values ...string) {
 		cleaned := make([]string, 0, len(values))
 		for _, value := range values {
 			value = strings.TrimSpace(value)
-			if value != "" {
+			if value != "" && (len(cleaned) == 0 || cleaned[len(cleaned)-1] != value) {
 				cleaned = append(cleaned, value)
 			}
 		}
@@ -1348,16 +1454,44 @@ func buildRecognizeInputs(fileName, recognizeName string, context Organize115Fol
 		out = append(out, input)
 	}
 
-	add(recognizeName)
-	add(grandparent, recognizeName)
-	add(grandparent, parent, recognizeName)
-	add(parent, recognizeName)
-	if len(parts) > 0 {
-		all := append(append([]string{}, parts...), recognizeName)
-		add(all...)
+	names := make([]string, 0, 2)
+	nameSeen := make(map[string]struct{})
+	addName := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		if _, ok := nameSeen[name]; ok {
+			return
+		}
+		nameSeen[name] = struct{}{}
+		names = append(names, name)
+	}
+	addName(recognizeName)
+	addName(defaultFallbackRecognizeName(fileName))
+
+	for _, name := range names {
+		add(name)
+	}
+	for _, name := range names {
+		add(grandparent, name)
+		add(grandparent, parent, name)
+		add(parent, name)
+		if len(parts) > 0 {
+			all := append(append([]string{}, parts...), name)
+			add(all...)
+		}
 	}
 	add(fileName)
 	return out
+}
+
+func defaultFallbackRecognizeName(fileName string) string {
+	matches := defaultFilenameFallbackRegexp.FindStringSubmatch(strings.TrimSpace(fileName))
+	if len(matches) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(matches[1])
 }
 
 func folderContextParts(context Organize115FolderContext) []string {
@@ -1380,7 +1514,12 @@ func folderContextParts(context Organize115FolderContext) []string {
 	return out
 }
 
-func annotateOrganizeItemRisks(groups []Organize115CookieGroup) []Organize115ItemResult {
+type organizeRiskOptions struct {
+	expectedMediaType  string
+	bestVersionEnabled bool
+}
+
+func annotateOrganizeItemRisks(groups []Organize115CookieGroup, opts organizeRiskOptions) []Organize115ItemResult {
 	items := make([]*Organize115ItemResult, 0)
 	mediaKeys := make(map[string]struct{})
 	for groupIdx := range groups {
@@ -1395,15 +1534,18 @@ func annotateOrganizeItemRisks(groups []Organize115CookieGroup) []Organize115Ite
 	}
 
 	mixedMedia := len(mediaKeys) > 1
+	if opts.bestVersionEnabled {
+		annotateBestMovieVersions(items)
+	}
 	flat := make([]Organize115ItemResult, 0, len(items))
 	for _, item := range items {
-		applyOrganizeItemRisk(item, mixedMedia)
+		applyOrganizeItemRisk(item, mixedMedia, opts)
 		flat = append(flat, *item)
 	}
 	return flat
 }
 
-func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool) {
+func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool, opts organizeRiskOptions) {
 	level := "none"
 	reasons := make([]string, 0, 4)
 	add := func(nextLevel, reason string) {
@@ -1428,32 +1570,253 @@ func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool) {
 	if len(item.SubtitleFiles) > 0 {
 		add("high", "源目录包含外挂字幕文件")
 	}
+	if item.AltVersion {
+		add("high", "同一电影存在更优版本，当前不是最佳版本")
+	}
 
-	if !isOrganizeTVMedia(item.MediaType, item.Category) {
-		add("medium", "识别结果不是剧集类型")
-	} else {
-		if item.SourceEpisode <= 0 {
-			add("high", "源文件未解析出集数")
+	isTV := isOrganizeTVMedia(item.MediaType, item.Category)
+	isMovie := isOrganizeMovieMedia(item.MediaType, item.Category)
+	switch opts.expectedMediaType {
+	case "tv":
+		if !matchesExpectedOrganizeMediaType(*item, "tv") {
+			add("high", "识别结果不是所选剧集类型")
 		}
-		if item.TargetEpisode <= 0 {
-			add("high", "转名结果未解析出集数")
+	case "movie":
+		if !matchesExpectedOrganizeMediaType(*item, "movie") {
+			add("high", "识别结果不是所选电影类型")
 		}
-		if item.SourceEpisode > 0 && item.TargetEpisode > 0 && item.SourceEpisode != item.TargetEpisode {
-			add("high", "源文件集数与转名集数不一致")
+	default:
+		if !isTV && !isMovie {
+			add("medium", "识别结果不是电影或剧集类型")
 		}
-		if item.SourceSeason > 0 && item.TargetSeason > 0 && item.SourceSeason != item.TargetSeason {
-			add("high", "源文件季号与转名季号不一致")
-		}
-		if item.SourceEpisode > 0 &&
-			item.TargetEpisode > 0 &&
-			item.SourceEpisode == item.TargetEpisode &&
-			(item.SourceSeason <= 0 || item.TargetSeason <= 0) {
-			add("low", "季号未完整解析")
-		}
+	}
+
+	if isTV {
+		applyEpisodeRisk(item, add)
 	}
 
 	item.RiskLevel = level
 	item.RiskReasons = dedupeStrings(reasons)
+}
+
+func matchesExpectedOrganizeMediaType(item Organize115ItemResult, expected string) bool {
+	mediaType := strings.TrimSpace(item.MediaType)
+	if mediaType != "" {
+		if expected == "tv" {
+			return isOrganizeTVMedia(mediaType, "")
+		}
+		if expected == "movie" {
+			return isOrganizeMovieMedia(mediaType, "")
+		}
+	}
+	if expected == "tv" {
+		return isOrganizeTVMedia("", item.Category)
+	}
+	if expected == "movie" {
+		return isOrganizeMovieMedia("", item.Category)
+	}
+	return false
+}
+
+func applyEpisodeRisk(item *Organize115ItemResult, add func(string, string)) {
+	if item.SourceEpisode <= 0 {
+		add("high", "源文件未解析出集数")
+	}
+	if item.TargetEpisode <= 0 {
+		add("high", "转名结果未解析出集数")
+	}
+	if item.SourceEpisode > 0 && item.TargetEpisode > 0 && item.SourceEpisode != item.TargetEpisode {
+		add("high", "源文件集数与转名集数不一致")
+	}
+	if item.SourceSeason > 0 && item.TargetSeason > 0 && item.SourceSeason != item.TargetSeason {
+		add("high", "源文件季号与转名季号不一致")
+	}
+	if item.SourceEpisode > 0 &&
+		item.TargetEpisode > 0 &&
+		item.SourceEpisode == item.TargetEpisode &&
+		(item.SourceSeason <= 0 || item.TargetSeason <= 0) {
+		add("low", "季号未完整解析")
+	}
+}
+
+type movieVersionCandidate struct {
+	item  *Organize115ItemResult
+	index int
+}
+
+func annotateBestMovieVersions(items []*Organize115ItemResult) {
+	groups := make(map[string][]movieVersionCandidate)
+	for idx, item := range items {
+		if item == nil || strings.TrimSpace(item.TmdbID) == "" {
+			continue
+		}
+		if !isOrganizeMovieMedia(item.MediaType, item.Category) {
+			continue
+		}
+		item.VersionScore, item.VersionReasons = scoreMovieVersion(*item)
+		key := organizeMediaKey(*item)
+		groups[key] = append(groups[key], movieVersionCandidate{item: item, index: idx})
+	}
+
+	for _, candidates := range groups {
+		if len(candidates) == 0 {
+			continue
+		}
+		sort.SliceStable(candidates, func(i, j int) bool {
+			left := candidates[i].item
+			right := candidates[j].item
+			if left.VersionScore != right.VersionScore {
+				return left.VersionScore > right.VersionScore
+			}
+			if left.FileSize != right.FileSize {
+				return left.FileSize > right.FileSize
+			}
+			return candidates[i].index < candidates[j].index
+		})
+		for idx, candidate := range candidates {
+			candidate.item.BestVersion = idx == 0
+			candidate.item.AltVersion = idx > 0
+		}
+	}
+}
+
+func scoreMovieVersion(item Organize115ItemResult) (int, []string) {
+	text := strings.ToLower(strings.Join([]string{
+		item.FileName,
+		item.RecognizeName,
+		item.TransferName,
+	}, " "))
+	score := 0
+	reasons := make([]string, 0, 8)
+	add := func(points int, reason string) {
+		score += points
+		reasons = append(reasons, fmt.Sprintf("%s %+d", reason, points))
+	}
+
+	switch {
+	case containsAny(text, "4320p", "8k"):
+		add(500, "8K")
+	case containsAny(text, "2160p", "4k", "uhd"):
+		add(420, "4K")
+	case containsAny(text, "1080p", "fhd"):
+		add(320, "1080p")
+	case containsAny(text, "720p", "hd"):
+		add(220, "720p")
+	case containsAny(text, "576p", "540p", "480p", "sd"):
+		add(120, "标清")
+	}
+
+	switch {
+	case strings.Contains(text, "remux"):
+		add(140, "Remux")
+	case containsAny(text, "blu-ray", "bluray", "bdrip", "bdmv", "bd25", "bd50"):
+		add(115, "BluRay")
+	case containsAny(text, "web-dl", "webdl"):
+		add(90, "WEB-DL")
+	case containsAny(text, "web-rip", "webrip"):
+		add(75, "WEBRip")
+	case strings.Contains(text, "hdtv"):
+		add(45, "HDTV")
+	case strings.Contains(text, "dvdrip"):
+		add(20, "DVDRip")
+	}
+
+	switch {
+	case containsAny(text, "dolby vision", "dovi", " dv ", ".dv.", "-dv-", "hdr dv"):
+		add(55, "Dolby Vision")
+	case containsAny(text, "hdr10+", "hdr10plus"):
+		add(45, "HDR10+")
+	case strings.Contains(text, "hdr10"):
+		add(35, "HDR10")
+	case strings.Contains(text, "hdr"):
+		add(25, "HDR")
+	}
+
+	switch {
+	case containsAny(text, "truehd", "atmos"):
+		add(60, "TrueHD/Atmos")
+	case containsAny(text, "dts-hd", "dts hd", "dtshd", "dts-ma", "dts ma"):
+		add(50, "DTS-HD")
+	case strings.Contains(text, "dts"):
+		add(35, "DTS")
+	case containsAny(text, "eac3", "e-ac3", "ddp", "dd+"):
+		add(28, "EAC3/DDP")
+	case strings.Contains(text, "ac3"):
+		add(16, "AC3")
+	case strings.Contains(text, "aac"):
+		add(8, "AAC")
+	}
+
+	switch {
+	case containsAny(text, "h.265", "h265", "x265", "hevc"):
+		add(25, "H.265/HEVC")
+	case strings.Contains(text, "av1"):
+		add(22, "AV1")
+	case containsAny(text, "h.264", "h264", "x264", "avc"):
+		add(12, "H.264/AVC")
+	}
+
+	if containsAny(text, "proper", "repack") {
+		add(10, "修正版")
+	}
+	if containsAny(text, " cam ", ".cam.", "-cam-", "ts-", ".ts.", " telesync", "tc-", ".tc.", "hdcam") {
+		add(-500, "低质片源")
+	}
+
+	if item.FileSize > 0 {
+		sizeScore := int(item.FileSize / (1024 * 1024 * 1024))
+		if sizeScore > 80 {
+			sizeScore = 80
+		}
+		if sizeScore > 0 {
+			add(sizeScore, "文件体积")
+		}
+	}
+
+	return score, reasons
+}
+
+func containsAny(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func summarizeOrganizeRisks(items []Organize115ItemResult) OrganizeRiskSummary {
+	summary := OrganizeRiskSummary{}
+	for _, item := range items {
+		switch item.RiskLevel {
+		case "none":
+			summary.None++
+		case "low":
+			summary.Low++
+		case "medium":
+			summary.Medium++
+		case "high":
+			summary.High++
+		default:
+			summary.Unknown++
+		}
+		if organizeRiskRank(item.RiskLevel) > organizeRiskRank(summary.RiskLevel) {
+			summary.RiskLevel = item.RiskLevel
+		}
+		if len(item.SubtitleFiles) > 0 {
+			summary.ExternalSubtitleCount++
+		}
+		if item.BestVersion {
+			summary.BestVersionCount++
+		}
+		if item.AltVersion {
+			summary.AlternateVersionCount++
+		}
+	}
+	if summary.RiskLevel == "" && len(items) > 0 {
+		summary.RiskLevel = "none"
+	}
+	return summary
 }
 
 func organizeRiskRank(level string) int {
@@ -1789,6 +2152,18 @@ func isOrganizeTVMedia(mediaType, category string) bool {
 		return true
 	}
 	return category == "tv" || category == "series"
+}
+
+func isOrganizeMovieMedia(mediaType, category string) bool {
+	switch strings.ToLower(strings.TrimSpace(mediaType)) {
+	case "movie", "movies", "film", "电影", "影片":
+		return true
+	}
+	category = strings.ToLower(strings.TrimSpace(category))
+	if strings.Contains(category, "电影") || strings.Contains(category, "影片") {
+		return true
+	}
+	return category == "movie" || category == "movies" || category == "film"
 }
 
 func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStorage, webClient *driver.Pan115Client, items *[]Organize115ItemResult, dryRun bool) ([]Organize115DirDebug, error) {
@@ -2289,12 +2664,13 @@ var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
 var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第\s*(\d+)\s*季)$`)
 
 var (
-	seasonEpisodeRegexp        = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
-	seasonEpisodeXRegexp       = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
-	chineseSeasonEpisodeRegexp = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
-	episodeOnlyRegexp          = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
-	chineseEpisodeRegexp       = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
-	seasonOnlyRegexp           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
+	defaultFilenameFallbackRegexp = regexp.MustCompile(`.* - (.*)-.*`)
+	seasonEpisodeRegexp           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
+	seasonEpisodeXRegexp          = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
+	chineseSeasonEpisodeRegexp    = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
+	episodeOnlyRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
+	chineseEpisodeRegexp          = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
+	seasonOnlyRegexp              = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
 )
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。

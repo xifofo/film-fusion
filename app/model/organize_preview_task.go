@@ -23,8 +23,20 @@ type OrganizePreviewTask struct {
 	FolderPath               string                    `gorm:"size:1024" json:"folder_path"`
 	Depth                    int                       `gorm:"default:0" json:"depth"`
 	MaxDepth                 int                       `gorm:"default:0" json:"max_depth"`
+	MediaType                string                    `gorm:"size:32" json:"media_type,omitempty"`
+	Category                 string                    `gorm:"size:100" json:"category,omitempty"`
+	BestVersionEnabled       bool                      `gorm:"default:false" json:"best_version_enabled,omitempty"`
 	Status                   OrganizePreviewTaskStatus `gorm:"size:32;not null;index;default:'pending'" json:"status"`
 	Total                    int                       `gorm:"default:0" json:"total"`
+	RiskLevel                string                    `gorm:"size:16;index" json:"risk_level,omitempty"`
+	RiskNoneCount            int                       `gorm:"default:0" json:"risk_none_count"`
+	RiskLowCount             int                       `gorm:"default:0" json:"risk_low_count"`
+	RiskMediumCount          int                       `gorm:"default:0" json:"risk_medium_count"`
+	RiskHighCount            int                       `gorm:"default:0" json:"risk_high_count"`
+	RiskUnknownCount         int                       `gorm:"default:0" json:"risk_unknown_count"`
+	ExternalSubtitleCount    int                       `gorm:"default:0" json:"external_subtitle_count"`
+	BestVersionCount         int                       `gorm:"default:0" json:"best_version_count"`
+	AlternateVersionCount    int                       `gorm:"default:0" json:"alternate_version_count"`
 	ResultJSON               string                    `gorm:"type:text" json:"-"`
 	Error                    string                    `gorm:"type:text" json:"error,omitempty"`
 	IntervalSeconds          int                       `gorm:"default:45" json:"interval_seconds"`

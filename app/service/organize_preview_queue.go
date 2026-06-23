@@ -31,6 +31,9 @@ type OrganizePreviewTaskInput struct {
 	FolderPath               string
 	Depth                    int
 	MaxDepth                 int
+	MediaType                string
+	Category                 string
+	BestVersionEnabled       bool
 	IntervalSeconds          int
 	FilenameRegexEnabled     bool
 	FilenameRegexPattern     string
@@ -38,9 +41,18 @@ type OrganizePreviewTaskInput struct {
 }
 
 type OrganizePreviewProcessResult struct {
-	ResultJSON string
-	Total      int
-	Children   []OrganizePreviewTaskInput
+	ResultJSON            string
+	Total                 int
+	RiskLevel             string
+	RiskNoneCount         int
+	RiskLowCount          int
+	RiskMediumCount       int
+	RiskHighCount         int
+	RiskUnknownCount      int
+	ExternalSubtitleCount int
+	BestVersionCount      int
+	AlternateVersionCount int
+	Children              []OrganizePreviewTaskInput
 }
 
 type OrganizePreviewProcessor func(task model.OrganizePreviewTask) (OrganizePreviewProcessResult, error)
@@ -86,6 +98,17 @@ func ClampOrganizePreviewMaxDepth(value int) int {
 		return maxOrganizePreviewMaxDepth
 	}
 	return value
+}
+
+func normalizeOrganizePreviewMediaType(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "movie", "movies", "film", "电影":
+		return "movie"
+	case "tv", "series", "show", "tvshow", "剧集", "电视剧", "番剧", "动漫":
+		return "tv"
+	default:
+		return ""
+	}
 }
 
 func (q *OrganizePreviewQueue) Start() {
@@ -168,8 +191,20 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 					"folder_path":                strings.TrimSpace(input.FolderPath),
 					"depth":                      input.Depth,
 					"max_depth":                  ClampOrganizePreviewMaxDepth(input.MaxDepth),
+					"media_type":                 normalizeOrganizePreviewMediaType(input.MediaType),
+					"category":                   strings.TrimSpace(input.Category),
+					"best_version_enabled":       input.BestVersionEnabled,
 					"status":                     model.OrganizePreviewStatusPending,
 					"total":                      0,
+					"risk_level":                 "",
+					"risk_none_count":            0,
+					"risk_low_count":             0,
+					"risk_medium_count":          0,
+					"risk_high_count":            0,
+					"risk_unknown_count":         0,
+					"external_subtitle_count":    0,
+					"best_version_count":         0,
+					"alternate_version_count":    0,
 					"result_json":                "",
 					"error":                      "",
 					"interval_seconds":           ClampOrganizePreviewIntervalSeconds(input.IntervalSeconds),
@@ -202,6 +237,9 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 			FolderPath:               strings.TrimSpace(input.FolderPath),
 			Depth:                    input.Depth,
 			MaxDepth:                 ClampOrganizePreviewMaxDepth(input.MaxDepth),
+			MediaType:                normalizeOrganizePreviewMediaType(input.MediaType),
+			Category:                 strings.TrimSpace(input.Category),
+			BestVersionEnabled:       input.BestVersionEnabled,
 			Status:                   model.OrganizePreviewStatusPending,
 			IntervalSeconds:          ClampOrganizePreviewIntervalSeconds(input.IntervalSeconds),
 			FilenameRegexEnabled:     input.FilenameRegexEnabled,
@@ -253,12 +291,21 @@ func (q *OrganizePreviewQueue) Requeue(userID uint, id uint) (model.OrganizePrev
 		return task, errors.New("任务正在处理中，不能重复加入队列")
 	}
 	if err := q.db.Model(&task).Updates(map[string]any{
-		"status":       model.OrganizePreviewStatusPending,
-		"total":        0,
-		"result_json":  "",
-		"error":        "",
-		"started_at":   nil,
-		"completed_at": nil,
+		"status":                  model.OrganizePreviewStatusPending,
+		"total":                   0,
+		"risk_level":              "",
+		"risk_none_count":         0,
+		"risk_low_count":          0,
+		"risk_medium_count":       0,
+		"risk_high_count":         0,
+		"risk_unknown_count":      0,
+		"external_subtitle_count": 0,
+		"best_version_count":      0,
+		"alternate_version_count": 0,
+		"result_json":             "",
+		"error":                   "",
+		"started_at":              nil,
+		"completed_at":            nil,
 	}).Error; err != nil {
 		return task, err
 	}
@@ -344,10 +391,19 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	res := q.db.Model(&model.OrganizePreviewTask{}).
 		Where("id = ? AND status = ?", task.ID, model.OrganizePreviewStatusPending).
 		Updates(map[string]any{
-			"status":       model.OrganizePreviewStatusProcessing,
-			"started_at":   &now,
-			"completed_at": nil,
-			"error":        "",
+			"status":                  model.OrganizePreviewStatusProcessing,
+			"started_at":              &now,
+			"completed_at":            nil,
+			"error":                   "",
+			"risk_level":              "",
+			"risk_none_count":         0,
+			"risk_low_count":          0,
+			"risk_medium_count":       0,
+			"risk_high_count":         0,
+			"risk_unknown_count":      0,
+			"external_subtitle_count": 0,
+			"best_version_count":      0,
+			"alternate_version_count": 0,
 		})
 	if res.Error != nil {
 		if q.log != nil {
@@ -367,9 +423,18 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	result, err := q.processor(task)
 	completedAt := time.Now()
 	updates := map[string]any{
-		"total":        result.Total,
-		"result_json":  result.ResultJSON,
-		"completed_at": &completedAt,
+		"total":                   result.Total,
+		"risk_level":              result.RiskLevel,
+		"risk_none_count":         result.RiskNoneCount,
+		"risk_low_count":          result.RiskLowCount,
+		"risk_medium_count":       result.RiskMediumCount,
+		"risk_high_count":         result.RiskHighCount,
+		"risk_unknown_count":      result.RiskUnknownCount,
+		"external_subtitle_count": result.ExternalSubtitleCount,
+		"best_version_count":      result.BestVersionCount,
+		"alternate_version_count": result.AlternateVersionCount,
+		"result_json":             result.ResultJSON,
+		"completed_at":            &completedAt,
 	}
 	if err != nil {
 		updates["status"] = model.OrganizePreviewStatusFailed

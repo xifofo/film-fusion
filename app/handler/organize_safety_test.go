@@ -34,6 +34,36 @@ func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
 	}
 }
 
+func TestBuildRecognizeInputsUsesDefaultRegexFallbackBeforeGrandparent(t *testing.T) {
+	inputs := buildRecognizeInputs(
+		"发布组 - 流浪地球-2160p.mkv",
+		"发布组 - 流浪地球-2160p.mkv",
+		Organize115FolderContext{
+			FolderID:   "100",
+			FolderName: "版本合集",
+			FolderPath: "电影 / 流浪地球 / 版本合集",
+		},
+	)
+
+	wantPrefix := []string{
+		"发布组 - 流浪地球-2160p.mkv",
+		"流浪地球",
+		"流浪地球/发布组 - 流浪地球-2160p.mkv",
+		"流浪地球/版本合集/发布组 - 流浪地球-2160p.mkv",
+		"版本合集/发布组 - 流浪地球-2160p.mkv",
+		"电影/流浪地球/版本合集/发布组 - 流浪地球-2160p.mkv",
+		"流浪地球/版本合集/流浪地球",
+	}
+	if len(inputs) < len(wantPrefix) {
+		t.Fatalf("len(inputs)=%d want at least %d inputs=%v", len(inputs), len(wantPrefix), inputs)
+	}
+	for i := range wantPrefix {
+		if inputs[i] != wantPrefix[i] {
+			t.Fatalf("inputs[%d]=%q want %q; all=%v", i, inputs[i], wantPrefix[i], inputs)
+		}
+	}
+}
+
 func TestInferSourceSeasonEpisodeFromContextAndEpisodeOnlyName(t *testing.T) {
 	season, episode := inferSourceSeasonEpisode(
 		"发布组 - 第03集-1080p.mkv",
@@ -97,7 +127,7 @@ func TestAnnotateOrganizeItemRisksMixedMedia(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups)
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
 	for _, item := range items {
 		if item.RiskLevel != "high" {
 			t.Fatalf("item %s risk=%q want high", item.FileID, item.RiskLevel)
@@ -125,7 +155,7 @@ func TestAnnotateOrganizeItemRisksExternalSubtitles(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups)
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
 	if got := items[0].RiskLevel; got != "high" {
 		t.Fatalf("risk=%q want high", got)
 	}
@@ -154,7 +184,7 @@ func TestAnnotateOrganizeItemRisksNoRisk(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups)
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
 	if got := items[0].RiskLevel; got != "none" {
 		t.Fatalf("risk=%q want none", got)
 	}
@@ -181,8 +211,66 @@ func TestAnnotateOrganizeItemRisksIncompleteSeasonIsLow(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups)
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
 	if got := items[0].RiskLevel; got != "low" {
 		t.Fatalf("risk=%q want low", got)
+	}
+}
+
+func TestAnnotateOrganizeItemRisksMovieNoRisk(t *testing.T) {
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:    "1",
+					FileName:  "Movie.2024.1080p.WEB-DL.mkv",
+					MediaType: "movie",
+					TmdbID:    "100",
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "movie"})
+	if got := items[0].RiskLevel; got != "none" {
+		t.Fatalf("risk=%q want none", got)
+	}
+}
+
+func TestAnnotateOrganizeItemRisksMovieBestVersion(t *testing.T) {
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:    "1080",
+					FileName:  "Movie.2024.1080p.WEB-DL.H264.mkv",
+					FileSize:  8 * 1024 * 1024 * 1024,
+					MediaType: "movie",
+					TmdbID:    "100",
+				},
+				{
+					FileID:    "2160",
+					FileName:  "Movie.2024.2160p.BluRay.REMUX.HEVC.TrueHD.Atmos.mkv",
+					FileSize:  48 * 1024 * 1024 * 1024,
+					MediaType: "movie",
+					TmdbID:    "100",
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{
+		expectedMediaType:  "movie",
+		bestVersionEnabled: true,
+	})
+	byID := map[string]Organize115ItemResult{}
+	for _, item := range items {
+		byID[item.FileID] = item
+	}
+	if !byID["2160"].BestVersion || byID["2160"].RiskLevel != "none" {
+		t.Fatalf("2160 item=%+v, want best no-risk", byID["2160"])
+	}
+	if !byID["1080"].AltVersion || byID["1080"].RiskLevel != "high" {
+		t.Fatalf("1080 item=%+v, want alternate high-risk", byID["1080"])
 	}
 }
