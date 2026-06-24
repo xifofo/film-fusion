@@ -243,7 +243,7 @@ func resolveBestVersionEnabled(mediaType string, enabled *bool) bool {
 	if enabled != nil {
 		return *enabled
 	}
-	return mediaType == "movie"
+	return mediaType == "movie" || mediaType == "tv"
 }
 
 func (h *OrganizeHandler) GetCategoryConfig(c *gin.Context) {
@@ -1591,7 +1591,7 @@ func annotateOrganizeItemRisks(groups []Organize115CookieGroup, opts organizeRis
 
 	mixedMedia := len(mediaKeys) > 1
 	if opts.bestVersionEnabled {
-		annotateBestMovieVersions(items)
+		annotateBestVersions(items)
 	}
 	flat := make([]Organize115ItemResult, 0, len(items))
 	for _, item := range items {
@@ -1627,7 +1627,11 @@ func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool, opts or
 		add("high", "源目录包含外挂字幕文件")
 	}
 	if item.AltVersion {
-		add("high", "同一电影存在更优版本，当前不是最佳版本")
+		if isOrganizeTVMedia(item.MediaType, item.Category) {
+			add("high", "同一集存在更优版本，当前不是最佳版本")
+		} else {
+			add("high", "同一电影存在更优版本，当前不是最佳版本")
+		}
 	}
 
 	isTV := isOrganizeTVMedia(item.MediaType, item.Category)
@@ -1695,23 +1699,23 @@ func applyEpisodeRisk(item *Organize115ItemResult, add func(string, string)) {
 	}
 }
 
-type movieVersionCandidate struct {
+type versionCandidate struct {
 	item  *Organize115ItemResult
 	index int
 }
 
-func annotateBestMovieVersions(items []*Organize115ItemResult) {
-	groups := make(map[string][]movieVersionCandidate)
+func annotateBestVersions(items []*Organize115ItemResult) {
+	groups := make(map[string][]versionCandidate)
 	for idx, item := range items {
 		if item == nil || strings.TrimSpace(item.TmdbID) == "" {
 			continue
 		}
-		if !isOrganizeMovieMedia(item.MediaType, item.Category) {
+		key := versionGroupKey(*item)
+		if key == "" {
 			continue
 		}
-		item.VersionScore, item.VersionReasons = scoreMovieVersion(*item)
-		key := organizeMediaKey(*item)
-		groups[key] = append(groups[key], movieVersionCandidate{item: item, index: idx})
+		item.VersionScore, item.VersionReasons = scoreMediaVersion(*item)
+		groups[key] = append(groups[key], versionCandidate{item: item, index: idx})
 	}
 
 	for _, candidates := range groups {
@@ -1736,7 +1740,32 @@ func annotateBestMovieVersions(items []*Organize115ItemResult) {
 	}
 }
 
-func scoreMovieVersion(item Organize115ItemResult) (int, []string) {
+func versionGroupKey(item Organize115ItemResult) string {
+	mediaKey := organizeMediaKey(item)
+	if strings.TrimSpace(item.TmdbID) == "" {
+		return ""
+	}
+	if isOrganizeMovieMedia(item.MediaType, item.Category) {
+		return mediaKey
+	}
+	if isOrganizeTVMedia(item.MediaType, item.Category) {
+		season := item.SourceSeason
+		if season <= 0 {
+			season = item.TargetSeason
+		}
+		episode := item.SourceEpisode
+		if episode <= 0 {
+			episode = item.TargetEpisode
+		}
+		if episode <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%s:s%d:e%d", mediaKey, season, episode)
+	}
+	return ""
+}
+
+func scoreMediaVersion(item Organize115ItemResult) (int, []string) {
 	text := strings.ToLower(strings.Join([]string{
 		item.FileName,
 		item.RecognizeName,

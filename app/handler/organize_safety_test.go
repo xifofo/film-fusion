@@ -274,3 +274,67 @@ func TestAnnotateOrganizeItemRisksMovieBestVersion(t *testing.T) {
 		t.Fatalf("1080 item=%+v, want alternate high-risk", byID["1080"])
 	}
 }
+
+func TestAnnotateOrganizeItemRisksTVBestVersionPerEpisode(t *testing.T) {
+	matched := true
+	groups := []Organize115CookieGroup{
+		{
+			Items: []Organize115ItemResult{
+				{
+					FileID:         "e01-1080",
+					FileName:       "Show.S01E01.1080p.WEB-DL.H264.mkv",
+					FileSize:       6 * 1024 * 1024 * 1024,
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceSeason:   1,
+					SourceEpisode:  1,
+					TargetSeason:   1,
+					TargetEpisode:  1,
+					EpisodeMatched: &matched,
+				},
+				{
+					FileID:         "e01-2160",
+					FileName:       "Show.S01E01.2160p.WEB-DL.HEVC.Atmos.mkv",
+					FileSize:       18 * 1024 * 1024 * 1024,
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceSeason:   1,
+					SourceEpisode:  1,
+					TargetSeason:   1,
+					TargetEpisode:  1,
+					EpisodeMatched: &matched,
+				},
+				{
+					FileID:         "e02-1080",
+					FileName:       "Show.S01E02.1080p.WEB-DL.H264.mkv",
+					FileSize:       6 * 1024 * 1024 * 1024,
+					MediaType:      "tv",
+					TmdbID:         "100",
+					SourceSeason:   1,
+					SourceEpisode:  2,
+					TargetSeason:   1,
+					TargetEpisode:  2,
+					EpisodeMatched: &matched,
+				},
+			},
+		},
+	}
+
+	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{
+		expectedMediaType:  "tv",
+		bestVersionEnabled: true,
+	})
+	byID := map[string]Organize115ItemResult{}
+	for _, item := range items {
+		byID[item.FileID] = item
+	}
+	if !byID["e01-2160"].BestVersion || byID["e01-2160"].RiskLevel != "none" {
+		t.Fatalf("e01-2160 item=%+v, want best no-risk", byID["e01-2160"])
+	}
+	if !byID["e01-1080"].AltVersion || byID["e01-1080"].RiskLevel != "high" {
+		t.Fatalf("e01-1080 item=%+v, want alternate high-risk", byID["e01-1080"])
+	}
+	if !byID["e02-1080"].BestVersion || byID["e02-1080"].RiskLevel != "none" {
+		t.Fatalf("e02-1080 item=%+v, want independent best no-risk", byID["e02-1080"])
+	}
+}
