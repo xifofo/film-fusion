@@ -121,22 +121,15 @@ type Organize115CookieResult struct {
 	BestVersionEnabled bool                     `json:"best_version_enabled,omitempty"`
 	DryRun             bool                     `json:"dry_run"`
 	Total              int                      `json:"total"`
-	RiskSummary        OrganizeRiskSummary      `json:"risk_summary,omitempty"`
 	DirDebug           []Organize115DirDebug    `json:"dir_debug,omitempty"`
 	Items              []Organize115ItemResult  `json:"items,omitempty"`
 	Groups             []Organize115CookieGroup `json:"groups,omitempty"`
 }
 
-type OrganizeRiskSummary struct {
-	RiskLevel             string `json:"risk_level,omitempty"`
-	None                  int    `json:"none"`
-	Low                   int    `json:"low"`
-	Medium                int    `json:"medium"`
-	High                  int    `json:"high"`
-	Unknown               int    `json:"unknown"`
-	ExternalSubtitleCount int    `json:"external_subtitle_count"`
-	BestVersionCount      int    `json:"best_version_count"`
-	AlternateVersionCount int    `json:"alternate_version_count"`
+type organizeFactSummary struct {
+	ExternalSubtitleCount int `json:"external_subtitle_count"`
+	BestVersionCount      int `json:"best_version_count"`
+	AlternateVersionCount int `json:"alternate_version_count"`
 }
 
 type Organize115ItemResult struct {
@@ -175,8 +168,6 @@ type Organize115ItemResult struct {
 	TargetSeason   int      `json:"target_season,omitempty"`
 	TargetEpisode  int      `json:"target_episode,omitempty"`
 	EpisodeMatched *bool    `json:"episode_matched,omitempty"`
-	RiskLevel      string   `json:"risk_level,omitempty"`
-	RiskReasons    []string `json:"risk_reasons,omitempty"`
 	Error          string   `json:"error,omitempty"`
 }
 
@@ -930,18 +921,13 @@ func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (se
 	result, err := h.buildOrganize115CookieResult(task.UserID, req)
 	data, marshalErr := json.Marshal(result)
 	processResult := service.OrganizePreviewProcessResult{
-		ResultJSON:            string(data),
-		Total:                 result.Total,
-		RiskLevel:             result.RiskSummary.RiskLevel,
-		RiskNoneCount:         result.RiskSummary.None,
-		RiskLowCount:          result.RiskSummary.Low,
-		RiskMediumCount:       result.RiskSummary.Medium,
-		RiskHighCount:         result.RiskSummary.High,
-		RiskUnknownCount:      result.RiskSummary.Unknown,
-		ExternalSubtitleCount: result.RiskSummary.ExternalSubtitleCount,
-		BestVersionCount:      result.RiskSummary.BestVersionCount,
-		AlternateVersionCount: result.RiskSummary.AlternateVersionCount,
+		ResultJSON: string(data),
+		Total:      result.Total,
 	}
+	factSummary := summarizeOrganizeFacts(result.Items)
+	processResult.ExternalSubtitleCount = factSummary.ExternalSubtitleCount
+	processResult.BestVersionCount = factSummary.BestVersionCount
+	processResult.AlternateVersionCount = factSummary.AlternateVersionCount
 	if err != nil {
 		return processResult, err
 	}
@@ -1170,11 +1156,9 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		flatDirDebug = append(flatDirDebug, group.DirDebug...)
 		groups = append(groups, group)
 	}
-	flatItems := annotateOrganizeItemRisks(groups, organizeRiskOptions{
-		expectedMediaType:  mediaType,
+	flatItems := annotateOrganizeItems(groups, organizeAnnotateOptions{
 		bestVersionEnabled: bestVersionEnabled,
 	})
-	riskSummary := summarizeOrganizeRisks(flatItems)
 
 	primaryFolderID := folderIDs[0]
 
@@ -1188,7 +1172,6 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		BestVersionEnabled: bestVersionEnabled,
 		DryRun:             req.DryRun,
 		Total:              totalFiles,
-		RiskSummary:        riskSummary,
 		DirDebug:           flatDirDebug,
 		Items:              flatItems,
 		Groups:             groups,
@@ -1570,133 +1553,27 @@ func folderContextParts(context Organize115FolderContext) []string {
 	return out
 }
 
-type organizeRiskOptions struct {
-	expectedMediaType  string
+type organizeAnnotateOptions struct {
 	bestVersionEnabled bool
 }
 
-func annotateOrganizeItemRisks(groups []Organize115CookieGroup, opts organizeRiskOptions) []Organize115ItemResult {
+func annotateOrganizeItems(groups []Organize115CookieGroup, opts organizeAnnotateOptions) []Organize115ItemResult {
 	items := make([]*Organize115ItemResult, 0)
-	mediaKeys := make(map[string]struct{})
 	for groupIdx := range groups {
 		for itemIdx := range groups[groupIdx].Items {
 			item := &groups[groupIdx].Items[itemIdx]
 			items = append(items, item)
-			if strings.TrimSpace(item.TmdbID) == "" {
-				continue
-			}
-			mediaKeys[organizeMediaKey(*item)] = struct{}{}
 		}
 	}
 
-	mixedMedia := len(mediaKeys) > 1
 	if opts.bestVersionEnabled {
 		annotateBestVersions(items)
 	}
 	flat := make([]Organize115ItemResult, 0, len(items))
 	for _, item := range items {
-		applyOrganizeItemRisk(item, mixedMedia, opts)
 		flat = append(flat, *item)
 	}
 	return flat
-}
-
-func applyOrganizeItemRisk(item *Organize115ItemResult, mixedMedia bool, opts organizeRiskOptions) {
-	level := "none"
-	reasons := make([]string, 0, 4)
-	add := func(nextLevel, reason string) {
-		reasons = append(reasons, reason)
-		if organizeRiskRank(nextLevel) > organizeRiskRank(level) {
-			level = nextLevel
-		}
-	}
-
-	if strings.TrimSpace(item.Error) != "" {
-		add("high", item.Error)
-	}
-	if strings.TrimSpace(item.TmdbID) == "" {
-		add("high", "未识别到 TMDB ID")
-	}
-	if mixedMedia {
-		add("high", "同一批预览命中了多个剧集或媒体类型")
-	}
-	if item.LocalExists {
-		add("high", "目标剧集目录本地已存在")
-	}
-	if len(item.SubtitleFiles) > 0 {
-		add("high", "源目录包含外挂字幕文件")
-	}
-	if item.AltVersion {
-		if isOrganizeTVMedia(item.MediaType, item.Category) {
-			add("high", "同一集存在更优版本，当前不是最佳版本")
-		} else {
-			add("high", "同一电影存在更优版本，当前不是最佳版本")
-		}
-	}
-
-	isTV := isOrganizeTVMedia(item.MediaType, item.Category)
-	isMovie := isOrganizeMovieMedia(item.MediaType, item.Category)
-	switch opts.expectedMediaType {
-	case "tv":
-		if !matchesExpectedOrganizeMediaType(*item, "tv") {
-			add("high", "识别结果不是所选剧集类型")
-		}
-	case "movie":
-		if !matchesExpectedOrganizeMediaType(*item, "movie") {
-			add("high", "识别结果不是所选电影类型")
-		}
-	default:
-		if !isTV && !isMovie {
-			add("medium", "识别结果不是电影或剧集类型")
-		}
-	}
-
-	if isTV {
-		applyEpisodeRisk(item, add)
-	}
-
-	item.RiskLevel = level
-	item.RiskReasons = dedupeStrings(reasons)
-}
-
-func matchesExpectedOrganizeMediaType(item Organize115ItemResult, expected string) bool {
-	mediaType := strings.TrimSpace(item.MediaType)
-	if mediaType != "" {
-		if expected == "tv" {
-			return isOrganizeTVMedia(mediaType, "")
-		}
-		if expected == "movie" {
-			return isOrganizeMovieMedia(mediaType, "")
-		}
-	}
-	if expected == "tv" {
-		return isOrganizeTVMedia("", item.Category)
-	}
-	if expected == "movie" {
-		return isOrganizeMovieMedia("", item.Category)
-	}
-	return false
-}
-
-func applyEpisodeRisk(item *Organize115ItemResult, add func(string, string)) {
-	if item.SourceEpisode <= 0 {
-		add("high", "源文件未解析出集数")
-	}
-	if item.TargetEpisode <= 0 {
-		add("high", "转名结果未解析出集数")
-	}
-	if item.SourceEpisode > 0 && item.TargetEpisode > 0 && item.SourceEpisode != item.TargetEpisode {
-		add("high", "源文件集数与转名集数不一致")
-	}
-	if item.SourceSeason > 0 && item.TargetSeason > 0 && item.SourceSeason != item.TargetSeason {
-		add("high", "源文件季号与转名季号不一致")
-	}
-	if item.SourceEpisode > 0 &&
-		item.TargetEpisode > 0 &&
-		item.SourceEpisode == item.TargetEpisode &&
-		(item.SourceSeason <= 0 || item.TargetSeason <= 0) {
-		add("low", "季号未完整解析")
-	}
 }
 
 type versionCandidate struct {
@@ -1870,24 +1747,9 @@ func containsAny(value string, needles ...string) bool {
 	return false
 }
 
-func summarizeOrganizeRisks(items []Organize115ItemResult) OrganizeRiskSummary {
-	summary := OrganizeRiskSummary{}
+func summarizeOrganizeFacts(items []Organize115ItemResult) organizeFactSummary {
+	summary := organizeFactSummary{}
 	for _, item := range items {
-		switch item.RiskLevel {
-		case "none":
-			summary.None++
-		case "low":
-			summary.Low++
-		case "medium":
-			summary.Medium++
-		case "high":
-			summary.High++
-		default:
-			summary.Unknown++
-		}
-		if organizeRiskRank(item.RiskLevel) > organizeRiskRank(summary.RiskLevel) {
-			summary.RiskLevel = item.RiskLevel
-		}
 		if len(item.SubtitleFiles) > 0 {
 			summary.ExternalSubtitleCount++
 		}
@@ -1898,25 +1760,7 @@ func summarizeOrganizeRisks(items []Organize115ItemResult) OrganizeRiskSummary {
 			summary.AlternateVersionCount++
 		}
 	}
-	if summary.RiskLevel == "" && len(items) > 0 {
-		summary.RiskLevel = "none"
-	}
 	return summary
-}
-
-func organizeRiskRank(level string) int {
-	switch level {
-	case "high":
-		return 3
-	case "medium":
-		return 2
-	case "low":
-		return 1
-	case "none":
-		return 0
-	default:
-		return 0
-	}
 }
 
 func organizeMediaKey(item Organize115ItemResult) string {

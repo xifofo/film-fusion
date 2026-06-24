@@ -43,12 +43,6 @@ type OrganizePreviewTaskInput struct {
 type OrganizePreviewProcessResult struct {
 	ResultJSON            string
 	Total                 int
-	RiskLevel             string
-	RiskNoneCount         int
-	RiskLowCount          int
-	RiskMediumCount       int
-	RiskHighCount         int
-	RiskUnknownCount      int
 	ExternalSubtitleCount int
 	BestVersionCount      int
 	AlternateVersionCount int
@@ -196,12 +190,6 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 					"best_version_enabled":       input.BestVersionEnabled,
 					"status":                     model.OrganizePreviewStatusPending,
 					"total":                      0,
-					"risk_level":                 "",
-					"risk_none_count":            0,
-					"risk_low_count":             0,
-					"risk_medium_count":          0,
-					"risk_high_count":            0,
-					"risk_unknown_count":         0,
 					"external_subtitle_count":    0,
 					"best_version_count":         0,
 					"alternate_version_count":    0,
@@ -293,12 +281,6 @@ func (q *OrganizePreviewQueue) Requeue(userID uint, id uint) (model.OrganizePrev
 	if err := q.db.Model(&task).Updates(map[string]any{
 		"status":                  model.OrganizePreviewStatusPending,
 		"total":                   0,
-		"risk_level":              "",
-		"risk_none_count":         0,
-		"risk_low_count":          0,
-		"risk_medium_count":       0,
-		"risk_high_count":         0,
-		"risk_unknown_count":      0,
 		"external_subtitle_count": 0,
 		"best_version_count":      0,
 		"alternate_version_count": 0,
@@ -395,12 +377,6 @@ func (q *OrganizePreviewQueue) processNext() bool {
 			"started_at":              &now,
 			"completed_at":            nil,
 			"error":                   "",
-			"risk_level":              "",
-			"risk_none_count":         0,
-			"risk_low_count":          0,
-			"risk_medium_count":       0,
-			"risk_high_count":         0,
-			"risk_unknown_count":      0,
 			"external_subtitle_count": 0,
 			"best_version_count":      0,
 			"alternate_version_count": 0,
@@ -424,12 +400,6 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	completedAt := time.Now()
 	updates := map[string]any{
 		"total":                   result.Total,
-		"risk_level":              result.RiskLevel,
-		"risk_none_count":         result.RiskNoneCount,
-		"risk_low_count":          result.RiskLowCount,
-		"risk_medium_count":       result.RiskMediumCount,
-		"risk_high_count":         result.RiskHighCount,
-		"risk_unknown_count":      result.RiskUnknownCount,
 		"external_subtitle_count": result.ExternalSubtitleCount,
 		"best_version_count":      result.BestVersionCount,
 		"alternate_version_count": result.AlternateVersionCount,

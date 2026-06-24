@@ -98,102 +98,7 @@ func TestExtractEpisodeNumbers(t *testing.T) {
 	}
 }
 
-func TestAnnotateOrganizeItemRisksMixedMedia(t *testing.T) {
-	matched := true
-	groups := []Organize115CookieGroup{
-		{
-			Items: []Organize115ItemResult{
-				{
-					FileID:         "1",
-					MediaType:      "tv",
-					TmdbID:         "100",
-					SourceSeason:   1,
-					SourceEpisode:  1,
-					TargetSeason:   1,
-					TargetEpisode:  1,
-					EpisodeMatched: &matched,
-				},
-				{
-					FileID:         "2",
-					MediaType:      "tv",
-					TmdbID:         "200",
-					SourceSeason:   1,
-					SourceEpisode:  2,
-					TargetSeason:   1,
-					TargetEpisode:  2,
-					EpisodeMatched: &matched,
-				},
-			},
-		},
-	}
-
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
-	for _, item := range items {
-		if item.RiskLevel != "high" {
-			t.Fatalf("item %s risk=%q want high", item.FileID, item.RiskLevel)
-		}
-	}
-}
-
-func TestAnnotateOrganizeItemRisksExternalSubtitles(t *testing.T) {
-	matched := true
-	groups := []Organize115CookieGroup{
-		{
-			Items: []Organize115ItemResult{
-				{
-					FileID:         "1",
-					MediaType:      "tv",
-					TmdbID:         "100",
-					SourceSeason:   1,
-					SourceEpisode:  1,
-					TargetSeason:   1,
-					TargetEpisode:  1,
-					EpisodeMatched: &matched,
-					SubtitleFiles:  []string{"Show.S01E01.ass"},
-				},
-			},
-		},
-	}
-
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
-	if got := items[0].RiskLevel; got != "high" {
-		t.Fatalf("risk=%q want high", got)
-	}
-	if len(items[0].RiskReasons) == 0 {
-		t.Fatalf("expected subtitle risk reason")
-	}
-}
-
-func TestAnnotateOrganizeItemRisksNoRisk(t *testing.T) {
-	matched := true
-	groups := []Organize115CookieGroup{
-		{
-			Items: []Organize115ItemResult{
-				{
-					FileID:         "1",
-					MediaType:      "tv",
-					TmdbID:         "100",
-					SourceSeason:   1,
-					SourceEpisode:  1,
-					TargetSeason:   1,
-					TargetEpisode:  1,
-					EpisodeMatched: &matched,
-					LocalExists:    false,
-				},
-			},
-		},
-	}
-
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
-	if got := items[0].RiskLevel; got != "none" {
-		t.Fatalf("risk=%q want none", got)
-	}
-	if len(items[0].RiskReasons) != 0 {
-		t.Fatalf("risk reasons=%v want empty", items[0].RiskReasons)
-	}
-}
-
-func TestAnnotateOrganizeItemRisksIncompleteSeasonIsLow(t *testing.T) {
+func TestAnnotateOrganizeItemsPreservesEpisodeFacts(t *testing.T) {
 	matched := true
 	groups := []Organize115CookieGroup{
 		{
@@ -211,33 +116,40 @@ func TestAnnotateOrganizeItemRisksIncompleteSeasonIsLow(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "tv"})
-	if got := items[0].RiskLevel; got != "low" {
-		t.Fatalf("risk=%q want low", got)
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{})
+	if len(items) != 1 {
+		t.Fatalf("len(items)=%d want 1", len(items))
+	}
+	if items[0].SourceEpisode != 1 || items[0].TargetEpisode != 1 {
+		t.Fatalf("item=%+v, want source and target episode preserved", items[0])
+	}
+	if items[0].EpisodeMatched == nil || !*items[0].EpisodeMatched {
+		t.Fatalf("episode_matched=%v want true", items[0].EpisodeMatched)
 	}
 }
 
-func TestAnnotateOrganizeItemRisksMovieNoRisk(t *testing.T) {
+func TestSummarizeOrganizeFactsExternalSubtitles(t *testing.T) {
 	groups := []Organize115CookieGroup{
 		{
 			Items: []Organize115ItemResult{
 				{
-					FileID:    "1",
-					FileName:  "Movie.2024.1080p.WEB-DL.mkv",
-					MediaType: "movie",
-					TmdbID:    "100",
+					FileID:        "1",
+					MediaType:     "tv",
+					TmdbID:        "100",
+					SubtitleFiles: []string{"Show.S01E01.ass"},
 				},
 			},
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{expectedMediaType: "movie"})
-	if got := items[0].RiskLevel; got != "none" {
-		t.Fatalf("risk=%q want none", got)
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{})
+	summary := summarizeOrganizeFacts(items)
+	if summary.ExternalSubtitleCount != 1 {
+		t.Fatalf("external subtitle count=%d want 1", summary.ExternalSubtitleCount)
 	}
 }
 
-func TestAnnotateOrganizeItemRisksMovieBestVersion(t *testing.T) {
+func TestAnnotateOrganizeItemsMovieBestVersion(t *testing.T) {
 	groups := []Organize115CookieGroup{
 		{
 			Items: []Organize115ItemResult{
@@ -259,23 +171,26 @@ func TestAnnotateOrganizeItemRisksMovieBestVersion(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{
-		expectedMediaType:  "movie",
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{
 		bestVersionEnabled: true,
 	})
 	byID := map[string]Organize115ItemResult{}
 	for _, item := range items {
 		byID[item.FileID] = item
 	}
-	if !byID["2160"].BestVersion || byID["2160"].RiskLevel != "none" {
-		t.Fatalf("2160 item=%+v, want best no-risk", byID["2160"])
+	if !byID["2160"].BestVersion {
+		t.Fatalf("2160 item=%+v, want best version", byID["2160"])
 	}
-	if !byID["1080"].AltVersion || byID["1080"].RiskLevel != "high" {
-		t.Fatalf("1080 item=%+v, want alternate high-risk", byID["1080"])
+	if !byID["1080"].AltVersion {
+		t.Fatalf("1080 item=%+v, want alternate version", byID["1080"])
+	}
+	summary := summarizeOrganizeFacts(items)
+	if summary.BestVersionCount != 1 || summary.AlternateVersionCount != 1 {
+		t.Fatalf("summary=%+v, want one best and one alternate version", summary)
 	}
 }
 
-func TestAnnotateOrganizeItemRisksTVBestVersionPerEpisode(t *testing.T) {
+func TestAnnotateOrganizeItemsTVBestVersionPerEpisode(t *testing.T) {
 	matched := true
 	groups := []Organize115CookieGroup{
 		{
@@ -320,21 +235,20 @@ func TestAnnotateOrganizeItemRisksTVBestVersionPerEpisode(t *testing.T) {
 		},
 	}
 
-	items := annotateOrganizeItemRisks(groups, organizeRiskOptions{
-		expectedMediaType:  "tv",
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{
 		bestVersionEnabled: true,
 	})
 	byID := map[string]Organize115ItemResult{}
 	for _, item := range items {
 		byID[item.FileID] = item
 	}
-	if !byID["e01-2160"].BestVersion || byID["e01-2160"].RiskLevel != "none" {
-		t.Fatalf("e01-2160 item=%+v, want best no-risk", byID["e01-2160"])
+	if !byID["e01-2160"].BestVersion {
+		t.Fatalf("e01-2160 item=%+v, want best version", byID["e01-2160"])
 	}
-	if !byID["e01-1080"].AltVersion || byID["e01-1080"].RiskLevel != "high" {
-		t.Fatalf("e01-1080 item=%+v, want alternate high-risk", byID["e01-1080"])
+	if !byID["e01-1080"].AltVersion {
+		t.Fatalf("e01-1080 item=%+v, want alternate version", byID["e01-1080"])
 	}
-	if !byID["e02-1080"].BestVersion || byID["e02-1080"].RiskLevel != "none" {
-		t.Fatalf("e02-1080 item=%+v, want independent best no-risk", byID["e02-1080"])
+	if !byID["e02-1080"].BestVersion {
+		t.Fatalf("e02-1080 item=%+v, want independent best version", byID["e02-1080"])
 	}
 }
