@@ -92,6 +92,7 @@ type Organize115CookieRequest struct {
 	MediaType                string                     `json:"media_type"`
 	Category                 string                     `json:"category"`
 	BestVersionEnabled       *bool                      `json:"best_version_enabled"`
+	DeleteSourceFolder       bool                       `json:"delete_source_folder"`
 	FilenameRegexEnabled     bool                       `json:"filename_regex_enabled"`
 	FilenameRegexPattern     string                     `json:"filename_regex_pattern"`
 	FilenameRegexReplacement string                     `json:"filename_regex_replacement"`
@@ -112,18 +113,21 @@ type Organize115CookieGroup struct {
 }
 
 type Organize115CookieResult struct {
-	CloudDirectoryID   uint                     `json:"cloud_directory_id"`
-	CloudStorageID     uint                     `json:"cloud_storage_id"`
-	FolderID           string                   `json:"folder_id"`
-	FolderIDs          []string                 `json:"folder_ids,omitempty"`
-	MediaType          string                   `json:"media_type,omitempty"`
-	Category           string                   `json:"category,omitempty"`
-	BestVersionEnabled bool                     `json:"best_version_enabled,omitempty"`
-	DryRun             bool                     `json:"dry_run"`
-	Total              int                      `json:"total"`
-	DirDebug           []Organize115DirDebug    `json:"dir_debug,omitempty"`
-	Items              []Organize115ItemResult  `json:"items,omitempty"`
-	Groups             []Organize115CookieGroup `json:"groups,omitempty"`
+	CloudDirectoryID         uint                     `json:"cloud_directory_id"`
+	CloudStorageID           uint                     `json:"cloud_storage_id"`
+	FolderID                 string                   `json:"folder_id"`
+	FolderIDs                []string                 `json:"folder_ids,omitempty"`
+	MediaType                string                   `json:"media_type,omitempty"`
+	Category                 string                   `json:"category,omitempty"`
+	BestVersionEnabled       bool                     `json:"best_version_enabled,omitempty"`
+	DryRun                   bool                     `json:"dry_run"`
+	Total                    int                      `json:"total"`
+	DirDebug                 []Organize115DirDebug    `json:"dir_debug,omitempty"`
+	Items                    []Organize115ItemResult  `json:"items,omitempty"`
+	Groups                   []Organize115CookieGroup `json:"groups,omitempty"`
+	SourceFolderDeleted      bool                     `json:"source_folder_deleted,omitempty"`
+	SourceFolderDeletedCount int                      `json:"source_folder_deleted_count,omitempty"`
+	SourceFolderDeleteErrors []string                 `json:"source_folder_delete_errors,omitempty"`
 }
 
 type organizeFactSummary struct {
@@ -1159,23 +1163,72 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	flatItems := annotateOrganizeItems(groups, organizeAnnotateOptions{
 		bestVersionEnabled: bestVersionEnabled,
 	})
+	sourceFolderDeletedCount := 0
+	var sourceFolderDeleteErrors []string
+	if req.DeleteSourceFolder && !req.DryRun {
+		sourceFolderDeletedCount, sourceFolderDeleteErrors = h.deleteOrganizeSourceFolders(webClient, groups)
+	}
 
 	primaryFolderID := folderIDs[0]
 
 	return Organize115CookieResult{
-		CloudDirectoryID:   req.CloudDirectoryID,
-		CloudStorageID:     dir.CloudStorageID,
-		FolderID:           primaryFolderID,
-		FolderIDs:          folderIDs,
-		MediaType:          mediaType,
-		Category:           category,
-		BestVersionEnabled: bestVersionEnabled,
-		DryRun:             req.DryRun,
-		Total:              totalFiles,
-		DirDebug:           flatDirDebug,
-		Items:              flatItems,
-		Groups:             groups,
+		CloudDirectoryID:         req.CloudDirectoryID,
+		CloudStorageID:           dir.CloudStorageID,
+		FolderID:                 primaryFolderID,
+		FolderIDs:                folderIDs,
+		MediaType:                mediaType,
+		Category:                 category,
+		BestVersionEnabled:       bestVersionEnabled,
+		DryRun:                   req.DryRun,
+		Total:                    totalFiles,
+		DirDebug:                 flatDirDebug,
+		Items:                    flatItems,
+		Groups:                   groups,
+		SourceFolderDeleted:      sourceFolderDeletedCount > 0,
+		SourceFolderDeletedCount: sourceFolderDeletedCount,
+		SourceFolderDeleteErrors: sourceFolderDeleteErrors,
 	}, nil
+}
+
+func (h *OrganizeHandler) deleteOrganizeSourceFolders(webClient *driver.Pan115Client, groups []Organize115CookieGroup) (int, []string) {
+	deletedCount := 0
+	folderIDs, errorsOut := collectOrganizeSourceFolderDeleteTargets(groups)
+
+	for _, folderID := range folderIDs {
+		if err := h.web115Svc.DeleteFilesWithClient(webClient, []string{folderID}); err != nil {
+			errorsOut = append(errorsOut, fmt.Sprintf("%s: %v", folderID, err))
+			h.logger.Warnf("删除整理源文件夹失败 folder_id=%s err=%v", folderID, err)
+			continue
+		}
+		deletedCount++
+	}
+
+	return deletedCount, errorsOut
+}
+
+func collectOrganizeSourceFolderDeleteTargets(groups []Organize115CookieGroup) ([]string, []string) {
+	folderIDs := make([]string, 0)
+	errorsOut := make([]string, 0)
+	seen := make(map[string]struct{})
+
+	for _, group := range groups {
+		folderID := strings.TrimSpace(group.FolderID)
+		if folderID == "" || folderID == "0" {
+			continue
+		}
+		if _, ok := seen[folderID]; ok {
+			continue
+		}
+		seen[folderID] = struct{}{}
+
+		if strings.TrimSpace(group.Error) != "" {
+			errorsOut = append(errorsOut, fmt.Sprintf("%s: 整理未成功，跳过删除原文件夹: %s", folderID, group.Error))
+			continue
+		}
+		folderIDs = append(folderIDs, folderID)
+	}
+
+	return folderIDs, errorsOut
 }
 
 type processOrganizeArgs struct {

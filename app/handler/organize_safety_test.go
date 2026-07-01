@@ -1,8 +1,10 @@
 package handler
 
 import (
-	"film-fusion/app/service"
+	"strings"
 	"testing"
+
+	"film-fusion/app/service"
 )
 
 func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
@@ -31,6 +33,32 @@ func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
 		if inputs[i] != want[i] {
 			t.Fatalf("inputs[%d]=%q want %q; all=%v", i, inputs[i], want[i], inputs)
 		}
+	}
+}
+
+func TestCollectOrganizeSourceFolderDeleteTargetsSkipsErroredAndDuplicates(t *testing.T) {
+	targets, errorsOut := collectOrganizeSourceFolderDeleteTargets([]Organize115CookieGroup{
+		{FolderID: "100"},
+		{FolderID: " 100 "},
+		{FolderID: "200", Error: "移动文件失败"},
+		{FolderID: "0"},
+		{FolderID: "300"},
+	})
+
+	wantTargets := []string{"100", "300"}
+	if len(targets) != len(wantTargets) {
+		t.Fatalf("len(targets)=%d want=%d targets=%v", len(targets), len(wantTargets), targets)
+	}
+	for i := range wantTargets {
+		if targets[i] != wantTargets[i] {
+			t.Fatalf("targets[%d]=%q want %q; all=%v", i, targets[i], wantTargets[i], targets)
+		}
+	}
+	if len(errorsOut) != 1 {
+		t.Fatalf("len(errorsOut)=%d want=1 errors=%v", len(errorsOut), errorsOut)
+	}
+	if !strings.Contains(errorsOut[0], "200") || !strings.Contains(errorsOut[0], "移动文件失败") {
+		t.Fatalf("unexpected error message: %q", errorsOut[0])
 	}
 }
 
