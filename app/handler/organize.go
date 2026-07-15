@@ -210,6 +210,18 @@ type OrganizePreviewTaskCreateRequest struct {
 	FilenameRegexReplacement string                         `json:"filename_regex_replacement"`
 }
 
+type OrganizePreviewTmdbRef struct {
+	TmdbID    string `json:"tmdb_id"`
+	MediaType string `json:"media_type,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Year      string `json:"year,omitempty"`
+}
+
+type OrganizePreviewTaskListItem struct {
+	model.OrganizePreviewTask
+	TmdbRefs []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
+}
+
 type MediaLookupSearchRequest struct {
 	Keyword string `json:"keyword" binding:"required"`
 	Count   int    `json:"count"`
@@ -709,6 +721,78 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 	}, "已加入预整理队列")
 }
 
+func buildOrganizePreviewTaskListItems(tasks []model.OrganizePreviewTask) []OrganizePreviewTaskListItem {
+	items := make([]OrganizePreviewTaskListItem, 0, len(tasks))
+	for _, task := range tasks {
+		items = append(items, OrganizePreviewTaskListItem{
+			OrganizePreviewTask: task,
+			TmdbRefs:            extractOrganizePreviewTmdbRefs(task),
+		})
+	}
+	return items
+}
+
+func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePreviewTmdbRef {
+	raw := strings.TrimSpace(task.ResultJSON)
+	if raw == "" {
+		return nil
+	}
+
+	var result struct {
+		MediaType string `json:"media_type"`
+		Category  string `json:"category"`
+		Items     []struct {
+			TmdbID    string `json:"tmdb_id"`
+			MediaType string `json:"media_type"`
+			Category  string `json:"category"`
+			Title     string `json:"title"`
+			Year      string `json:"year"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return nil
+	}
+
+	resultMediaType := canonicalOrganizePreviewTmdbMediaType(result.MediaType, result.Category)
+	if resultMediaType == "" {
+		resultMediaType = canonicalOrganizePreviewTmdbMediaType(task.MediaType, task.Category)
+	}
+	refs := make([]OrganizePreviewTmdbRef, 0)
+	seen := make(map[string]struct{})
+	for _, item := range result.Items {
+		tmdbID := strings.TrimSpace(item.TmdbID)
+		if tmdbID == "" {
+			continue
+		}
+		mediaType := canonicalOrganizePreviewTmdbMediaType(item.MediaType, item.Category)
+		if mediaType == "" {
+			mediaType = resultMediaType
+		}
+		key := mediaType + "\x00" + tmdbID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		refs = append(refs, OrganizePreviewTmdbRef{
+			TmdbID:    tmdbID,
+			MediaType: mediaType,
+			Title:     strings.TrimSpace(item.Title),
+			Year:      strings.TrimSpace(item.Year),
+		})
+	}
+	return refs
+}
+
+func canonicalOrganizePreviewTmdbMediaType(mediaType, category string) string {
+	if isOrganizeTVMedia(mediaType, category) {
+		return "tv"
+	}
+	if isOrganizeMovieMedia(mediaType, category) {
+		return "movie"
+	}
+	return ""
+}
+
 func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
 	userIDVal, exists := c.Get("user_id")
 	if !exists {
@@ -735,7 +819,7 @@ func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
 		return
 	}
 	h.success(c, gin.H{
-		"list":  tasks,
+		"list":  buildOrganizePreviewTaskListItems(tasks),
 		"total": len(tasks),
 	}, "获取预整理队列成功")
 }

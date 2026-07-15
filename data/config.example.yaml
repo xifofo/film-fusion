@@ -10,6 +10,17 @@ moviepilot:
   username: ""
   password: ""
 
+hdhive:
+  enabled: false
+  base_url: "https://hdhive.com"
+  client_id: ""       # HDHive OpenAPI 应用公开 ID，用于生成授权链接
+  redirect_uri: ""    # OAuth 回调地址，必须与 HDHive 应用配置一致
+  scope: "query unlock"
+  api_key: ""         # HDHive OpenAPI 应用 Secret，用于 X-API-Key
+  access_token: ""    # HDHive 用户 Access Token，用于查询/解锁资源
+  refresh_token: ""   # 预留：用户 Refresh Token
+  timeout_seconds: 30 # 请求超时时间
+
 emby:
   enabled: true
   url: "http://127.0.0.1:8096"

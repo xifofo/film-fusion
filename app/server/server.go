@@ -250,7 +250,9 @@ func (s *Server) setupRoutes() {
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
+	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(s.Logger)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
+	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 
@@ -419,6 +421,20 @@ func (s *Server) setupRoutes() {
 			logs.GET("/files", logHandler.ListFiles)
 		}
 
+		// HDHive OpenAPI 代理。凭证来自 config.yaml，避免在前端暴露应用 Secret。
+		hdhive := protected.Group("/hdhive")
+		{
+			hdhive.GET("/oauth/authorize-url", hdhiveHandler.AuthorizeURL)
+			hdhive.POST("/oauth/exchange", hdhiveHandler.ExchangeToken)
+			hdhive.POST("/oauth/refresh", hdhiveHandler.RefreshToken)
+			hdhive.GET("/ping", hdhiveHandler.Ping)
+			hdhive.GET("/quota", hdhiveHandler.Quota)
+			hdhive.GET("/usage/today", hdhiveHandler.UsageToday)
+			hdhive.GET("/me", hdhiveHandler.Me)
+			hdhive.GET("/resources/:type/:tmdb_id", hdhiveHandler.QueryResources)
+			hdhive.POST("/resources/unlock", hdhiveHandler.UnlockResources)
+		}
+
 		// Pickcode 缓存相关路由
 		pickcode := protected.Group("/pickcode-cache")
 		{
@@ -493,6 +509,12 @@ func (s *Server) setupRoutes() {
 			embyMissing.GET("/blacklist", embyMissingHandler.ListBlacklist)
 			embyMissing.POST("/blacklist", embyMissingHandler.AddBlacklist)
 			embyMissing.DELETE("/blacklist/:id", embyMissingHandler.RemoveBlacklist)
+		}
+
+		// Emby 本地媒体多版本检查（按云路径映射扫描本地目录）
+		embyVersionCheck := protected.Group("/emby-version-check")
+		{
+			embyVersionCheck.POST("/scan", embyVersionCheckHandler.Scan)
 		}
 
 		// Emby 观看记录（多用户隔离：配置统计用户 + 历史回填 + 实时采集）

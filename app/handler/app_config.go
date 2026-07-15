@@ -39,15 +39,21 @@ func (h *AppConfigHandler) error(c *gin.Context, statusCode int, errorCode int, 
 func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
 	secrets := gin.H{
-		"server.password":     h.cfg.Server.Password != "",
-		"jwt.secret":          h.cfg.JWT.Secret != "",
-		"emby.api_key":        h.cfg.Emby.APIKey != "",
-		"moviepilot.password": h.cfg.MoviePilot.Password != "",
+		"server.password":      h.cfg.Server.Password != "",
+		"jwt.secret":           h.cfg.JWT.Secret != "",
+		"emby.api_key":         h.cfg.Emby.APIKey != "",
+		"moviepilot.password":  h.cfg.MoviePilot.Password != "",
+		"hdhive.api_key":       h.cfg.HDHive.APIKey != "",
+		"hdhive.access_token":  h.cfg.HDHive.AccessToken != "",
+		"hdhive.refresh_token": h.cfg.HDHive.RefreshToken != "",
 	}
 	v.Server.Password = ""
 	v.JWT.Secret = ""
 	v.Emby.APIKey = ""
 	v.MoviePilot.Password = ""
+	v.HDHive.APIKey = ""
+	v.HDHive.AccessToken = ""
+	v.HDHive.RefreshToken = ""
 
 	h.success(c, gin.H{"config": v, "secrets": secrets}, "获取配置成功")
 }
@@ -77,6 +83,15 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	if strings.TrimSpace(in.MoviePilot.Password) == "" {
 		in.MoviePilot.Password = h.cfg.MoviePilot.Password
+	}
+	if strings.TrimSpace(in.HDHive.APIKey) == "" {
+		in.HDHive.APIKey = h.cfg.HDHive.APIKey
+	}
+	if strings.TrimSpace(in.HDHive.AccessToken) == "" {
+		in.HDHive.AccessToken = h.cfg.HDHive.AccessToken
+	}
+	if strings.TrimSpace(in.HDHive.RefreshToken) == "" {
+		in.HDHive.RefreshToken = h.cfg.HDHive.RefreshToken
 	}
 	// 基本校验
 	if strings.TrimSpace(in.Server.Port) == "" {

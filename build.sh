@@ -51,6 +51,32 @@ if [[ ! -d "$FRONTEND_DIR" ]]; then
 fi
 FRONTEND_DIR="$(cd "$FRONTEND_DIR" && pwd)"
 
+select_frontend_node() {
+  command -v node >/dev/null 2>&1 || { echo "[build] 缺少 node，请先安装 Node.js 20 或 22" >&2; exit 1; }
+
+  local node_major
+  node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+
+  if (( node_major < 20 || node_major >= 24 )); then
+    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    if [[ -s "$nvm_dir/nvm.sh" ]]; then
+      # shellcheck source=/dev/null
+      . "$nvm_dir/nvm.sh"
+      nvm use 20 >/dev/null 2>&1 || nvm use 22 >/dev/null 2>&1 || true
+    fi
+  fi
+
+  node_major="$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+  if (( node_major < 20 || node_major >= 24 )); then
+    echo "[build] 当前 Node $(node -v) 与前端构建依赖不兼容，请切换到 Node 20 或 22 后重试" >&2
+    echo "[build] 示例: export NVM_DIR=\"\$HOME/.nvm\" && . \"\$NVM_DIR/nvm.sh\" && nvm use 20" >&2
+    exit 1
+  fi
+
+  echo "==> 使用 Node: $(node -v) ($(command -v node))"
+}
+
+select_frontend_node
 command -v pnpm >/dev/null 2>&1 || { echo "[build] 缺少 pnpm，请先安装" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "[build] 缺少 docker" >&2; exit 1; }
 

@@ -13,6 +13,7 @@ type Config struct {
 	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
 	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
+	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
 }
 
 type ServerConfig struct {
@@ -67,6 +68,18 @@ type MoviePilotConfig struct {
 	API      string `mapstructure:"api" json:"api"`           // MoviePilot API 地址
 	Username string `mapstructure:"username" json:"username"` // MoviePilot 用户名
 	Password string `mapstructure:"password" json:"password"` // MoviePilot 密码
+}
+
+type HDHiveConfig struct {
+	Enabled        bool   `mapstructure:"enabled" json:"enabled"`                 // 是否启用 HDHive OpenAPI
+	BaseURL        string `mapstructure:"base_url" json:"base_url"`               // HDHive 服务地址
+	ClientID       string `mapstructure:"client_id" json:"client_id"`             // OpenAPI 应用公开 ID
+	RedirectURI    string `mapstructure:"redirect_uri" json:"redirect_uri"`       // OAuth 回调地址
+	Scope          string `mapstructure:"scope" json:"scope"`                     // OAuth 授权 scope
+	APIKey         string `mapstructure:"api_key" json:"api_key"`                 // 应用 Secret，用于 X-API-Key
+	AccessToken    string `mapstructure:"access_token" json:"access_token"`       // 用户 Access Token
+	RefreshToken   string `mapstructure:"refresh_token" json:"refresh_token"`     // 用户 Refresh Token（预留）
+	TimeoutSeconds int    `mapstructure:"timeout_seconds" json:"timeout_seconds"` // 请求超时时间（秒）
 }
 
 func Load() *Config {
@@ -137,6 +150,16 @@ func Save(c *Config) error {
 	viper.Set("moviepilot.username", c.MoviePilot.Username)
 	viper.Set("moviepilot.password", c.MoviePilot.Password)
 
+	viper.Set("hdhive.enabled", c.HDHive.Enabled)
+	viper.Set("hdhive.base_url", c.HDHive.BaseURL)
+	viper.Set("hdhive.client_id", c.HDHive.ClientID)
+	viper.Set("hdhive.redirect_uri", c.HDHive.RedirectURI)
+	viper.Set("hdhive.scope", c.HDHive.Scope)
+	viper.Set("hdhive.api_key", c.HDHive.APIKey)
+	viper.Set("hdhive.access_token", c.HDHive.AccessToken)
+	viper.Set("hdhive.refresh_token", c.HDHive.RefreshToken)
+	viper.Set("hdhive.timeout_seconds", c.HDHive.TimeoutSeconds)
+
 	if err := viper.WriteConfig(); err != nil {
 		// 配置文件不存在时回退到显式路径写入
 		path := viper.ConfigFileUsed()
@@ -157,6 +180,17 @@ func setDefaults() {
 	viper.SetDefault("moviepilot.api", "http://127.0.0.1:3001")
 	viper.SetDefault("moviepilot.username", "")
 	viper.SetDefault("moviepilot.password", "")
+
+	// HDHive 默认配置
+	viper.SetDefault("hdhive.enabled", false)
+	viper.SetDefault("hdhive.base_url", "https://hdhive.com")
+	viper.SetDefault("hdhive.client_id", "")
+	viper.SetDefault("hdhive.redirect_uri", "")
+	viper.SetDefault("hdhive.scope", "query unlock")
+	viper.SetDefault("hdhive.api_key", "")
+	viper.SetDefault("hdhive.access_token", "")
+	viper.SetDefault("hdhive.refresh_token", "")
+	viper.SetDefault("hdhive.timeout_seconds", 30)
 
 	// 日志默认配置
 	viper.SetDefault("log.level", "info")
