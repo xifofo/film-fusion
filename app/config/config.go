@@ -13,6 +13,7 @@ type Config struct {
 	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
 	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
+	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
 }
 
@@ -68,6 +69,15 @@ type MoviePilotConfig struct {
 	API      string `mapstructure:"api" json:"api"`           // MoviePilot API 地址
 	Username string `mapstructure:"username" json:"username"` // MoviePilot 用户名
 	Password string `mapstructure:"password" json:"password"` // MoviePilot 密码
+}
+
+type TMDBConfig struct {
+	Enabled        bool   `mapstructure:"enabled" json:"enabled"`                 // 是否启用 TMDB API
+	BaseURL        string `mapstructure:"base_url" json:"base_url"`               // TMDB API 地址
+	APIKey         string `mapstructure:"api_key" json:"api_key"`                 // TMDB v3 API Key
+	AccessToken    string `mapstructure:"access_token" json:"access_token"`       // TMDB Read Access Token
+	TimeoutSeconds int    `mapstructure:"timeout_seconds" json:"timeout_seconds"` // 请求超时时间（秒）
+	CacheMinutes   int    `mapstructure:"cache_minutes" json:"cache_minutes"`     // 元数据缓存时间（分钟）
 }
 
 type HDHiveConfig struct {
@@ -150,6 +160,13 @@ func Save(c *Config) error {
 	viper.Set("moviepilot.username", c.MoviePilot.Username)
 	viper.Set("moviepilot.password", c.MoviePilot.Password)
 
+	viper.Set("tmdb.enabled", c.TMDB.Enabled)
+	viper.Set("tmdb.base_url", c.TMDB.BaseURL)
+	viper.Set("tmdb.api_key", c.TMDB.APIKey)
+	viper.Set("tmdb.access_token", c.TMDB.AccessToken)
+	viper.Set("tmdb.timeout_seconds", c.TMDB.TimeoutSeconds)
+	viper.Set("tmdb.cache_minutes", c.TMDB.CacheMinutes)
+
 	viper.Set("hdhive.enabled", c.HDHive.Enabled)
 	viper.Set("hdhive.base_url", c.HDHive.BaseURL)
 	viper.Set("hdhive.client_id", c.HDHive.ClientID)
@@ -180,6 +197,14 @@ func setDefaults() {
 	viper.SetDefault("moviepilot.api", "http://127.0.0.1:3001")
 	viper.SetDefault("moviepilot.username", "")
 	viper.SetDefault("moviepilot.password", "")
+
+	// TMDB 默认配置
+	viper.SetDefault("tmdb.enabled", false)
+	viper.SetDefault("tmdb.base_url", "https://api.themoviedb.org")
+	viper.SetDefault("tmdb.api_key", "")
+	viper.SetDefault("tmdb.access_token", "")
+	viper.SetDefault("tmdb.timeout_seconds", 10)
+	viper.SetDefault("tmdb.cache_minutes", 60)
 
 	// HDHive 默认配置
 	viper.SetDefault("hdhive.enabled", false)

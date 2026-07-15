@@ -43,6 +43,8 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 		"jwt.secret":           h.cfg.JWT.Secret != "",
 		"emby.api_key":         h.cfg.Emby.APIKey != "",
 		"moviepilot.password":  h.cfg.MoviePilot.Password != "",
+		"tmdb.api_key":         h.cfg.TMDB.APIKey != "",
+		"tmdb.access_token":    h.cfg.TMDB.AccessToken != "",
 		"hdhive.api_key":       h.cfg.HDHive.APIKey != "",
 		"hdhive.access_token":  h.cfg.HDHive.AccessToken != "",
 		"hdhive.refresh_token": h.cfg.HDHive.RefreshToken != "",
@@ -51,6 +53,8 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v.JWT.Secret = ""
 	v.Emby.APIKey = ""
 	v.MoviePilot.Password = ""
+	v.TMDB.APIKey = ""
+	v.TMDB.AccessToken = ""
 	v.HDHive.APIKey = ""
 	v.HDHive.AccessToken = ""
 	v.HDHive.RefreshToken = ""
@@ -83,6 +87,12 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	if strings.TrimSpace(in.MoviePilot.Password) == "" {
 		in.MoviePilot.Password = h.cfg.MoviePilot.Password
+	}
+	if strings.TrimSpace(in.TMDB.APIKey) == "" {
+		in.TMDB.APIKey = h.cfg.TMDB.APIKey
+	}
+	if strings.TrimSpace(in.TMDB.AccessToken) == "" {
+		in.TMDB.AccessToken = h.cfg.TMDB.AccessToken
 	}
 	if strings.TrimSpace(in.HDHive.APIKey) == "" {
 		in.HDHive.APIKey = h.cfg.HDHive.APIKey

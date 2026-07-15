@@ -25,6 +25,7 @@ type Server struct {
 	web115KeepAliveService *service.Web115KeepAliveService
 	download115Service     *service.Download115Service
 	moviePilotService      *service.MoviePilotService
+	tmdbService            *service.TMDBService
 	embyCoverService       *service.EmbyCoverService
 	embySortNameService    *service.EmbySortNameService
 	embyStatsService       *service.EmbyStatsService
@@ -44,6 +45,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	// 创建115Open下载服务
 	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
 	moviePilotService := service.NewMoviePilotService(cfg, log)
+	tmdbService := service.NewTMDBService(cfg, log)
 
 	embyClient := embyhelper.New(cfg)
 
@@ -83,6 +85,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		web115KeepAliveService: service.NewWeb115KeepAliveService(log),
 		download115Service:     download115Service,
 		moviePilotService:      moviePilotService,
+		tmdbService:            tmdbService,
 		embyCoverService:       embyCoverService,
 		embySortNameService:    embySortNameService,
 		embyStatsService:       embyStatsService,
@@ -240,7 +243,7 @@ func (s *Server) setupRoutes() {
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
-	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.download115Service, s.embyClient)
+	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.tmdbService, s.download115Service, s.embyClient)
 	organizePreviewQueue := service.NewOrganizePreviewQueue(s.Logger, organizeHandler.ProcessPreviewTask)
 	organizeHandler.SetPreviewQueue(organizePreviewQueue)
 	s.organizePreviewQueue = organizePreviewQueue

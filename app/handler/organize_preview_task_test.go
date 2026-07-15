@@ -11,8 +11,8 @@ import (
 func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T) {
 	result := Organize115CookieResult{
 		Items: []Organize115ItemResult{
-			{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024", TargetSeason: 1, TargetEpisode: 1},
-			{TmdbID: "100", MediaType: "series", Title: "Show", Year: "2024", TargetSeason: 1, TargetEpisode: 2},
+			{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024"},
+			{TmdbID: "100", MediaType: "series", Title: "Show", Year: "2024"},
 			{TmdbID: "100", MediaType: "movie", Title: "Movie", Year: "2020"},
 			{TmdbID: " 200 ", Category: "movie", Title: "Second Movie", Year: "2021"},
 			{MediaType: "movie", Title: "Missing ID"},
@@ -25,7 +25,7 @@ func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T
 
 	refs := extractOrganizePreviewTmdbRefs(model.OrganizePreviewTask{ResultJSON: string(raw)})
 	want := []OrganizePreviewTmdbRef{
-		{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024", EpisodeCount: 2},
+		{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024"},
 		{TmdbID: "100", MediaType: "movie", Title: "Movie", Year: "2020"},
 		{TmdbID: "200", MediaType: "movie", Title: "Second Movie", Year: "2021"},
 	}
@@ -36,25 +36,6 @@ func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T
 		if refs[i] != want[i] {
 			t.Fatalf("refs[%d]=%+v want=%+v", i, refs[i], want[i])
 		}
-	}
-}
-
-func TestExtractOrganizePreviewTmdbRefsCountsDistinctEpisodes(t *testing.T) {
-	result := Organize115CookieResult{
-		Items: []Organize115ItemResult{
-			{TmdbID: "500", MediaType: "tv", SourceSeason: 1, SourceEpisode: 1},
-			{TmdbID: "500", MediaType: "tv", TargetSeason: 1, TargetEpisode: 1},
-			{TmdbID: "500", MediaType: "tv", TargetSeason: 1, TargetEpisode: 2},
-		},
-	}
-	raw, err := json.Marshal(result)
-	if err != nil {
-		t.Fatalf("marshal result: %v", err)
-	}
-
-	refs := extractOrganizePreviewTmdbRefs(model.OrganizePreviewTask{ResultJSON: string(raw)})
-	if len(refs) != 1 || refs[0].EpisodeCount != 2 {
-		t.Fatalf("unexpected episode count refs=%+v", refs)
 	}
 }
 

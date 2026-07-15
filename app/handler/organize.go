@@ -38,6 +38,7 @@ type OrganizeHandler struct {
 	logger         *logger.Logger
 	sdk115Open     *sdk115.Client
 	moviePilotSvc  *service.MoviePilotService
+	tmdbSvc        *service.TMDBService
 	web115Svc      *service.Web115Service
 	download115Svc *service.Download115Service
 	dirCache       *service.Web115DirCache
@@ -45,11 +46,12 @@ type OrganizeHandler struct {
 	previewQueue   *service.OrganizePreviewQueue
 }
 
-func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, download115Svc *service.Download115Service, embyClient *embyhelper.EmbyClient) *OrganizeHandler {
+func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, tmdbSvc *service.TMDBService, download115Svc *service.Download115Service, embyClient *embyhelper.EmbyClient) *OrganizeHandler {
 	return &OrganizeHandler{
 		logger:         log,
 		sdk115Open:     sdk115.New(),
 		moviePilotSvc:  moviePilotSvc,
+		tmdbSvc:        tmdbSvc,
 		web115Svc:      service.NewWeb115Service(log),
 		download115Svc: download115Svc,
 		dirCache:       service.NewWeb115DirCache(web115DirCacheTTL),
@@ -733,6 +735,30 @@ func buildOrganizePreviewTaskListItems(tasks []model.OrganizePreviewTask) []Orga
 	return items
 }
 
+func (h *OrganizeHandler) buildOrganizePreviewTaskListItems(ctx context.Context, tasks []model.OrganizePreviewTask) []OrganizePreviewTaskListItem {
+	items := buildOrganizePreviewTaskListItems(tasks)
+	if h == nil || h.tmdbSvc == nil {
+		return items
+	}
+	for itemIndex := range items {
+		for refIndex := range items[itemIndex].TmdbRefs {
+			ref := &items[itemIndex].TmdbRefs[refIndex]
+			if ref.MediaType != "tv" || strings.TrimSpace(ref.TmdbID) == "" {
+				continue
+			}
+			count, err := h.tmdbSvc.GetTVEpisodeCount(ctx, ref.TmdbID)
+			if err != nil {
+				if h.logger != nil {
+					h.logger.Debugf("[organize] 获取 TMDB 总集数失败 tmdb_id=%s: %v", ref.TmdbID, err)
+				}
+				continue
+			}
+			ref.EpisodeCount = count
+		}
+	}
+	return items
+}
+
 func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePreviewTmdbRef {
 	raw := strings.TrimSpace(task.ResultJSON)
 	if raw == "" {
@@ -740,15 +766,11 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 	}
 
 	type previewItem struct {
-		TmdbID        string `json:"tmdb_id"`
-		MediaType     string `json:"media_type"`
-		Category      string `json:"category"`
-		Title         string `json:"title"`
-		Year          string `json:"year"`
-		SourceSeason  int    `json:"source_season"`
-		SourceEpisode int    `json:"source_episode"`
-		TargetSeason  int    `json:"target_season"`
-		TargetEpisode int    `json:"target_episode"`
+		TmdbID    string `json:"tmdb_id"`
+		MediaType string `json:"media_type"`
+		Category  string `json:"category"`
+		Title     string `json:"title"`
+		Year      string `json:"year"`
 	}
 	var result struct {
 		MediaType string        `json:"media_type"`
@@ -765,8 +787,6 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 	}
 	refs := make([]OrganizePreviewTmdbRef, 0)
 	seen := make(map[string]struct{})
-	episodeSets := make(map[string]map[string]struct{})
-	itemCounts := make(map[string]int)
 	for _, item := range result.Items {
 		tmdbID := strings.TrimSpace(item.TmdbID)
 		if tmdbID == "" {
@@ -777,21 +797,6 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 			mediaType = resultMediaType
 		}
 		key := mediaType + "\x00" + tmdbID
-		itemCounts[key]++
-		if mediaType == "tv" {
-			episodeKey := organizePreviewEpisodeKey(
-				item.SourceSeason,
-				item.SourceEpisode,
-				item.TargetSeason,
-				item.TargetEpisode,
-			)
-			if episodeKey != "" {
-				if episodeSets[key] == nil {
-					episodeSets[key] = make(map[string]struct{})
-				}
-				episodeSets[key][episodeKey] = struct{}{}
-			}
-		}
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -803,31 +808,7 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 			Year:      strings.TrimSpace(item.Year),
 		})
 	}
-	for i := range refs {
-		if refs[i].MediaType != "tv" {
-			continue
-		}
-		key := refs[i].MediaType + "\x00" + refs[i].TmdbID
-		if episodes := len(episodeSets[key]); episodes > 0 {
-			refs[i].EpisodeCount = episodes
-		} else {
-			refs[i].EpisodeCount = itemCounts[key]
-		}
-	}
 	return refs
-}
-
-func organizePreviewEpisodeKey(sourceSeason, sourceEpisode, targetSeason, targetEpisode int) string {
-	season := targetSeason
-	episode := targetEpisode
-	if season <= 0 || episode <= 0 {
-		season = sourceSeason
-		episode = sourceEpisode
-	}
-	if season <= 0 || episode <= 0 {
-		return ""
-	}
-	return fmt.Sprintf("%d:%d", season, episode)
 }
 
 func canonicalOrganizePreviewTmdbMediaType(mediaType, category string) string {
@@ -866,7 +847,7 @@ func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
 		return
 	}
 	h.success(c, gin.H{
-		"list":  buildOrganizePreviewTaskListItems(tasks),
+		"list":  h.buildOrganizePreviewTaskListItems(c.Request.Context(), tasks),
 		"total": len(tasks),
 	}, "获取预整理队列成功")
 }
