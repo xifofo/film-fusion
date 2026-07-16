@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"film-fusion/app/model"
 )
@@ -46,6 +47,40 @@ func TestScanEmbyVersionCloudPathsDetectsMovieAndEpisodeVersions(t *testing.T) {
 	if !foundEpisode {
 		t.Fatalf("episode duplicate not found: %+v", result.Items)
 	}
+}
+
+func TestEmbyVersionCheckJobRunsInBackgroundAndKeepsResult(t *testing.T) {
+	root := t.TempDir()
+	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.2160p.strm")
+	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.1080p.strm")
+
+	handler := NewEmbyVersionCheckHandler(nil)
+	job, started := handler.startJob(42, EmbyVersionCheckRequest{
+		CloudPathIDs: []uint{7},
+		MediaType:    "movie",
+	}, "movie", []model.CloudPath{{ID: 7, SourcePath: "/movies", LocalPath: root}})
+	if !started || job == nil || !job.Running {
+		t.Fatalf("background job did not start: started=%v job=%+v", started, job)
+	}
+	if otherUserJob := handler.jobSnapshot(43); otherUserJob != nil {
+		t.Fatalf("job leaked to another user: %+v", otherUserJob)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot := handler.jobSnapshot(42)
+		if snapshot != nil && !snapshot.Running {
+			if snapshot.Status != "completed" || snapshot.Result == nil {
+				t.Fatalf("unexpected completed job: %+v", snapshot)
+			}
+			if snapshot.Result.DuplicateMovieCount != 1 {
+				t.Fatalf("DuplicateMovieCount=%d want 1", snapshot.Result.DuplicateMovieCount)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background job did not finish before timeout")
 }
 
 func TestScanEmbyVersionCloudPathsParsesChineseSeasonEpisode(t *testing.T) {

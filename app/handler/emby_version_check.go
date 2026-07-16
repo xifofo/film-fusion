@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,10 +23,15 @@ import (
 // EmbyVersionCheckHandler 扫描云路径映射对应的本地目录，找出电影/单集的多版本内容。
 type EmbyVersionCheckHandler struct {
 	logger *logger.Logger
+	mu     sync.RWMutex
+	jobs   map[uint]*EmbyVersionCheckJob
 }
 
 func NewEmbyVersionCheckHandler(log *logger.Logger) *EmbyVersionCheckHandler {
-	return &EmbyVersionCheckHandler{logger: log}
+	return &EmbyVersionCheckHandler{
+		logger: log,
+		jobs:   make(map[uint]*EmbyVersionCheckJob),
+	}
 }
 
 func (h *EmbyVersionCheckHandler) success(c *gin.Context, data any, message string) {
@@ -46,6 +52,32 @@ func (h *EmbyVersionCheckHandler) error(c *gin.Context, statusCode int, errorCod
 type EmbyVersionCheckRequest struct {
 	CloudPathIDs []uint `json:"cloud_path_ids"`
 	MediaType    string `json:"media_type"` // all / movie / tv
+}
+
+type EmbyVersionCheckProgress struct {
+	Phase          string `json:"phase"`
+	PathsTotal     int    `json:"paths_total"`
+	PathsCompleted int    `json:"paths_completed"`
+	CurrentPath    string `json:"current_path,omitempty"`
+	FilesScanned   int    `json:"files_scanned"`
+}
+
+type EmbyVersionCheckJob struct {
+	ID           string                   `json:"id"`
+	Running      bool                     `json:"running"`
+	Status       string                   `json:"status"`
+	MediaType    string                   `json:"media_type"`
+	CloudPathIDs []uint                   `json:"cloud_path_ids"`
+	StartedAt    time.Time                `json:"started_at"`
+	FinishedAt   *time.Time               `json:"finished_at,omitempty"`
+	Progress     EmbyVersionCheckProgress `json:"progress"`
+	Result       *EmbyVersionCheckResult  `json:"result,omitempty"`
+	Error        string                   `json:"error,omitempty"`
+}
+
+type EmbyVersionCheckStatus struct {
+	Running bool                 `json:"running"`
+	Job     *EmbyVersionCheckJob `json:"job"`
 }
 
 type EmbyVersionCheckResult struct {
@@ -167,7 +199,7 @@ var embyVersionSkipDirs = map[string]struct{}{
 	"特典":                {},
 }
 
-// Scan POST /api/emby-version-check/scan
+// Scan POST /api/emby-version-check/scan，启动后台检查并立即返回任务快照。
 func (h *EmbyVersionCheckHandler) Scan(c *gin.Context) {
 	userIDVal, exists := c.Get("user_id")
 	if !exists {
@@ -203,12 +235,113 @@ func (h *EmbyVersionCheckHandler) Scan(c *gin.Context) {
 		return
 	}
 
-	result := scanEmbyVersionCloudPaths(paths, mediaType)
-	result.SelectedCloudPathIDs = req.CloudPathIDs
-	h.success(c, result, "检查完成")
+	job, ok := h.startJob(userID, req, mediaType, paths)
+	if !ok {
+		h.error(c, http.StatusConflict, 409, "已有本地多版本检查正在后台运行")
+		return
+	}
+	h.success(c, job, "检查已在后台开始")
+}
+
+// Status GET /api/emby-version-check/status，返回当前用户正在运行或最近完成的任务。
+func (h *EmbyVersionCheckHandler) Status(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	job := h.jobSnapshot(userIDVal.(uint))
+	h.success(c, EmbyVersionCheckStatus{Running: job != nil && job.Running, Job: job}, "获取检查状态成功")
+}
+
+func (h *EmbyVersionCheckHandler) startJob(userID uint, req EmbyVersionCheckRequest, mediaType string, paths []model.CloudPath) (*EmbyVersionCheckJob, bool) {
+	h.mu.Lock()
+	if current := h.jobs[userID]; current != nil && current.Running {
+		h.mu.Unlock()
+		return cloneEmbyVersionCheckJob(current), false
+	}
+	selectedIDs := append([]uint(nil), req.CloudPathIDs...)
+	job := &EmbyVersionCheckJob{
+		ID:           fmt.Sprintf("%d-%d", userID, time.Now().UnixNano()),
+		Running:      true,
+		Status:       "running",
+		MediaType:    mediaType,
+		CloudPathIDs: selectedIDs,
+		StartedAt:    time.Now(),
+		Progress: EmbyVersionCheckProgress{
+			Phase:      "preparing",
+			PathsTotal: len(paths),
+		},
+	}
+	h.jobs[userID] = job
+	snapshot := cloneEmbyVersionCheckJob(job)
+	h.mu.Unlock()
+
+	go h.runJob(userID, job.ID, paths, mediaType, selectedIDs)
+	return snapshot, true
+}
+
+func (h *EmbyVersionCheckHandler) runJob(userID uint, jobID string, paths []model.CloudPath, mediaType string, selectedIDs []uint) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			h.finishJob(userID, jobID, nil, fmt.Sprintf("后台检查异常: %v", recovered))
+		}
+	}()
+	result := scanEmbyVersionCloudPathsWithProgress(paths, mediaType, func(progress EmbyVersionCheckProgress) {
+		h.updateJobProgress(userID, jobID, progress)
+	})
+	result.SelectedCloudPathIDs = selectedIDs
+	h.finishJob(userID, jobID, &result, "")
+}
+
+func (h *EmbyVersionCheckHandler) updateJobProgress(userID uint, jobID string, progress EmbyVersionCheckProgress) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if job := h.jobs[userID]; job != nil && job.ID == jobID && job.Running {
+		job.Progress = progress
+	}
+}
+
+func (h *EmbyVersionCheckHandler) finishJob(userID uint, jobID string, result *EmbyVersionCheckResult, errorMessage string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	job := h.jobs[userID]
+	if job == nil || job.ID != jobID {
+		return
+	}
+	now := time.Now()
+	job.Running = false
+	job.FinishedAt = &now
+	job.Result = result
+	job.Error = errorMessage
+	job.Status = "completed"
+	job.Progress.Phase = "done"
+	if errorMessage != "" {
+		job.Status = "failed"
+		job.Progress.Phase = "failed"
+	}
+}
+
+func (h *EmbyVersionCheckHandler) jobSnapshot(userID uint) *EmbyVersionCheckJob {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return cloneEmbyVersionCheckJob(h.jobs[userID])
+}
+
+func cloneEmbyVersionCheckJob(job *EmbyVersionCheckJob) *EmbyVersionCheckJob {
+	if job == nil {
+		return nil
+	}
+	copyJob := *job
+	copyJob.CloudPathIDs = append([]uint(nil), job.CloudPathIDs...)
+	return &copyJob
 }
 
 func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVersionCheckResult {
+	return scanEmbyVersionCloudPathsWithProgress(paths, mediaType, nil)
+}
+
+func scanEmbyVersionCloudPathsWithProgress(paths []model.CloudPath, mediaType string, report func(EmbyVersionCheckProgress)) EmbyVersionCheckResult {
 	result := EmbyVersionCheckResult{
 		ScannedAt:    time.Now(),
 		ScannedPaths: make([]EmbyVersionScannedPath, 0, len(paths)),
@@ -221,6 +354,10 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 	movieGroups := make(map[string]*embyVersionGroup)
 	episodeGroups := make(map[string]*embyVersionGroup)
 	seenFiles := make(map[string]struct{})
+	progress := EmbyVersionCheckProgress{Phase: "scanning", PathsTotal: len(paths)}
+	if report != nil {
+		report(progress)
+	}
 
 	for i := range paths {
 		p := paths[i]
@@ -234,6 +371,10 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 		if p.CloudStorage != nil {
 			scanned.StorageName = p.CloudStorage.StorageName
 		}
+		progress.CurrentPath = localRoot
+		if report != nil {
+			report(progress)
+		}
 		result.AvailableCloudPathIDs = append(result.AvailableCloudPathIDs, p.ID)
 
 		if localRoot == "" {
@@ -241,6 +382,10 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 			result.Errors = append(result.Errors, fmt.Sprintf("云路径映射 #%d 本地路径为空", p.ID))
 			result.SkippedCloudPathIDs = append(result.SkippedCloudPathIDs, p.ID)
 			result.ScannedPaths = append(result.ScannedPaths, scanned)
+			progress.PathsCompleted = i + 1
+			if report != nil {
+				report(progress)
+			}
 			continue
 		}
 		if info, err := os.Stat(localRoot); err != nil || !info.IsDir() {
@@ -248,6 +393,10 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 			result.Errors = append(result.Errors, fmt.Sprintf("云路径映射 #%d 本地路径不可访问: %s", p.ID, localRoot))
 			result.SkippedCloudPathIDs = append(result.SkippedCloudPathIDs, p.ID)
 			result.ScannedPaths = append(result.ScannedPaths, scanned)
+			progress.PathsCompleted = i + 1
+			if report != nil {
+				report(progress)
+			}
 			continue
 		}
 
@@ -291,6 +440,10 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 			file := buildEmbyVersionFile(p, scanned.StorageName, localRoot, absPath, relPath, info)
 			result.TotalFiles++
 			scanned.FileCount++
+			progress.FilesScanned = result.TotalFiles
+			if report != nil && result.TotalFiles%100 == 0 {
+				report(progress)
+			}
 
 			if mediaType != "movie" {
 				if episode, ok := parseEmbyVersionEpisode(relPath); ok {
@@ -314,8 +467,18 @@ func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVe
 			result.Errors = append(result.Errors, fmt.Sprintf("扫描云路径映射 #%d 失败: %v", p.ID, walkErr))
 		}
 		result.ScannedPaths = append(result.ScannedPaths, scanned)
+		progress.PathsCompleted = i + 1
+		progress.FilesScanned = result.TotalFiles
+		if report != nil {
+			report(progress)
+		}
 	}
 
+	if report != nil {
+		progress.Phase = "finalizing"
+		progress.CurrentPath = ""
+		report(progress)
+	}
 	result.MovieGroupCount = len(movieGroups)
 	result.EpisodeGroupCount = len(episodeGroups)
 	result.Items = append(result.Items, collectEmbyVersionDuplicates(movieGroups, "movie", &result.DuplicateMovieCount)...)

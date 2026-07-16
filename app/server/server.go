@@ -518,6 +518,7 @@ func (s *Server) setupRoutes() {
 		embyVersionCheck := protected.Group("/emby-version-check")
 		{
 			embyVersionCheck.POST("/scan", embyVersionCheckHandler.Scan)
+			embyVersionCheck.GET("/status", embyVersionCheckHandler.Status)
 		}
 
 		// Emby 观看记录（多用户隔离：配置统计用户 + 历史回填 + 实时采集）
