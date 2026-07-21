@@ -96,23 +96,31 @@ func (h *PickcodeCacheHandler) GetPickcodeCache(c *gin.Context) {
 	h.success(c, cache, "获取缓存记录成功")
 }
 
-// CreatePickcodeCache 创建 pickcode 缓存
+// CreatePickcodeCache 创建或覆盖 pickcode 缓存。
 func (h *PickcodeCacheHandler) CreatePickcodeCache(c *gin.Context) {
-	var req model.PickcodeCache
+	var req struct {
+		FilePath string `json:"file_path" binding:"required"`
+		Pickcode string `json:"pickcode" binding:"required"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, "请求参数错误: "+err.Error())
 		return
 	}
 
-	if err := database.DB.Create(&req).Error; err != nil {
+	cache, created, err := model.UpsertPickcodeCache(database.DB, req.FilePath, req.Pickcode)
+	if err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "创建缓存记录失败: "+err.Error())
 		return
 	}
 
-	h.success(c, req, "创建缓存记录成功")
+	message := "创建缓存记录成功"
+	if !created {
+		message = "缓存记录已覆盖更新"
+	}
+	h.success(c, cache, message)
 }
 
-// CreatePickcodeCacheIfNotExists 创建 pickcode 缓存（如果不存在）
+// CreatePickcodeCacheIfNotExists 创建或覆盖 pickcode 缓存。
 func (h *PickcodeCacheHandler) CreatePickcodeCacheIfNotExists(c *gin.Context) {
 	var req struct {
 		FilePath string `json:"file_path" binding:"required"`
@@ -124,8 +132,7 @@ func (h *PickcodeCacheHandler) CreatePickcodeCacheIfNotExists(c *gin.Context) {
 		return
 	}
 
-	// 使用静态方法创建缓存，如果存在则跳过
-	cache, created, err := model.CreateIfNotExistsStatic(database.DB, req.FilePath, req.Pickcode)
+	cache, created, err := model.UpsertPickcodeCache(database.DB, req.FilePath, req.Pickcode)
 	if err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "创建缓存记录失败: "+err.Error())
 		return
@@ -140,7 +147,7 @@ func (h *PickcodeCacheHandler) CreatePickcodeCacheIfNotExists(c *gin.Context) {
 		h.success(c, gin.H{
 			"cache":   cache,
 			"created": false,
-		}, "缓存记录已存在，跳过创建")
+		}, "缓存记录已覆盖更新")
 	}
 }
 

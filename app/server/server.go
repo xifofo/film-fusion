@@ -22,6 +22,7 @@ type Server struct {
 	gin                    *gin.Engine
 	http                   *http.Server
 	tokenRefreshService    *service.TokenRefreshService
+	hdhiveRefreshService   *service.HDHiveTokenRefreshService
 	web115KeepAliveService *service.Web115KeepAliveService
 	download115Service     *service.Download115Service
 	moviePilotService      *service.MoviePilotService
@@ -35,6 +36,7 @@ type Server struct {
 	organizeLogCleaner     *service.OrganizeLogCleaner
 	organizePreviewQueue   *service.OrganizePreviewQueue
 	embyProxyServer        *EmbyProxyServer
+	embyLoginProtection    *service.EmbyLoginProtection
 	taskQueue              *service.PersistentTaskQueue
 }
 
@@ -82,6 +84,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Config:                 cfg,
 		Logger:                 log,
 		tokenRefreshService:    service.NewTokenRefreshService(log),
+		hdhiveRefreshService:   service.NewHDHiveTokenRefreshService(cfg, log),
 		web115KeepAliveService: service.NewWeb115KeepAliveService(log),
 		download115Service:     download115Service,
 		moviePilotService:      moviePilotService,
@@ -102,7 +105,9 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	// 开启一个 Emby 代理服务
 	if cfg.Emby.Enabled {
 		s.Logger.Info("Emby服务已启用，正在创建代理服务器...")
-		embyProxyServer := NewEmbyProxyServer(cfg, log)
+		embyLoginProtection := service.NewEmbyLoginProtection(cfg, log)
+		s.embyLoginProtection = embyLoginProtection
+		embyProxyServer := NewEmbyProxyServer(cfg, log, embyLoginProtection)
 		if embyProxyServer != nil {
 			s.embyProxyServer = embyProxyServer
 		} else {
@@ -119,6 +124,9 @@ func (s *Server) Start() error {
 
 	// 启动令牌刷新服务
 	s.tokenRefreshService.Start()
+
+	// 启动 HDHive Token 自动刷新服务
+	s.hdhiveRefreshService.Start()
 
 	// 启动 115 cookie 保活服务
 	s.web115KeepAliveService.Start()
@@ -162,6 +170,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
+
+	// 停止 HDHive Token 自动刷新服务
+	s.hdhiveRefreshService.Stop()
 
 	// 停止 115 cookie 保活服务
 	s.web115KeepAliveService.Stop()
@@ -250,13 +261,13 @@ func (s *Server) setupRoutes() {
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
-	embyProxyLogHandler := handler.NewEmbyProxyLogHandler()
+	embyProxyLogHandler := handler.NewEmbyProxyLogHandler(s.embyLoginProtection)
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(s.Logger)
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
-	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger)
+	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger, s.hdhiveRefreshService)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 
@@ -488,6 +499,8 @@ func (s *Server) setupRoutes() {
 			embyProxyLog.GET("/302-logs", embyProxyLogHandler.List)
 			embyProxyLog.DELETE("/302-logs", embyProxyLogHandler.Clear)
 			embyProxyLog.GET("/balance-status", embyProxyLogHandler.BalanceStatus)
+			embyProxyLog.GET("/security-status", embyProxyLogHandler.SecurityStatus)
+			embyProxyLog.POST("/security-unblock", embyProxyLogHandler.SecurityUnblock)
 		}
 
 		// Emby 账号 -> 115 存储 绑定（指定账号强制走指定 cookie）

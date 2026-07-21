@@ -60,17 +60,20 @@ type SimpleEmbyItemResponseList struct {
 
 // EmbyProxyHandler Emby代理处理器
 type EmbyProxyHandler struct {
-	config     *config.Config
-	logger     *logger.Logger
-	proxy      *httputil.ReverseProxy
-	goCache    *cache.Cache
-	sdk115Open *sdk115.Client
-	balanceSvc *service.BalanceAssignmentService
-	web115Svc  *service.Web115Service
+	config          *config.Config
+	logger          *logger.Logger
+	proxy           *httputil.ReverseProxy
+	goCache         *cache.Cache
+	sdk115Open      *sdk115.Client
+	balanceSvc      *service.BalanceAssignmentService
+	web115Svc       *service.Web115Service
+	loginProtection *service.EmbyLoginProtection
 }
 
+type embyLoginAttemptContextKey struct{}
+
 // NewEmbyProxyHandler 创建新的Emby代理处理器
-func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger) *EmbyProxyHandler {
+func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger, loginProtection *service.EmbyLoginProtection) *EmbyProxyHandler {
 	// 解析Emby服务器URL
 	embyURL, err := url.Parse(cfg.Emby.URL)
 	if err != nil {
@@ -104,13 +107,14 @@ func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger) *EmbyProxyHandl
 	goCache := cache.New(cacheExpiration, 10*time.Minute)
 
 	h := &EmbyProxyHandler{
-		config:     cfg,
-		logger:     log,
-		proxy:      proxy,
-		goCache:    goCache,
-		sdk115Open: sdk115.New(),
-		balanceSvc: balanceSvc,
-		web115Svc:  service.NewWeb115Service(log),
+		config:          cfg,
+		logger:          log,
+		proxy:           proxy,
+		goCache:         goCache,
+		sdk115Open:      sdk115.New(),
+		balanceSvc:      balanceSvc,
+		web115Svc:       service.NewWeb115Service(log),
+		loginProtection: loginProtection,
 	}
 	proxy.ModifyResponse = h.modifyResponse
 	return h
@@ -184,6 +188,19 @@ func (h *EmbyProxyHandler) log302Entry(entry embyproxylog.Entry) {
 
 // ProxyRequest 代理所有Emby请求的主要处理函数
 func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
+	if attempt, blocked := h.loginProtection.Inspect(c.Request); attempt != nil {
+		if blocked {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"ResponseStatus": gin.H{
+					"ErrorCode": "Unauthorized",
+					"Message":   "Invalid username or password",
+				},
+			})
+			return
+		}
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), embyLoginAttemptContextKey{}, attempt))
+	}
+
 	optimization := service.ApplyEmbyImageOptimization(
 		c.Request.URL.Path,
 		c.Request.URL.Query(),
@@ -254,6 +271,10 @@ func (h *EmbyProxyHandler) logFallback(c *gin.Context, reason string) {
 }
 
 func (h *EmbyProxyHandler) modifyResponse(resp *http.Response) error {
+	if resp != nil && resp.Request != nil && h.loginProtection != nil {
+		attempt, _ := resp.Request.Context().Value(embyLoginAttemptContextKey{}).(*service.EmbyLoginAttempt)
+		h.loginProtection.ObserveResponse(attempt, resp.StatusCode)
+	}
 	if resp == nil || resp.Request == nil || !embyhelper.IsPlaybackInfoURI(resp.Request.RequestURI) {
 		return nil
 	}
@@ -841,7 +862,7 @@ func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath string, storage 
 		}
 
 		// 创建或更新缓存（key 用 STRM 内容空间的 cacheKey）
-		cache, _, err := model.CreateIfNotExistsStatic(database.DB, cacheKey, pickcode)
+		cache, _, err := model.UpsertPickcodeCache(database.DB, cacheKey, pickcode)
 		if err != nil {
 			h.logger.Errorf("[EMBY PROXY] 保存 pickcode 缓存失败: %v", err)
 		}

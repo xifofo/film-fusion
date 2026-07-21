@@ -78,6 +78,9 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if in.Emby.ImageOptimization.IsZero() {
 		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
 	}
+	if in.Emby.Security.IsZero() {
+		in.Emby.Security = h.cfg.Emby.Security
+	}
 
 	// 密钥脱敏：前端留空表示沿用旧值
 	if strings.TrimSpace(in.Server.Password) == "" {
@@ -107,6 +110,24 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if strings.TrimSpace(in.HDHive.RefreshToken) == "" {
 		in.HDHive.RefreshToken = h.cfg.HDHive.RefreshToken
 	}
+	if strings.TrimSpace(in.HDHive.AccessTokenExpiresAt) == "" {
+		in.HDHive.AccessTokenExpiresAt = h.cfg.HDHive.AccessTokenExpiresAt
+	}
+	if strings.TrimSpace(in.HDHive.RefreshTokenExpiresAt) == "" {
+		in.HDHive.RefreshTokenExpiresAt = h.cfg.HDHive.RefreshTokenExpiresAt
+	}
+	if in.HDHive.RefreshBeforeMinutes <= 0 {
+		in.HDHive.RefreshBeforeMinutes = h.cfg.HDHive.RefreshBeforeMinutes
+		if in.HDHive.RefreshBeforeMinutes <= 0 {
+			in.HDHive.RefreshBeforeMinutes = 15
+		}
+	}
+	if in.HDHive.RefreshCheckMinutes <= 0 {
+		in.HDHive.RefreshCheckMinutes = h.cfg.HDHive.RefreshCheckMinutes
+		if in.HDHive.RefreshCheckMinutes <= 0 {
+			in.HDHive.RefreshCheckMinutes = 10
+		}
+	}
 	// 基本校验
 	if strings.TrimSpace(in.Server.Port) == "" {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")
@@ -114,6 +135,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	if strings.TrimSpace(in.JWT.Secret) == "" {
 		h.error(c, http.StatusBadRequest, 400, "JWT 密钥不能为空")
+		return
+	}
+	if err := config.ValidateEmbySecurity(in.Emby.Security); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 

@@ -34,6 +34,14 @@ emby:
   add_current_media_info: true
   # 播放时提前获取下一集的媒体信息，提高播放速度，需要配置 admin_user_id
   add_next_media_info: true
+  # 登录防爆破。trusted_proxy_cidrs 留空时只使用 TCP 来源 IP，不信任转发头。
+  security:
+    enabled: true
+    window_minutes: 10
+    max_failures_per_account_ip: 5
+    max_failures_per_ip: 20
+    block_minutes: 30
+    trusted_proxy_cidrs: []
   # Emby 图片请求按展示场景限制尺寸与质量，保存后热生效
   image_optimization:
     enabled: false

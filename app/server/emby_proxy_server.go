@@ -5,6 +5,7 @@ import (
 	"film-fusion/app/config"
 	"film-fusion/app/handler"
 	"film-fusion/app/logger"
+	"film-fusion/app/service"
 	"fmt"
 	"net/http"
 	"time"
@@ -22,7 +23,7 @@ type EmbyProxyServer struct {
 }
 
 // NewEmbyProxyServer 创建新的Emby代理服务器
-func NewEmbyProxyServer(cfg *config.Config, log *logger.Logger) *EmbyProxyServer {
+func NewEmbyProxyServer(cfg *config.Config, log *logger.Logger, loginProtection *service.EmbyLoginProtection) *EmbyProxyServer {
 	// 设置gin模式
 	gin.SetMode(gin.ReleaseMode)
 
@@ -45,7 +46,7 @@ func NewEmbyProxyServer(cfg *config.Config, log *logger.Logger) *EmbyProxyServer
 	})
 
 	// 创建Emby代理处理器
-	embyHandler := handler.NewEmbyProxyHandler(cfg, log)
+	embyHandler := handler.NewEmbyProxyHandler(cfg, log, loginProtection)
 	if embyHandler == nil {
 		log.Errorf("创建Emby代理处理器失败")
 		return nil

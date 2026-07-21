@@ -1,9 +1,11 @@
 package model
 
 import (
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PickcodeCache 表示 pickcode 缓存的数据库模型
@@ -15,40 +17,42 @@ type PickcodeCache struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// CreateIfNotExists 创建 pickcode 缓存，如果路径已存在则跳过
-// 返回 (cache, created, error) - cache: 缓存记录, created: 是否创建了新记录, error: 错误信息
-func (p *PickcodeCache) CreateIfNotExists(db *gorm.DB, filePath, pickcode string) (*PickcodeCache, bool, error) {
-	// 先检查是否已存在
+// Upsert 创建或覆盖 pickcode 缓存。
+// 返回 (cache, created, error)；created 表示本次是否插入了新记录。
+func (p *PickcodeCache) Upsert(db *gorm.DB, filePath, pickcode string) (*PickcodeCache, bool, error) {
 	var existing PickcodeCache
-	err := db.Where("file_path = ?", filePath).First(&existing).Error
-
-	if err == nil {
-		// 记录已存在，返回现有记录
-		return &existing, false, nil
-	}
-
-	if err != gorm.ErrRecordNotFound {
-		// 发生了其他错误
+	err := db.Select("id").Where("file_path = ?", filePath).First(&existing).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
+	created := errors.Is(err, gorm.ErrRecordNotFound)
+	now := time.Now()
 
-	// 记录不存在，创建新记录
-	newCache := &PickcodeCache{
+	cache := &PickcodeCache{
 		FilePath:  filePath,
 		Pickcode:  pickcode,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
-
-	if err := db.Create(newCache).Error; err != nil {
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "file_path"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"pickcode":   pickcode,
+			"updated_at": now,
+		}),
+	}).Create(cache).Error; err != nil {
 		return nil, false, err
 	}
 
-	return newCache, true, nil
+	var saved PickcodeCache
+	if err := db.Where("file_path = ?", filePath).First(&saved).Error; err != nil {
+		return nil, false, err
+	}
+	return &saved, created, nil
 }
 
-// CreateIfNotExistsStatic 静态方法版本，创建 pickcode 缓存，如果路径已存在则跳过
-func CreateIfNotExistsStatic(db *gorm.DB, filePath, pickcode string) (*PickcodeCache, bool, error) {
+// UpsertPickcodeCache 创建或覆盖 pickcode 缓存。
+func UpsertPickcodeCache(db *gorm.DB, filePath, pickcode string) (*PickcodeCache, bool, error) {
 	var cache PickcodeCache
-	return cache.CreateIfNotExists(db, filePath, pickcode)
+	return cache.Upsert(db, filePath, pickcode)
 }

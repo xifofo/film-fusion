@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -117,5 +118,28 @@ func TestRefreshToken(t *testing.T) {
 	}
 	if resp.Data.AccessToken != "new-access-token" || resp.Data.RefreshToken != "new-refresh-token" {
 		t.Fatalf("unexpected response: %+v", resp.Data)
+	}
+}
+
+func TestBusinessErrorReturnsError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(APIResponse[[]Resource]{
+			Success: false,
+			Code:    "OPENAPI_REFRESH_REQUIRED",
+			Message: "OpenAPI access token 已过期，请使用 refresh_token 刷新",
+		})
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "app-secret").WithAccessToken("expired-token")
+	resp, err := client.QueryResources(context.Background(), "movie", "550")
+	if err == nil {
+		t.Fatalf("expected business error")
+	}
+	if resp == nil || resp.Code != "OPENAPI_REFRESH_REQUIRED" {
+		t.Fatalf("unexpected response: %+v", resp)
+	}
+	if !strings.Contains(err.Error(), "OPENAPI_REFRESH_REQUIRED") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

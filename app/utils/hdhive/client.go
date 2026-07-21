@@ -242,6 +242,18 @@ func doJSON[T any](c *Client, ctx context.Context, method, path string, query ur
 		}
 		return &apiResp, fmt.Errorf("request failed with status %d", resp.StatusCode)
 	}
+	if !apiResp.Success {
+		if apiResp.Description != "" {
+			return &apiResp, fmt.Errorf("%s: %s", apiResp.Code, apiResp.Description)
+		}
+		if apiResp.Message != "" {
+			return &apiResp, fmt.Errorf("%s: %s", apiResp.Code, apiResp.Message)
+		}
+		if apiResp.Code != "" {
+			return &apiResp, fmt.Errorf("%s: request failed", apiResp.Code)
+		}
+		return &apiResp, fmt.Errorf("request failed")
+	}
 	return &apiResp, nil
 }
 

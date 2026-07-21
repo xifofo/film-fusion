@@ -7,7 +7,9 @@ import (
 	"errors"
 	"film-fusion/app/config"
 	"film-fusion/app/logger"
+	"film-fusion/app/service"
 	"film-fusion/app/utils/hdhive"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -17,12 +19,13 @@ import (
 )
 
 type HDHiveHandler struct {
-	cfg    *config.Config
-	logger *logger.Logger
+	cfg        *config.Config
+	logger     *logger.Logger
+	refreshSvc *service.HDHiveTokenRefreshService
 }
 
-func NewHDHiveHandler(cfg *config.Config, log *logger.Logger) *HDHiveHandler {
-	return &HDHiveHandler{cfg: cfg, logger: log}
+func NewHDHiveHandler(cfg *config.Config, log *logger.Logger, refreshSvc *service.HDHiveTokenRefreshService) *HDHiveHandler {
+	return &HDHiveHandler{cfg: cfg, logger: log, refreshSvc: refreshSvc}
 }
 
 func (h *HDHiveHandler) success(c *gin.Context, data any, message string) {
@@ -178,6 +181,18 @@ func (h *HDHiveHandler) ExchangeToken(c *gin.Context) {
 }
 
 func (h *HDHiveHandler) RefreshToken(c *gin.Context) {
+	if h.refreshSvc != nil {
+		ctx, cancel := h.requestContext(c)
+		defer cancel()
+		resp, err := h.refreshSvc.RefreshNow(ctx, "手动刷新")
+		if err != nil {
+			h.handleSDKError(c, "刷新 HDHive Token", err)
+			return
+		}
+		h.success(c, resp, "HDHive Token 已刷新")
+		return
+	}
+
 	client, err := h.oauthClient()
 	if err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
@@ -283,6 +298,16 @@ func (h *HDHiveHandler) QueryResources(c *gin.Context) {
 	defer cancel()
 	resp, err := client.QueryResources(ctx, mediaType, tmdbID)
 	if err != nil {
+		if shouldRefreshHDHiveToken(err) {
+			client, refreshErr := h.refreshClient(ctx, "查询资源时 access token 过期")
+			if refreshErr == nil {
+				resp, err = client.QueryResources(ctx, mediaType, tmdbID)
+			} else {
+				err = refreshErr
+			}
+		}
+	}
+	if err != nil {
 		h.handleSDKError(c, "查询 HDHive 资源", err)
 		return
 	}
@@ -316,6 +341,16 @@ func (h *HDHiveHandler) UnlockResources(c *gin.Context) {
 	if len(slugs) == 1 {
 		resp, err := client.UnlockResource(ctx, slugs[0])
 		if err != nil {
+			if shouldRefreshHDHiveToken(err) {
+				client, refreshErr := h.refreshClient(ctx, "解锁资源时 access token 过期")
+				if refreshErr == nil {
+					resp, err = client.UnlockResource(ctx, slugs[0])
+				} else {
+					err = refreshErr
+				}
+			}
+		}
+		if err != nil {
 			h.handleSDKError(c, "解锁 HDHive 资源", err)
 			return
 		}
@@ -324,6 +359,16 @@ func (h *HDHiveHandler) UnlockResources(c *gin.Context) {
 	}
 
 	resp, err := client.UnlockResources(ctx, slugs)
+	if err != nil {
+		if shouldRefreshHDHiveToken(err) {
+			client, refreshErr := h.refreshClient(ctx, "批量解锁资源时 access token 过期")
+			if refreshErr == nil {
+				resp, err = client.UnlockResources(ctx, slugs)
+			} else {
+				err = refreshErr
+			}
+		}
+	}
 	if err != nil {
 		h.handleSDKError(c, "批量解锁 HDHive 资源", err)
 		return
@@ -353,13 +398,42 @@ func mergeUnlockSlugs(slug string, slugs []string) []string {
 }
 
 func (h *HDHiveHandler) persistToken(token hdhive.OAuthToken) error {
+	if h.refreshSvc != nil {
+		return h.refreshSvc.PersistToken(token)
+	}
 	if strings.TrimSpace(token.AccessToken) != "" {
 		h.cfg.HDHive.AccessToken = strings.TrimSpace(token.AccessToken)
 	}
 	if strings.TrimSpace(token.RefreshToken) != "" {
 		h.cfg.HDHive.RefreshToken = strings.TrimSpace(token.RefreshToken)
 	}
+	now := time.Now()
+	if token.ExpiresIn > 0 {
+		h.cfg.HDHive.AccessTokenExpiresAt = now.Add(time.Duration(token.ExpiresIn) * time.Second).Format(time.RFC3339)
+	}
+	if token.RefreshExpiresIn > 0 {
+		h.cfg.HDHive.RefreshTokenExpiresAt = now.Add(time.Duration(token.RefreshExpiresIn) * time.Second).Format(time.RFC3339)
+	}
 	return config.Save(h.cfg)
+}
+
+func (h *HDHiveHandler) refreshClient(ctx context.Context, reason string) (*hdhive.Client, error) {
+	if h.refreshSvc == nil {
+		return nil, errors.New("HDHive Token 自动刷新服务未初始化")
+	}
+	if _, err := h.refreshSvc.RefreshNow(ctx, reason); err != nil {
+		return nil, fmt.Errorf("刷新 HDHive Token 失败: %w", err)
+	}
+	return h.client()
+}
+
+func shouldRefreshHDHiveToken(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "OPENAPI_REFRESH_REQUIRED") ||
+		strings.Contains(msg, "access token 已过期")
 }
 
 func randomOAuthState() string {

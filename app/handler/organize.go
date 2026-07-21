@@ -529,9 +529,10 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 				PickCode: file.Pc,
 			}
 
-			ext := strings.TrimPrefix(filepath.Ext(file.Fn), ".")
+			recognizeName := normalizeFilenameForRecognition(file.Fn)
+			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
 
-			info, _, recErr := h.moviePilotSvc.RecognizeFile(file.Fn)
+			info, _, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
 			if recErr != nil {
 				item.Error = recErr.Error()
 				continue
@@ -540,7 +541,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 				continue
 			}
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(file.Fn, ext)
+			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeName, ext)
 			if transErr != nil {
 				if item.Error == "" {
 					item.Error = transErr.Error()
@@ -1386,10 +1387,14 @@ func newFilenameRegexProcessor(enabled bool, pattern, replacement string) (filen
 }
 
 func (p filenameRegexProcessor) apply(name string) string {
-	if !p.enabled || p.regex == nil {
-		return name
+	if p.enabled && p.regex != nil {
+		name = strings.TrimSpace(p.regex.ReplaceAllString(name, p.replacement))
 	}
-	return strings.TrimSpace(p.regex.ReplaceAllString(name, p.replacement))
+	return normalizeFilenameForRecognition(name)
+}
+
+func normalizeFilenameForRecognition(name string) string {
+	return strings.ReplaceAll(name, " - ", ".")
 }
 
 func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArgs) Organize115CookieGroup {
@@ -2990,7 +2995,7 @@ func (h *OrganizeHandler) cachePickcodeCaches(dir model.CloudDirectory, items []
 			continue
 		}
 		filePath := pathhelper.SafeFilePathJoin(contentPrefix, targetPath)
-		_, isCreated, err := model.CreateIfNotExistsStatic(database.DB, filePath, item.PickCode)
+		_, isCreated, err := model.UpsertPickcodeCache(database.DB, filePath, item.PickCode)
 		if err != nil {
 			h.logger.Warnf("缓存 pickcode 失败: %s, err=%v", filePath, err)
 			continue

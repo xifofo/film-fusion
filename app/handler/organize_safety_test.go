@@ -36,6 +36,19 @@ func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
 	}
 }
 
+func TestFilenameProcessorNormalizesSpacedHyphenBeforeRecognition(t *testing.T) {
+	processor, err := newFilenameRegexProcessor(false, "", "")
+	if err != nil {
+		t.Fatalf("newFilenameRegexProcessor() error = %v", err)
+	}
+
+	got := processor.apply("Show.S01E01 - Episode.Title.mkv")
+	want := "Show.S01E01.Episode.Title.mkv"
+	if got != want {
+		t.Fatalf("processor.apply()=%q want %q", got, want)
+	}
+}
+
 func TestCollectOrganizeSourceFolderDeleteTargetsSkipsErroredAndDuplicates(t *testing.T) {
 	targets, errorsOut := collectOrganizeSourceFolderDeleteTargets([]Organize115CookieGroup{
 		{FolderID: "100"},

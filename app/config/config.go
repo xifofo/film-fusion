@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"log"
+	"net/netip"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -50,8 +52,24 @@ type EmbyConfig struct {
 	AddCurrentMediaInfo bool                        `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
 	AddNextMediaInfo    bool                        `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
 	RunProxyPort        int                         `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
+	Security            EmbySecurityConfig          `mapstructure:"security" json:"security"`                             // Emby 登录防爆破配置
 	Cover               EmbyCoverConfig             `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
 	ImageOptimization   EmbyImageOptimizationConfig `mapstructure:"image_optimization" json:"image_optimization"`         // Emby 图片尺寸与质量控制
+}
+
+// EmbySecurityConfig 控制 Emby 代理登录接口的失败计数与临时封禁。
+type EmbySecurityConfig struct {
+	Enabled                 bool     `mapstructure:"enabled" json:"enabled"`
+	WindowMinutes           int      `mapstructure:"window_minutes" json:"window_minutes"`
+	MaxFailuresPerAccountIP int      `mapstructure:"max_failures_per_account_ip" json:"max_failures_per_account_ip"`
+	MaxFailuresPerIP        int      `mapstructure:"max_failures_per_ip" json:"max_failures_per_ip"`
+	BlockMinutes            int      `mapstructure:"block_minutes" json:"block_minutes"`
+	TrustedProxyCIDRs       []string `mapstructure:"trusted_proxy_cidrs" json:"trusted_proxy_cidrs"`
+}
+
+func (c EmbySecurityConfig) IsZero() bool {
+	return !c.Enabled && c.WindowMinutes == 0 && c.MaxFailuresPerAccountIP == 0 &&
+		c.MaxFailuresPerIP == 0 && c.BlockMinutes == 0 && len(c.TrustedProxyCIDRs) == 0
 }
 
 // EmbyImageRuleConfig 定义某类 Emby 图片的请求上限；0 表示保留客户端参数。
@@ -106,15 +124,20 @@ type TMDBConfig struct {
 }
 
 type HDHiveConfig struct {
-	Enabled        bool   `mapstructure:"enabled" json:"enabled"`                 // 是否启用 HDHive OpenAPI
-	BaseURL        string `mapstructure:"base_url" json:"base_url"`               // HDHive 服务地址
-	ClientID       string `mapstructure:"client_id" json:"client_id"`             // OpenAPI 应用公开 ID
-	RedirectURI    string `mapstructure:"redirect_uri" json:"redirect_uri"`       // OAuth 回调地址
-	Scope          string `mapstructure:"scope" json:"scope"`                     // OAuth 授权 scope
-	APIKey         string `mapstructure:"api_key" json:"api_key"`                 // 应用 Secret，用于 X-API-Key
-	AccessToken    string `mapstructure:"access_token" json:"access_token"`       // 用户 Access Token
-	RefreshToken   string `mapstructure:"refresh_token" json:"refresh_token"`     // 用户 Refresh Token（预留）
-	TimeoutSeconds int    `mapstructure:"timeout_seconds" json:"timeout_seconds"` // 请求超时时间（秒）
+	Enabled               bool   `mapstructure:"enabled" json:"enabled"`                                   // 是否启用 HDHive OpenAPI
+	BaseURL               string `mapstructure:"base_url" json:"base_url"`                                 // HDHive 服务地址
+	ClientID              string `mapstructure:"client_id" json:"client_id"`                               // OpenAPI 应用公开 ID
+	RedirectURI           string `mapstructure:"redirect_uri" json:"redirect_uri"`                         // OAuth 回调地址
+	Scope                 string `mapstructure:"scope" json:"scope"`                                       // OAuth 授权 scope
+	APIKey                string `mapstructure:"api_key" json:"api_key"`                                   // 应用 Secret，用于 X-API-Key
+	AccessToken           string `mapstructure:"access_token" json:"access_token"`                         // 用户 Access Token
+	RefreshToken          string `mapstructure:"refresh_token" json:"refresh_token"`                       // 用户 Refresh Token
+	AccessTokenExpiresAt  string `mapstructure:"access_token_expires_at" json:"access_token_expires_at"`   // Access Token 过期时间（RFC3339）
+	RefreshTokenExpiresAt string `mapstructure:"refresh_token_expires_at" json:"refresh_token_expires_at"` // Refresh Token 过期时间（RFC3339）
+	AutoRefresh           bool   `mapstructure:"auto_refresh" json:"auto_refresh"`                         // 是否自动刷新 Access Token
+	RefreshBeforeMinutes  int    `mapstructure:"refresh_before_minutes" json:"refresh_before_minutes"`     // 过期前多少分钟刷新
+	RefreshCheckMinutes   int    `mapstructure:"refresh_check_minutes" json:"refresh_check_minutes"`       // 自动刷新检查间隔
+	TimeoutSeconds        int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`                   // 请求超时时间（秒）
 }
 
 func Load() *Config {
@@ -134,6 +157,7 @@ func Load() *Config {
 		log.Fatalf("无法解码配置: %v", err)
 	}
 	applyEmbyImageOptimizationDefaults(&config.Emby.ImageOptimization)
+	applyEmbySecurityDefaults(&config.Emby.Security)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -172,6 +196,12 @@ func Save(c *Config) error {
 	viper.Set("emby.add_current_media_info", c.Emby.AddCurrentMediaInfo)
 	viper.Set("emby.add_next_media_info", c.Emby.AddNextMediaInfo)
 	viper.Set("emby.run_proxy_port", c.Emby.RunProxyPort)
+	viper.Set("emby.security.enabled", c.Emby.Security.Enabled)
+	viper.Set("emby.security.window_minutes", c.Emby.Security.WindowMinutes)
+	viper.Set("emby.security.max_failures_per_account_ip", c.Emby.Security.MaxFailuresPerAccountIP)
+	viper.Set("emby.security.max_failures_per_ip", c.Emby.Security.MaxFailuresPerIP)
+	viper.Set("emby.security.block_minutes", c.Emby.Security.BlockMinutes)
+	viper.Set("emby.security.trusted_proxy_cidrs", c.Emby.Security.TrustedProxyCIDRs)
 	viper.Set("emby.image_optimization.enabled", c.Emby.ImageOptimization.Enabled)
 	setEmbyImageRule("emby.image_optimization.library_cover", c.Emby.ImageOptimization.LibraryCover)
 	setEmbyImageRule("emby.image_optimization.poster", c.Emby.ImageOptimization.Poster)
@@ -209,6 +239,11 @@ func Save(c *Config) error {
 	viper.Set("hdhive.api_key", c.HDHive.APIKey)
 	viper.Set("hdhive.access_token", c.HDHive.AccessToken)
 	viper.Set("hdhive.refresh_token", c.HDHive.RefreshToken)
+	viper.Set("hdhive.access_token_expires_at", c.HDHive.AccessTokenExpiresAt)
+	viper.Set("hdhive.refresh_token_expires_at", c.HDHive.RefreshTokenExpiresAt)
+	viper.Set("hdhive.auto_refresh", c.HDHive.AutoRefresh)
+	viper.Set("hdhive.refresh_before_minutes", c.HDHive.RefreshBeforeMinutes)
+	viper.Set("hdhive.refresh_check_minutes", c.HDHive.RefreshCheckMinutes)
 	viper.Set("hdhive.timeout_seconds", c.HDHive.TimeoutSeconds)
 
 	if err := viper.WriteConfig(); err != nil {
@@ -256,6 +291,11 @@ func setDefaults() {
 	viper.SetDefault("hdhive.api_key", "")
 	viper.SetDefault("hdhive.access_token", "")
 	viper.SetDefault("hdhive.refresh_token", "")
+	viper.SetDefault("hdhive.access_token_expires_at", "")
+	viper.SetDefault("hdhive.refresh_token_expires_at", "")
+	viper.SetDefault("hdhive.auto_refresh", true)
+	viper.SetDefault("hdhive.refresh_before_minutes", 15)
+	viper.SetDefault("hdhive.refresh_check_minutes", 10)
 	viper.SetDefault("hdhive.timeout_seconds", 30)
 
 	// 日志默认配置
@@ -274,6 +314,12 @@ func setDefaults() {
 
 	// Emby 默认配置
 	viper.SetDefault("emby.add_current_media_info", true)
+	viper.SetDefault("emby.security.enabled", true)
+	viper.SetDefault("emby.security.window_minutes", 10)
+	viper.SetDefault("emby.security.max_failures_per_account_ip", 5)
+	viper.SetDefault("emby.security.max_failures_per_ip", 20)
+	viper.SetDefault("emby.security.block_minutes", 30)
+	viper.SetDefault("emby.security.trusted_proxy_cidrs", []string{})
 	viper.SetDefault("emby.image_optimization.enabled", false)
 	setDefaultEmbyImageRule("emby.image_optimization.library_cover", true, 676, 380, 80)
 	setDefaultEmbyImageRule("emby.image_optimization.poster", true, 356, 534, 80)
@@ -310,6 +356,39 @@ func defaultEmbyImageOptimizationConfig() EmbyImageOptimizationConfig {
 		DetailLogo:       EmbyImageRuleConfig{Enabled: true, MaxWidth: 600, MaxHeight: 152, Quality: 85},
 		DetailBackdrop:   EmbyImageRuleConfig{Enabled: true, MaxWidth: 1920, MaxHeight: 1080, Quality: 70},
 		Other:            EmbyImageRuleConfig{Enabled: false, Quality: 80},
+	}
+}
+
+func defaultEmbySecurityConfig() EmbySecurityConfig {
+	return EmbySecurityConfig{
+		Enabled: true, WindowMinutes: 10, MaxFailuresPerAccountIP: 5,
+		MaxFailuresPerIP: 20, BlockMinutes: 30, TrustedProxyCIDRs: []string{},
+	}
+}
+
+func applyEmbySecurityDefaults(settings *EmbySecurityConfig) {
+	defaults := defaultEmbySecurityConfig()
+	if settings.IsZero() && !viper.InConfig("emby.security") {
+		*settings = defaults
+		return
+	}
+	if !viper.InConfig("emby.security.enabled") {
+		settings.Enabled = defaults.Enabled
+	}
+	if !viper.InConfig("emby.security.window_minutes") {
+		settings.WindowMinutes = defaults.WindowMinutes
+	}
+	if !viper.InConfig("emby.security.max_failures_per_account_ip") {
+		settings.MaxFailuresPerAccountIP = defaults.MaxFailuresPerAccountIP
+	}
+	if !viper.InConfig("emby.security.max_failures_per_ip") {
+		settings.MaxFailuresPerIP = defaults.MaxFailuresPerIP
+	}
+	if !viper.InConfig("emby.security.block_minutes") {
+		settings.BlockMinutes = defaults.BlockMinutes
+	}
+	if settings.TrustedProxyCIDRs == nil {
+		settings.TrustedProxyCIDRs = []string{}
 	}
 }
 
@@ -356,6 +435,29 @@ func validateConfig(config *Config) error {
 	}
 	if config.JWT.Secret == "" {
 		return fmt.Errorf("JWT密钥未设置")
+	}
+	if err := ValidateEmbySecurity(config.Emby.Security); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ValidateEmbySecurity(settings EmbySecurityConfig) error {
+	if settings.Enabled && (settings.WindowMinutes <= 0 || settings.MaxFailuresPerAccountIP <= 0 || settings.MaxFailuresPerIP <= 0 || settings.BlockMinutes <= 0) {
+		return fmt.Errorf("Emby 登录保护的统计窗口、失败阈值和封禁时长必须大于 0")
+	}
+	for _, raw := range settings.TrustedProxyCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if _, err := netip.ParsePrefix(raw); err == nil {
+			continue
+		}
+		if _, err := netip.ParseAddr(raw); err == nil {
+			continue
+		}
+		return fmt.Errorf("可信代理 IP/CIDR 无效: %s", raw)
 	}
 	return nil
 }
