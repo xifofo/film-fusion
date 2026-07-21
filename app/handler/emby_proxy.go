@@ -184,6 +184,17 @@ func (h *EmbyProxyHandler) log302Entry(entry embyproxylog.Entry) {
 
 // ProxyRequest 代理所有Emby请求的主要处理函数
 func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
+	optimization := service.ApplyEmbyImageOptimization(
+		c.Request.URL.Path,
+		c.Request.URL.Query(),
+		h.config.Emby.ImageOptimization,
+	)
+	if optimization.Changed {
+		c.Request.URL.RawQuery = optimization.Query.Encode()
+		c.Request.RequestURI = c.Request.URL.RequestURI()
+		h.logger.Debugf("[EMBY PROXY] 图片优化 profile=%s uri=%s", optimization.Profile, c.Request.RequestURI)
+	}
+
 	currentURI := c.Request.RequestURI
 
 	u, err := url.Parse(currentURI)

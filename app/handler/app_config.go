@@ -74,6 +74,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	in := payload.Config
+	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
+	if in.Emby.ImageOptimization.IsZero() {
+		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
+	}
 
 	// 密钥脱敏：前端留空表示沿用旧值
 	if strings.TrimSpace(in.Server.Password) == "" {

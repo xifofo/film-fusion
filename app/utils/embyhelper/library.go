@@ -11,15 +11,51 @@ import (
 
 // EmbyLibrary 表示一个 Emby 媒体库（CollectionFolder）
 type EmbyLibrary struct {
-	ID                string   `json:"Id"`
-	Name              string   `json:"Name"`
-	CollectionType    string   `json:"CollectionType"` // movies / tvshows / music / mixed / homevideos ...
-	ServerID          string   `json:"ServerId"`
-	PrimaryImageTag   string   `json:"-"`
-	IsFolder          bool     `json:"IsFolder"`
-	ChildCount        int      `json:"ChildCount"`
-	Path              string   `json:"Path"`
-	BackdropImageTags []string `json:"BackdropImageTags,omitempty"`
+	ID                string            `json:"Id"`
+	Name              string            `json:"Name"`
+	CollectionType    string            `json:"CollectionType"` // movies / tvshows / music / mixed / homevideos ...
+	ServerID          string            `json:"ServerId"`
+	PrimaryImageTag   string            `json:"-"`
+	IsFolder          bool              `json:"IsFolder"`
+	ChildCount        int               `json:"ChildCount"`
+	Path              string            `json:"Path"`
+	BackdropImageTags []string          `json:"BackdropImageTags,omitempty"`
+	ImageTags         map[string]string `json:"ImageTags,omitempty"`
+}
+
+// ListRecentItems 取所有媒体库最近入库的 Movie / Series，供图片优化测试选样。
+func (e *EmbyClient) ListRecentItems(limit int) ([]EmbyItem, error) {
+	if limit <= 0 {
+		limit = 24
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	req := e.client.R().
+		SetQueryParam("Recursive", "true").
+		SetQueryParam("IncludeItemTypes", "Movie,Series").
+		SetQueryParam("SortBy", "DateCreated,SortName").
+		SetQueryParam("SortOrder", "Descending").
+		SetQueryParam("Limit", strconv.Itoa(limit)).
+		SetQueryParam("Fields", "DateCreated,PrimaryImageAspectRatio,ImageTags,BackdropImageTags").
+		SetQueryParam("ImageTypeLimit", "1").
+		SetQueryParam("EnableImageTypes", "Primary,Backdrop,Logo,Thumb")
+
+	endpoint := "/Items"
+	if uid := strings.TrimSpace(e.config.Emby.AdminUserID); uid != "" {
+		endpoint = "/Users/" + uid + "/Items"
+	}
+
+	var resp listItemsResp
+	r, err := req.SetResult(&resp).Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Emby 图片测试样本失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("Emby 图片测试样本 HTTP %d: %s", r.StatusCode(), truncate(r.String(), 256))
+	}
+	return resp.Items, nil
 }
 
 // EmbyItem 表示一个媒体项（Movie/Series 等），用于取最新海报

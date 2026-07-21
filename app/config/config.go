@@ -42,15 +42,40 @@ type JWTConfig struct {
 }
 
 type EmbyConfig struct {
-	Enabled             bool            `mapstructure:"enabled" json:"enabled"`                               // 是否启用 EMBY 服务
-	URL                 string          `mapstructure:"url" json:"url"`                                       // EMBY 服务器地址
-	APIKey              string          `mapstructure:"api_key" json:"api_key"`                               // EMBY API 密钥
-	AdminUserID         string          `mapstructure:"admin_user_id" json:"admin_user_id"`                   // EMBY 管理员用户 ID
-	CacheTime           int             `mapstructure:"cache_time" json:"cache_time"`                         // API 请求超时时间（秒）
-	AddCurrentMediaInfo bool            `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
-	AddNextMediaInfo    bool            `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
-	RunProxyPort        int             `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
-	Cover               EmbyCoverConfig `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
+	Enabled             bool                        `mapstructure:"enabled" json:"enabled"`                               // 是否启用 EMBY 服务
+	URL                 string                      `mapstructure:"url" json:"url"`                                       // EMBY 服务器地址
+	APIKey              string                      `mapstructure:"api_key" json:"api_key"`                               // EMBY API 密钥
+	AdminUserID         string                      `mapstructure:"admin_user_id" json:"admin_user_id"`                   // EMBY 管理员用户 ID
+	CacheTime           int                         `mapstructure:"cache_time" json:"cache_time"`                         // API 请求超时时间（秒）
+	AddCurrentMediaInfo bool                        `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
+	AddNextMediaInfo    bool                        `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
+	RunProxyPort        int                         `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
+	Cover               EmbyCoverConfig             `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
+	ImageOptimization   EmbyImageOptimizationConfig `mapstructure:"image_optimization" json:"image_optimization"`         // Emby 图片尺寸与质量控制
+}
+
+// EmbyImageRuleConfig 定义某类 Emby 图片的请求上限；0 表示保留客户端参数。
+type EmbyImageRuleConfig struct {
+	Enabled   bool `mapstructure:"enabled" json:"enabled"`
+	MaxWidth  int  `mapstructure:"max_width" json:"max_width"`
+	MaxHeight int  `mapstructure:"max_height" json:"max_height"`
+	Quality   int  `mapstructure:"quality" json:"quality"`
+}
+
+// EmbyImageOptimizationConfig 按 Emby Web 的常见展示场景控制图片请求。
+type EmbyImageOptimizationConfig struct {
+	Enabled          bool                `mapstructure:"enabled" json:"enabled"`
+	LibraryCover     EmbyImageRuleConfig `mapstructure:"library_cover" json:"library_cover"`
+	Poster           EmbyImageRuleConfig `mapstructure:"poster" json:"poster"`
+	ContinueBackdrop EmbyImageRuleConfig `mapstructure:"continue_backdrop" json:"continue_backdrop"`
+	ListPoster       EmbyImageRuleConfig `mapstructure:"list_poster" json:"list_poster"`
+	DetailLogo       EmbyImageRuleConfig `mapstructure:"detail_logo" json:"detail_logo"`
+	DetailBackdrop   EmbyImageRuleConfig `mapstructure:"detail_backdrop" json:"detail_backdrop"`
+	Other            EmbyImageRuleConfig `mapstructure:"other" json:"other"`
+}
+
+func (c EmbyImageOptimizationConfig) IsZero() bool {
+	return c == (EmbyImageOptimizationConfig{})
 }
 
 // EmbyCoverConfig 媒体库封面生成器配置
@@ -108,6 +133,7 @@ func Load() *Config {
 	if err := viper.Unmarshal(&config); err != nil {
 		log.Fatalf("无法解码配置: %v", err)
 	}
+	applyEmbyImageOptimizationDefaults(&config.Emby.ImageOptimization)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -146,6 +172,14 @@ func Save(c *Config) error {
 	viper.Set("emby.add_current_media_info", c.Emby.AddCurrentMediaInfo)
 	viper.Set("emby.add_next_media_info", c.Emby.AddNextMediaInfo)
 	viper.Set("emby.run_proxy_port", c.Emby.RunProxyPort)
+	viper.Set("emby.image_optimization.enabled", c.Emby.ImageOptimization.Enabled)
+	setEmbyImageRule("emby.image_optimization.library_cover", c.Emby.ImageOptimization.LibraryCover)
+	setEmbyImageRule("emby.image_optimization.poster", c.Emby.ImageOptimization.Poster)
+	setEmbyImageRule("emby.image_optimization.continue_backdrop", c.Emby.ImageOptimization.ContinueBackdrop)
+	setEmbyImageRule("emby.image_optimization.list_poster", c.Emby.ImageOptimization.ListPoster)
+	setEmbyImageRule("emby.image_optimization.detail_logo", c.Emby.ImageOptimization.DetailLogo)
+	setEmbyImageRule("emby.image_optimization.detail_backdrop", c.Emby.ImageOptimization.DetailBackdrop)
+	setEmbyImageRule("emby.image_optimization.other", c.Emby.ImageOptimization.Other)
 
 	viper.Set("emby.cover.enabled", c.Emby.Cover.Enabled)
 	viper.Set("emby.cover.cron", c.Emby.Cover.Cron)
@@ -186,6 +220,13 @@ func Save(c *Config) error {
 		return viper.WriteConfigAs(path)
 	}
 	return nil
+}
+
+func setEmbyImageRule(prefix string, rule EmbyImageRuleConfig) {
+	viper.Set(prefix+".enabled", rule.Enabled)
+	viper.Set(prefix+".max_width", rule.MaxWidth)
+	viper.Set(prefix+".max_height", rule.MaxHeight)
+	viper.Set(prefix+".quality", rule.Quality)
 }
 
 // setDefaults 设置默认配置
@@ -233,6 +274,14 @@ func setDefaults() {
 
 	// Emby 默认配置
 	viper.SetDefault("emby.add_current_media_info", true)
+	viper.SetDefault("emby.image_optimization.enabled", false)
+	setDefaultEmbyImageRule("emby.image_optimization.library_cover", true, 676, 380, 80)
+	setDefaultEmbyImageRule("emby.image_optimization.poster", true, 356, 534, 80)
+	setDefaultEmbyImageRule("emby.image_optimization.continue_backdrop", true, 674, 380, 70)
+	setDefaultEmbyImageRule("emby.image_optimization.list_poster", true, 160, 240, 80)
+	setDefaultEmbyImageRule("emby.image_optimization.detail_logo", true, 600, 152, 85)
+	setDefaultEmbyImageRule("emby.image_optimization.detail_backdrop", true, 1920, 1080, 70)
+	setDefaultEmbyImageRule("emby.image_optimization.other", false, 0, 0, 80)
 
 	// Emby Cover 默认配置
 	viper.SetDefault("emby.cover.enabled", false)
@@ -243,6 +292,61 @@ func setDefaults() {
 	viper.SetDefault("emby.cover.font_cn", "data/assets/fonts/SourceHanSansCN-Bold.otf")
 	viper.SetDefault("emby.cover.font_en", "data/assets/fonts/Inter-Bold.ttf")
 	viper.SetDefault("emby.cover.poster_count", 9)
+}
+
+func setDefaultEmbyImageRule(prefix string, enabled bool, maxWidth, maxHeight, quality int) {
+	viper.SetDefault(prefix+".enabled", enabled)
+	viper.SetDefault(prefix+".max_width", maxWidth)
+	viper.SetDefault(prefix+".max_height", maxHeight)
+	viper.SetDefault(prefix+".quality", quality)
+}
+
+func defaultEmbyImageOptimizationConfig() EmbyImageOptimizationConfig {
+	return EmbyImageOptimizationConfig{
+		LibraryCover:     EmbyImageRuleConfig{Enabled: true, MaxWidth: 676, MaxHeight: 380, Quality: 80},
+		Poster:           EmbyImageRuleConfig{Enabled: true, MaxWidth: 356, MaxHeight: 534, Quality: 80},
+		ContinueBackdrop: EmbyImageRuleConfig{Enabled: true, MaxWidth: 674, MaxHeight: 380, Quality: 70},
+		ListPoster:       EmbyImageRuleConfig{Enabled: true, MaxWidth: 160, MaxHeight: 240, Quality: 80},
+		DetailLogo:       EmbyImageRuleConfig{Enabled: true, MaxWidth: 600, MaxHeight: 152, Quality: 85},
+		DetailBackdrop:   EmbyImageRuleConfig{Enabled: true, MaxWidth: 1920, MaxHeight: 1080, Quality: 70},
+		Other:            EmbyImageRuleConfig{Enabled: false, Quality: 80},
+	}
+}
+
+// Viper does not reliably unmarshal nested defaults into a struct when the
+// parent map is absent from an existing config file. Fill only keys that were
+// not explicitly provided so existing zero values keep their meaning.
+func applyEmbyImageOptimizationDefaults(settings *EmbyImageOptimizationConfig) {
+	defaults := defaultEmbyImageOptimizationConfig()
+	if settings.IsZero() {
+		*settings = defaults
+		return
+	}
+	if !viper.InConfig("emby.image_optimization.enabled") {
+		settings.Enabled = defaults.Enabled
+	}
+	applyEmbyImageRuleDefaults("emby.image_optimization.library_cover", &settings.LibraryCover, defaults.LibraryCover)
+	applyEmbyImageRuleDefaults("emby.image_optimization.poster", &settings.Poster, defaults.Poster)
+	applyEmbyImageRuleDefaults("emby.image_optimization.continue_backdrop", &settings.ContinueBackdrop, defaults.ContinueBackdrop)
+	applyEmbyImageRuleDefaults("emby.image_optimization.list_poster", &settings.ListPoster, defaults.ListPoster)
+	applyEmbyImageRuleDefaults("emby.image_optimization.detail_logo", &settings.DetailLogo, defaults.DetailLogo)
+	applyEmbyImageRuleDefaults("emby.image_optimization.detail_backdrop", &settings.DetailBackdrop, defaults.DetailBackdrop)
+	applyEmbyImageRuleDefaults("emby.image_optimization.other", &settings.Other, defaults.Other)
+}
+
+func applyEmbyImageRuleDefaults(prefix string, rule *EmbyImageRuleConfig, defaults EmbyImageRuleConfig) {
+	if !viper.InConfig(prefix + ".enabled") {
+		rule.Enabled = defaults.Enabled
+	}
+	if !viper.InConfig(prefix + ".max_width") {
+		rule.MaxWidth = defaults.MaxWidth
+	}
+	if !viper.InConfig(prefix + ".max_height") {
+		rule.MaxHeight = defaults.MaxHeight
+	}
+	if !viper.InConfig(prefix + ".quality") {
+		rule.Quality = defaults.Quality
+	}
 }
 
 // validateConfig 验证配置的有效性

@@ -254,6 +254,7 @@ func (s *Server) setupRoutes() {
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(s.Logger)
+	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
 	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
@@ -519,6 +520,15 @@ func (s *Server) setupRoutes() {
 		{
 			embyVersionCheck.POST("/scan", embyVersionCheckHandler.Scan)
 			embyVersionCheck.GET("/status", embyVersionCheckHandler.Status)
+		}
+
+		// Emby 图片尺寸/质量控制与真实图片对比测试
+		embyImageOptimization := protected.Group("/emby-image-optimization")
+		{
+			embyImageOptimization.GET("/settings", embyImageOptimizationHandler.GetSettings)
+			embyImageOptimization.PUT("/settings", embyImageOptimizationHandler.UpdateSettings)
+			embyImageOptimization.GET("/samples", embyImageOptimizationHandler.Samples)
+			embyImageOptimization.POST("/test", embyImageOptimizationHandler.Test)
 		}
 
 		// Emby 观看记录（多用户隔离：配置统计用户 + 历史回填 + 实时采集）

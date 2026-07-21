@@ -34,6 +34,16 @@ emby:
   add_current_media_info: true
   # 播放时提前获取下一集的媒体信息，提高播放速度，需要配置 admin_user_id
   add_next_media_info: true
+  # Emby 图片请求按展示场景限制尺寸与质量，保存后热生效
+  image_optimization:
+    enabled: false
+    library_cover: { enabled: true, max_width: 676, max_height: 380, quality: 80 }
+    poster: { enabled: true, max_width: 356, max_height: 534, quality: 80 }
+    continue_backdrop: { enabled: true, max_width: 674, max_height: 380, quality: 70 }
+    list_poster: { enabled: true, max_width: 160, max_height: 240, quality: 80 }
+    detail_logo: { enabled: true, max_width: 600, max_height: 152, quality: 85 }
+    detail_backdrop: { enabled: true, max_width: 1920, max_height: 1080, quality: 70 }
+    other: { enabled: false, max_width: 0, max_height: 0, quality: 80 }
   # 媒体库封面生成器
   cover:
     enabled: false                   # 是否启用封面生成（启用后才接收 API 调用 / 定时任务）
