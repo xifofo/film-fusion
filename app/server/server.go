@@ -37,6 +37,8 @@ type Server struct {
 	organizePreviewQueue   *service.OrganizePreviewQueue
 	embyProxyServer        *EmbyProxyServer
 	embyLoginProtection    *service.EmbyLoginProtection
+	appLoginProtection     *service.EmbyLoginProtection
+	telegramNotifier       *service.TelegramNotifier
 	taskQueue              *service.PersistentTaskQueue
 }
 
@@ -98,6 +100,9 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
 		taskQueue:              taskQueue,
 	}
+	s.telegramNotifier = service.NewTelegramNotifier(cfg, log)
+	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.telegramNotifier)
+	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.telegramNotifier)
 
 	// 设置路由
 	s.setupRoutes()
@@ -105,9 +110,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	// 开启一个 Emby 代理服务
 	if cfg.Emby.Enabled {
 		s.Logger.Info("Emby服务已启用，正在创建代理服务器...")
-		embyLoginProtection := service.NewEmbyLoginProtection(cfg, log)
-		s.embyLoginProtection = embyLoginProtection
-		embyProxyServer := NewEmbyProxyServer(cfg, log, embyLoginProtection)
+		embyProxyServer := NewEmbyProxyServer(cfg, log, s.embyLoginProtection)
 		if embyProxyServer != nil {
 			s.embyProxyServer = embyProxyServer
 		} else {
@@ -244,7 +247,8 @@ func (s *Server) setupRoutes() {
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
-	authHandler := handler.NewAuthHandler(s.Config)
+	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
+	telegramHandler := handler.NewTelegramHandler(s.telegramNotifier)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -278,7 +282,6 @@ func (s *Server) setupRoutes() {
 	auth := api.Group("/auth")
 	{
 		auth.POST("/login", authHandler.Login)
-		auth.POST("/register", authHandler.Register)
 		auth.POST("/refresh", authHandler.RefreshToken)
 	}
 
@@ -298,7 +301,7 @@ func (s *Server) setupRoutes() {
 
 	// 需要JWT验证的路由
 	protected := api.Group("/")
-	protected.Use(middleware.JWTAuth(s.Config))
+	protected.Use(middleware.JWTAuth(s.Config), middleware.RequireAdmin())
 	{
 		// 用户相关
 		protected.GET("/me", authHandler.Me)
@@ -307,6 +310,7 @@ func (s *Server) setupRoutes() {
 		// 应用配置（config.yaml 在线编辑 + 热重载）
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
+		protected.POST("/telegram/test", telegramHandler.Test)
 
 		config := protected.Group("/config")
 		{

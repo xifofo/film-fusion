@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/netip"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -14,17 +15,19 @@ type Config struct {
 	Log        LogConfig        `mapstructure:"log" json:"log"`
 	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
 	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
+	Telegram   TelegramConfig   `mapstructure:"telegram" json:"telegram"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
 }
 
 type ServerConfig struct {
-	Port                   string `mapstructure:"port" json:"port"`
-	Username               string `mapstructure:"username" json:"username"`
-	Password               string `mapstructure:"password" json:"password"`
-	Download115Concurrency int    `mapstructure:"download_115_concurrency" json:"download_115_concurrency"`
-	ProcessNewMedia        bool   `mapstructure:"process_new_media" json:"process_new_media"` // 是否处理新增媒体事件
+	Port                   string              `mapstructure:"port" json:"port"`
+	Username               string              `mapstructure:"username" json:"username"`
+	Password               string              `mapstructure:"password" json:"password"`
+	Download115Concurrency int                 `mapstructure:"download_115_concurrency" json:"download_115_concurrency"`
+	ProcessNewMedia        bool                `mapstructure:"process_new_media" json:"process_new_media"` // 是否处理新增媒体事件
+	Security               LoginSecurityConfig `mapstructure:"security" json:"security"`                   // FilmFusion 登录防爆破配置
 }
 
 type LogConfig struct {
@@ -43,6 +46,26 @@ type JWTConfig struct {
 	Issuer     string `mapstructure:"issuer" json:"issuer"`           // 签发者
 }
 
+// TelegramConfig 控制 Telegram Bot 告警投递及各类安全事件开关。
+type TelegramConfig struct {
+	Enabled                bool   `mapstructure:"enabled" json:"enabled"`
+	BotToken               string `mapstructure:"bot_token" json:"bot_token"`
+	ChatID                 string `mapstructure:"chat_id" json:"chat_id"`
+	MessageThreadID        int64  `mapstructure:"message_thread_id" json:"message_thread_id"`
+	InstanceName           string `mapstructure:"instance_name" json:"instance_name"`
+	APIBase                string `mapstructure:"api_base" json:"api_base"`
+	TimeoutSeconds         int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`
+	Silent                 bool   `mapstructure:"silent" json:"silent"`
+	NotifyEmbyBruteForce   bool   `mapstructure:"notify_emby_brute_force" json:"notify_emby_brute_force"`
+	NotifySystemBruteForce bool   `mapstructure:"notify_system_brute_force" json:"notify_system_brute_force"`
+}
+
+func (c TelegramConfig) IsZero() bool {
+	return !c.Enabled && c.BotToken == "" && c.ChatID == "" && c.MessageThreadID == 0 &&
+		c.InstanceName == "" && c.APIBase == "" && c.TimeoutSeconds == 0 && !c.Silent &&
+		!c.NotifyEmbyBruteForce && !c.NotifySystemBruteForce
+}
+
 type EmbyConfig struct {
 	Enabled             bool                        `mapstructure:"enabled" json:"enabled"`                               // 是否启用 EMBY 服务
 	URL                 string                      `mapstructure:"url" json:"url"`                                       // EMBY 服务器地址
@@ -52,13 +75,13 @@ type EmbyConfig struct {
 	AddCurrentMediaInfo bool                        `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
 	AddNextMediaInfo    bool                        `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
 	RunProxyPort        int                         `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
-	Security            EmbySecurityConfig          `mapstructure:"security" json:"security"`                             // Emby 登录防爆破配置
+	Security            LoginSecurityConfig         `mapstructure:"security" json:"security"`                             // Emby 登录防爆破配置
 	Cover               EmbyCoverConfig             `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
 	ImageOptimization   EmbyImageOptimizationConfig `mapstructure:"image_optimization" json:"image_optimization"`         // Emby 图片尺寸与质量控制
 }
 
-// EmbySecurityConfig 控制 Emby 代理登录接口的失败计数与临时封禁。
-type EmbySecurityConfig struct {
+// LoginSecurityConfig 控制登录接口的失败计数与临时封禁。
+type LoginSecurityConfig struct {
 	Enabled                 bool     `mapstructure:"enabled" json:"enabled"`
 	WindowMinutes           int      `mapstructure:"window_minutes" json:"window_minutes"`
 	MaxFailuresPerAccountIP int      `mapstructure:"max_failures_per_account_ip" json:"max_failures_per_account_ip"`
@@ -67,10 +90,13 @@ type EmbySecurityConfig struct {
 	TrustedProxyCIDRs       []string `mapstructure:"trusted_proxy_cidrs" json:"trusted_proxy_cidrs"`
 }
 
-func (c EmbySecurityConfig) IsZero() bool {
+func (c LoginSecurityConfig) IsZero() bool {
 	return !c.Enabled && c.WindowMinutes == 0 && c.MaxFailuresPerAccountIP == 0 &&
 		c.MaxFailuresPerIP == 0 && c.BlockMinutes == 0 && len(c.TrustedProxyCIDRs) == 0
 }
+
+// EmbySecurityConfig 保留旧名称，兼容现有调用。
+type EmbySecurityConfig = LoginSecurityConfig
 
 // EmbyImageRuleConfig 定义某类 Emby 图片的请求上限；0 表示保留客户端参数。
 type EmbyImageRuleConfig struct {
@@ -157,7 +183,9 @@ func Load() *Config {
 		log.Fatalf("无法解码配置: %v", err)
 	}
 	applyEmbyImageOptimizationDefaults(&config.Emby.ImageOptimization)
-	applyEmbySecurityDefaults(&config.Emby.Security)
+	applyLoginSecurityDefaults("server.security", &config.Server.Security)
+	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
+	applyTelegramDefaults(&config.Telegram)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -175,6 +203,7 @@ func Save(c *Config) error {
 	viper.Set("server.password", c.Server.Password)
 	viper.Set("server.download_115_concurrency", c.Server.Download115Concurrency)
 	viper.Set("server.process_new_media", c.Server.ProcessNewMedia)
+	setLoginSecurity("server.security", c.Server.Security)
 
 	viper.Set("log.level", c.Log.Level)
 	viper.Set("log.format", c.Log.Format)
@@ -188,6 +217,17 @@ func Save(c *Config) error {
 	viper.Set("jwt.expire_time", c.JWT.ExpireTime)
 	viper.Set("jwt.issuer", c.JWT.Issuer)
 
+	viper.Set("telegram.enabled", c.Telegram.Enabled)
+	viper.Set("telegram.bot_token", c.Telegram.BotToken)
+	viper.Set("telegram.chat_id", c.Telegram.ChatID)
+	viper.Set("telegram.message_thread_id", c.Telegram.MessageThreadID)
+	viper.Set("telegram.instance_name", c.Telegram.InstanceName)
+	viper.Set("telegram.api_base", c.Telegram.APIBase)
+	viper.Set("telegram.timeout_seconds", c.Telegram.TimeoutSeconds)
+	viper.Set("telegram.silent", c.Telegram.Silent)
+	viper.Set("telegram.notify_emby_brute_force", c.Telegram.NotifyEmbyBruteForce)
+	viper.Set("telegram.notify_system_brute_force", c.Telegram.NotifySystemBruteForce)
+
 	viper.Set("emby.enabled", c.Emby.Enabled)
 	viper.Set("emby.url", c.Emby.URL)
 	viper.Set("emby.api_key", c.Emby.APIKey)
@@ -196,12 +236,7 @@ func Save(c *Config) error {
 	viper.Set("emby.add_current_media_info", c.Emby.AddCurrentMediaInfo)
 	viper.Set("emby.add_next_media_info", c.Emby.AddNextMediaInfo)
 	viper.Set("emby.run_proxy_port", c.Emby.RunProxyPort)
-	viper.Set("emby.security.enabled", c.Emby.Security.Enabled)
-	viper.Set("emby.security.window_minutes", c.Emby.Security.WindowMinutes)
-	viper.Set("emby.security.max_failures_per_account_ip", c.Emby.Security.MaxFailuresPerAccountIP)
-	viper.Set("emby.security.max_failures_per_ip", c.Emby.Security.MaxFailuresPerIP)
-	viper.Set("emby.security.block_minutes", c.Emby.Security.BlockMinutes)
-	viper.Set("emby.security.trusted_proxy_cidrs", c.Emby.Security.TrustedProxyCIDRs)
+	setLoginSecurity("emby.security", c.Emby.Security)
 	viper.Set("emby.image_optimization.enabled", c.Emby.ImageOptimization.Enabled)
 	setEmbyImageRule("emby.image_optimization.library_cover", c.Emby.ImageOptimization.LibraryCover)
 	setEmbyImageRule("emby.image_optimization.poster", c.Emby.ImageOptimization.Poster)
@@ -264,10 +299,32 @@ func setEmbyImageRule(prefix string, rule EmbyImageRuleConfig) {
 	viper.Set(prefix+".quality", rule.Quality)
 }
 
+func setLoginSecurity(prefix string, settings LoginSecurityConfig) {
+	viper.Set(prefix+".enabled", settings.Enabled)
+	viper.Set(prefix+".window_minutes", settings.WindowMinutes)
+	viper.Set(prefix+".max_failures_per_account_ip", settings.MaxFailuresPerAccountIP)
+	viper.Set(prefix+".max_failures_per_ip", settings.MaxFailuresPerIP)
+	viper.Set(prefix+".block_minutes", settings.BlockMinutes)
+	viper.Set(prefix+".trusted_proxy_cidrs", settings.TrustedProxyCIDRs)
+}
+
 // setDefaults 设置默认配置
 func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
+	setDefaultLoginSecurity("server.security")
+
+	// Telegram 告警默认配置
+	viper.SetDefault("telegram.enabled", false)
+	viper.SetDefault("telegram.bot_token", "")
+	viper.SetDefault("telegram.chat_id", "")
+	viper.SetDefault("telegram.message_thread_id", 0)
+	viper.SetDefault("telegram.instance_name", "FilmFusion")
+	viper.SetDefault("telegram.api_base", "https://api.telegram.org")
+	viper.SetDefault("telegram.timeout_seconds", 10)
+	viper.SetDefault("telegram.silent", false)
+	viper.SetDefault("telegram.notify_emby_brute_force", true)
+	viper.SetDefault("telegram.notify_system_brute_force", true)
 
 	// MoviePilot 默认配置
 	viper.SetDefault("moviepilot.api", "http://127.0.0.1:3001")
@@ -314,12 +371,7 @@ func setDefaults() {
 
 	// Emby 默认配置
 	viper.SetDefault("emby.add_current_media_info", true)
-	viper.SetDefault("emby.security.enabled", true)
-	viper.SetDefault("emby.security.window_minutes", 10)
-	viper.SetDefault("emby.security.max_failures_per_account_ip", 5)
-	viper.SetDefault("emby.security.max_failures_per_ip", 20)
-	viper.SetDefault("emby.security.block_minutes", 30)
-	viper.SetDefault("emby.security.trusted_proxy_cidrs", []string{})
+	setDefaultLoginSecurity("emby.security")
 	viper.SetDefault("emby.image_optimization.enabled", false)
 	setDefaultEmbyImageRule("emby.image_optimization.library_cover", true, 676, 380, 80)
 	setDefaultEmbyImageRule("emby.image_optimization.poster", true, 356, 534, 80)
@@ -359,36 +411,75 @@ func defaultEmbyImageOptimizationConfig() EmbyImageOptimizationConfig {
 	}
 }
 
-func defaultEmbySecurityConfig() EmbySecurityConfig {
-	return EmbySecurityConfig{
+func defaultLoginSecurityConfig() LoginSecurityConfig {
+	return LoginSecurityConfig{
 		Enabled: true, WindowMinutes: 10, MaxFailuresPerAccountIP: 5,
 		MaxFailuresPerIP: 20, BlockMinutes: 30, TrustedProxyCIDRs: []string{},
 	}
 }
 
-func applyEmbySecurityDefaults(settings *EmbySecurityConfig) {
-	defaults := defaultEmbySecurityConfig()
-	if settings.IsZero() && !viper.InConfig("emby.security") {
+func setDefaultLoginSecurity(prefix string) {
+	viper.SetDefault(prefix+".enabled", true)
+	viper.SetDefault(prefix+".window_minutes", 10)
+	viper.SetDefault(prefix+".max_failures_per_account_ip", 5)
+	viper.SetDefault(prefix+".max_failures_per_ip", 20)
+	viper.SetDefault(prefix+".block_minutes", 30)
+	viper.SetDefault(prefix+".trusted_proxy_cidrs", []string{})
+}
+
+func applyLoginSecurityDefaults(prefix string, settings *LoginSecurityConfig) {
+	defaults := defaultLoginSecurityConfig()
+	if settings.IsZero() && !viper.InConfig(prefix) {
 		*settings = defaults
 		return
 	}
-	if !viper.InConfig("emby.security.enabled") {
+	if !viper.InConfig(prefix + ".enabled") {
 		settings.Enabled = defaults.Enabled
 	}
-	if !viper.InConfig("emby.security.window_minutes") {
+	if !viper.InConfig(prefix + ".window_minutes") {
 		settings.WindowMinutes = defaults.WindowMinutes
 	}
-	if !viper.InConfig("emby.security.max_failures_per_account_ip") {
+	if !viper.InConfig(prefix + ".max_failures_per_account_ip") {
 		settings.MaxFailuresPerAccountIP = defaults.MaxFailuresPerAccountIP
 	}
-	if !viper.InConfig("emby.security.max_failures_per_ip") {
+	if !viper.InConfig(prefix + ".max_failures_per_ip") {
 		settings.MaxFailuresPerIP = defaults.MaxFailuresPerIP
 	}
-	if !viper.InConfig("emby.security.block_minutes") {
+	if !viper.InConfig(prefix + ".block_minutes") {
 		settings.BlockMinutes = defaults.BlockMinutes
 	}
 	if settings.TrustedProxyCIDRs == nil {
 		settings.TrustedProxyCIDRs = []string{}
+	}
+}
+
+func defaultTelegramConfig() TelegramConfig {
+	return TelegramConfig{
+		InstanceName: "FilmFusion", APIBase: "https://api.telegram.org", TimeoutSeconds: 10,
+		NotifyEmbyBruteForce: true, NotifySystemBruteForce: true,
+	}
+}
+
+func applyTelegramDefaults(settings *TelegramConfig) {
+	defaults := defaultTelegramConfig()
+	if settings.IsZero() && !viper.InConfig("telegram") {
+		*settings = defaults
+		return
+	}
+	if !viper.InConfig("telegram.instance_name") {
+		settings.InstanceName = defaults.InstanceName
+	}
+	if !viper.InConfig("telegram.api_base") {
+		settings.APIBase = defaults.APIBase
+	}
+	if !viper.InConfig("telegram.timeout_seconds") {
+		settings.TimeoutSeconds = defaults.TimeoutSeconds
+	}
+	if !viper.InConfig("telegram.notify_emby_brute_force") {
+		settings.NotifyEmbyBruteForce = defaults.NotifyEmbyBruteForce
+	}
+	if !viper.InConfig("telegram.notify_system_brute_force") {
+		settings.NotifySystemBruteForce = defaults.NotifySystemBruteForce
 	}
 }
 
@@ -436,15 +527,25 @@ func validateConfig(config *Config) error {
 	if config.JWT.Secret == "" {
 		return fmt.Errorf("JWT密钥未设置")
 	}
+	if err := ValidateLoginSecurity("FilmFusion", config.Server.Security); err != nil {
+		return err
+	}
 	if err := ValidateEmbySecurity(config.Emby.Security); err != nil {
+		return err
+	}
+	if err := ValidateTelegram(config.Telegram); err != nil {
 		return err
 	}
 	return nil
 }
 
 func ValidateEmbySecurity(settings EmbySecurityConfig) error {
+	return ValidateLoginSecurity("Emby", settings)
+}
+
+func ValidateLoginSecurity(name string, settings LoginSecurityConfig) error {
 	if settings.Enabled && (settings.WindowMinutes <= 0 || settings.MaxFailuresPerAccountIP <= 0 || settings.MaxFailuresPerIP <= 0 || settings.BlockMinutes <= 0) {
-		return fmt.Errorf("Emby 登录保护的统计窗口、失败阈值和封禁时长必须大于 0")
+		return fmt.Errorf("%s 登录保护的统计窗口、失败阈值和封禁时长必须大于 0", name)
 	}
 	for _, raw := range settings.TrustedProxyCIDRs {
 		raw = strings.TrimSpace(raw)
@@ -458,6 +559,29 @@ func ValidateEmbySecurity(settings EmbySecurityConfig) error {
 			continue
 		}
 		return fmt.Errorf("可信代理 IP/CIDR 无效: %s", raw)
+	}
+	return nil
+}
+
+func ValidateTelegram(settings TelegramConfig) error {
+	if settings.MessageThreadID < 0 {
+		return fmt.Errorf("Telegram 话题 ID 不能小于 0")
+	}
+	if !settings.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(settings.BotToken) == "" || strings.ContainsAny(settings.BotToken, "/\\\r\n\t ") {
+		return fmt.Errorf("Telegram Bot Token 未设置或格式无效")
+	}
+	if strings.TrimSpace(settings.ChatID) == "" {
+		return fmt.Errorf("Telegram Chat ID 不能为空")
+	}
+	if settings.TimeoutSeconds <= 0 {
+		return fmt.Errorf("Telegram 请求超时必须大于 0")
+	}
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(settings.APIBase))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("Telegram API 地址无效")
 	}
 	return nil
 }

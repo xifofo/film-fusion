@@ -4,6 +4,26 @@ server:
   password: ""
   download_115_concurrency: 1  # 115Open下载并发数
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
+  # FilmFusion 管理后台登录防爆破。直连时 trusted_proxy_cidrs 保持为空。
+  security:
+    enabled: true
+    window_minutes: 10
+    max_failures_per_account_ip: 5
+    max_failures_per_ip: 20
+    block_minutes: 30
+    trusted_proxy_cidrs: []
+
+telegram:
+  enabled: false
+  bot_token: ""              # 从 @BotFather 获取，后台读取时会脱敏
+  chat_id: ""                # 群组/频道 ID，例如 -1001234567890
+  message_thread_id: 0       # 论坛群话题 ID，0 表示不指定
+  instance_name: "FilmFusion"
+  api_base: "https://api.telegram.org"
+  timeout_seconds: 10
+  silent: false
+  notify_emby_brute_force: true
+  notify_system_brute_force: true
 
 moviepilot:
   api: "http://127.0.0.1:3001"

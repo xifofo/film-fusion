@@ -10,6 +10,14 @@ import (
 	"film-fusion/app/config"
 )
 
+type recordingSecurityNotifier struct {
+	alerts []SecurityAlert
+}
+
+func (n *recordingSecurityNotifier) NotifySecurityAlert(alert SecurityAlert) {
+	n.alerts = append(n.alerts, alert)
+}
+
 func testEmbySecurityConfig() *config.Config {
 	return &config.Config{Emby: config.EmbyConfig{Security: config.EmbySecurityConfig{
 		Enabled: true, WindowMinutes: 10, MaxFailuresPerAccountIP: 2,
@@ -90,5 +98,54 @@ func TestEmbyLoginProtectionSuccessClearsPairFailures(t *testing.T) {
 
 	if _, blocked := p.Inspect(loginRequest("198.51.100.9:4567", "")); blocked {
 		t.Fatal("successful login did not clear pair failures")
+	}
+}
+
+func TestAppLoginProtectionUsesServerSecurity(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Security: config.LoginSecurityConfig{
+		Enabled: true, WindowMinutes: 10, MaxFailuresPerAccountIP: 1,
+		MaxFailuresPerIP: 5, BlockMinutes: 30,
+	}}}
+	p := NewAppLoginProtection(cfg, nil)
+	req, _ := http.NewRequest(http.MethodPost, "http://film-fusion.test/api/auth/login", nil)
+	req.RemoteAddr = "198.51.100.12:4567"
+
+	attempt, blocked := p.InspectCredentials(req, "admin")
+	if blocked || attempt == nil {
+		t.Fatal("first FilmFusion login attempt unexpectedly blocked")
+	}
+	p.ObserveResponse(attempt, http.StatusUnauthorized)
+
+	if _, blocked := p.InspectCredentials(req, "admin"); !blocked {
+		t.Fatal("FilmFusion login was not blocked using server.security")
+	}
+}
+
+func TestLoginProtectionNotifiesOnlyWhenBlockStarts(t *testing.T) {
+	cfg := testEmbySecurityConfig()
+	notifier := &recordingSecurityNotifier{}
+	p := NewEmbyLoginProtection(cfg, nil, notifier)
+	now := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	p.now = func() time.Time { return now }
+	req := loginRequest("198.51.100.20:4567", "")
+
+	for i := 0; i < 2; i++ {
+		attempt, _ := p.Inspect(req)
+		p.ObserveResponse(attempt, http.StatusUnauthorized)
+	}
+	if len(notifier.alerts) != 1 {
+		t.Fatalf("alerts = %d, want 1", len(notifier.alerts))
+	}
+	alert := notifier.alerts[0]
+	if alert.Source != "emby" || alert.Scope != "account_ip" || alert.FailureCount != 2 {
+		t.Fatalf("unexpected alert: %#v", alert)
+	}
+
+	// 已封禁期间不会重复产生新的封禁告警。
+	if _, blocked := p.Inspect(req); !blocked {
+		t.Fatal("expected request to remain blocked")
+	}
+	if len(notifier.alerts) != 1 {
+		t.Fatalf("alerts after blocked inspect = %d", len(notifier.alerts))
 	}
 }

@@ -24,3 +24,41 @@ func TestValidateEmbySecurity(t *testing.T) {
 		t.Fatal("zero window was accepted")
 	}
 }
+
+func TestValidateFilmFusionLoginSecurity(t *testing.T) {
+	valid := LoginSecurityConfig{
+		Enabled: true, WindowMinutes: 10, MaxFailuresPerAccountIP: 5,
+		MaxFailuresPerIP: 20, BlockMinutes: 30,
+	}
+	if err := ValidateLoginSecurity("FilmFusion", valid); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+
+	invalid := valid
+	invalid.MaxFailuresPerIP = 0
+	if err := ValidateLoginSecurity("FilmFusion", invalid); err == nil {
+		t.Fatal("zero IP failure threshold was accepted")
+	}
+}
+
+func TestValidateTelegram(t *testing.T) {
+	valid := TelegramConfig{
+		Enabled: true, BotToken: "123456:test-token", ChatID: "-100123",
+		APIBase: "https://api.telegram.org", TimeoutSeconds: 10,
+	}
+	if err := ValidateTelegram(valid); err != nil {
+		t.Fatalf("valid Telegram config rejected: %v", err)
+	}
+
+	invalid := valid
+	invalid.BotToken = ""
+	if err := ValidateTelegram(invalid); err == nil {
+		t.Fatal("empty bot token was accepted")
+	}
+
+	invalid = valid
+	invalid.APIBase = "file:///tmp/telegram"
+	if err := ValidateTelegram(invalid); err == nil {
+		t.Fatal("non-HTTP API base was accepted")
+	}
+}

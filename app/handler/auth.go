@@ -5,8 +5,10 @@ import (
 	"film-fusion/app/config"
 	"film-fusion/app/database"
 	"film-fusion/app/model"
+	"film-fusion/app/service"
 	"film-fusion/app/utils"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,13 +18,15 @@ import (
 type AuthHandler struct {
 	config     *config.Config
 	jwtService *auth.JWTService
+	protection *service.EmbyLoginProtection
 }
 
 // NewAuthHandler 创建认证处理器
-func NewAuthHandler(cfg *config.Config) *AuthHandler {
+func NewAuthHandler(cfg *config.Config, protection *service.EmbyLoginProtection) *AuthHandler {
 	return &AuthHandler{
 		config:     cfg,
 		jwtService: auth.NewJWTService(cfg),
+		protection: protection,
 	}
 }
 
@@ -57,18 +61,16 @@ type LoginResponse struct {
 	ExpireAt int64       `json:"expire_at"`
 }
 
-// RegisterRequest 注册请求结构
-type RegisterRequest struct {
-	Username string `json:"username" binding:"required,min=3,max=20"`
-	Password string `json:"password" binding:"required,min=6"`
-	Email    string `json:"email" binding:"required,email"`
-}
-
 // Login 用户登录
 func (h *AuthHandler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, "请求参数错误: "+err.Error())
+		return
+	}
+	attempt, blocked := h.protection.InspectCredentials(c.Request, req.Username)
+	if blocked {
+		h.error(c, http.StatusUnauthorized, 401, "用户名或密码错误")
 		return
 	}
 
@@ -77,19 +79,22 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	db := database.GetDB()
 	result := db.Where("username = ?", req.Username).First(&user)
 	if result.Error != nil {
+		h.protection.ObserveResponse(attempt, http.StatusUnauthorized)
 		h.error(c, http.StatusUnauthorized, 401, "用户名或密码错误")
 		return
 	}
 
 	// 验证密码
 	if !utils.VerifyPassword(req.Password, user.Password) {
+		h.protection.ObserveResponse(attempt, http.StatusUnauthorized)
 		h.error(c, http.StatusUnauthorized, 401, "用户名或密码错误")
 		return
 	}
 
 	// 检查用户是否激活
-	if !user.IsActive {
-		h.error(c, http.StatusForbidden, 403, "用户账号已被禁用")
+	if !user.IsActive || !user.IsAdmin {
+		h.protection.ObserveResponse(attempt, http.StatusUnauthorized)
+		h.error(c, http.StatusUnauthorized, 401, "用户名或密码错误")
 		return
 	}
 
@@ -99,6 +104,7 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		h.error(c, http.StatusInternalServerError, 500, "生成令牌失败")
 		return
 	}
+	h.protection.ObserveResponse(attempt, http.StatusOK)
 
 	// 更新最后登录时间
 	now := time.Now()
@@ -115,64 +121,16 @@ func (h *AuthHandler) Login(c *gin.Context) {
 	}, "登录成功")
 }
 
-// Register 用户注册
-func (h *AuthHandler) Register(c *gin.Context) {
-	var req RegisterRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.error(c, http.StatusBadRequest, 400, "请求参数错误: "+err.Error())
-		return
-	}
-
-	db := database.GetDB()
-
-	// 检查用户名是否已存在
-	var existingUser model.User
-	if result := db.Where("username = ?", req.Username).First(&existingUser); result.Error == nil {
-		h.error(c, http.StatusConflict, 409, "用户名已存在")
-		return
-	}
-
-	// 检查邮箱是否已存在
-	if result := db.Where("email = ?", req.Email).First(&existingUser); result.Error == nil {
-		h.error(c, http.StatusConflict, 409, "邮箱已存在")
-		return
-	}
-
-	// 哈希密码
-	hashedPassword, err := utils.HashPassword(req.Password)
-	if err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "密码哈希失败")
-		return
-	}
-
-	// 创建新用户
-	user := model.User{
-		Username: req.Username,
-		Password: hashedPassword,
-		Email:    req.Email,
-		IsActive: true,
-	}
-
-	if err := db.Create(&user).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "创建用户失败")
-		return
-	}
-
-	h.success(c, user, "注册成功")
-}
-
 // RefreshToken 刷新令牌
 func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	authHeader := c.GetHeader("Authorization")
-	if authHeader == "" {
+	parts := strings.SplitN(authHeader, " ", 2)
+	if len(parts) != 2 || parts[0] != "Bearer" || strings.TrimSpace(parts[1]) == "" {
 		h.error(c, http.StatusUnauthorized, 401, "Authorization header is required")
 		return
 	}
 
-	// 提取token
-	token := authHeader[7:] // 去掉 "Bearer " 前缀
-
-	newToken, err := h.jwtService.RefreshToken(token)
+	newToken, err := h.jwtService.RefreshToken(parts[1])
 	if err != nil {
 		h.error(c, http.StatusUnauthorized, 401, "刷新令牌失败: "+err.Error())
 		return

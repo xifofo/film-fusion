@@ -45,6 +45,7 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 		"moviepilot.password":  h.cfg.MoviePilot.Password != "",
 		"tmdb.api_key":         h.cfg.TMDB.APIKey != "",
 		"tmdb.access_token":    h.cfg.TMDB.AccessToken != "",
+		"telegram.bot_token":   h.cfg.Telegram.BotToken != "",
 		"hdhive.api_key":       h.cfg.HDHive.APIKey != "",
 		"hdhive.access_token":  h.cfg.HDHive.AccessToken != "",
 		"hdhive.refresh_token": h.cfg.HDHive.RefreshToken != "",
@@ -55,6 +56,7 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v.MoviePilot.Password = ""
 	v.TMDB.APIKey = ""
 	v.TMDB.AccessToken = ""
+	v.Telegram.BotToken = ""
 	v.HDHive.APIKey = ""
 	v.HDHive.AccessToken = ""
 	v.HDHive.RefreshToken = ""
@@ -81,6 +83,12 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if in.Emby.Security.IsZero() {
 		in.Emby.Security = h.cfg.Emby.Security
 	}
+	if in.Server.Security.IsZero() {
+		in.Server.Security = h.cfg.Server.Security
+	}
+	if in.Telegram.IsZero() {
+		in.Telegram = h.cfg.Telegram
+	}
 
 	// 密钥脱敏：前端留空表示沿用旧值
 	if strings.TrimSpace(in.Server.Password) == "" {
@@ -100,6 +108,9 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	if strings.TrimSpace(in.TMDB.AccessToken) == "" {
 		in.TMDB.AccessToken = h.cfg.TMDB.AccessToken
+	}
+	if strings.TrimSpace(in.Telegram.BotToken) == "" {
+		in.Telegram.BotToken = h.cfg.Telegram.BotToken
 	}
 	if strings.TrimSpace(in.HDHive.APIKey) == "" {
 		in.HDHive.APIKey = h.cfg.HDHive.APIKey
@@ -138,6 +149,14 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	if err := config.ValidateEmbySecurity(in.Emby.Security); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if err := config.ValidateLoginSecurity("FilmFusion", in.Server.Security); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if err := config.ValidateTelegram(in.Telegram); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}

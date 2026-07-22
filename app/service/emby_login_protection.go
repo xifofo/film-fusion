@@ -57,9 +57,13 @@ type EmbyLoginSecuritySnapshot struct {
 
 // EmbyLoginProtection 对 Emby 登录失败做进程内滑动窗口计数和临时封禁。
 type EmbyLoginProtection struct {
-	cfg    *config.Config
-	logger *logger.Logger
-	now    func() time.Time
+	cfg              *config.Config
+	logger           *logger.Logger
+	settingsProvider func() config.LoginSecurityConfig
+	logLabel         string
+	alertSource      string
+	notifier         SecurityAlertNotifier
+	now              func() time.Time
 
 	mu     sync.Mutex
 	pairs  map[string]*loginFailureBucket
@@ -68,11 +72,37 @@ type EmbyLoginProtection struct {
 	nextID uint64
 }
 
-func NewEmbyLoginProtection(cfg *config.Config, log *logger.Logger) *EmbyLoginProtection {
+func NewEmbyLoginProtection(cfg *config.Config, log *logger.Logger, notifiers ...SecurityAlertNotifier) *EmbyLoginProtection {
+	return newLoginProtection(cfg, log, "EMBY SECURITY", "emby", firstNotifier(notifiers), func() config.LoginSecurityConfig {
+		if cfg == nil {
+			return config.LoginSecurityConfig{}
+		}
+		return cfg.Emby.Security
+	})
+}
+
+// NewAppLoginProtection 创建 FilmFusion 管理后台登录保护器。
+func NewAppLoginProtection(cfg *config.Config, log *logger.Logger, notifiers ...SecurityAlertNotifier) *EmbyLoginProtection {
+	return newLoginProtection(cfg, log, "APP SECURITY", "filmfusion", firstNotifier(notifiers), func() config.LoginSecurityConfig {
+		if cfg == nil {
+			return config.LoginSecurityConfig{}
+		}
+		return cfg.Server.Security
+	})
+}
+
+func firstNotifier(notifiers []SecurityAlertNotifier) SecurityAlertNotifier {
+	if len(notifiers) == 0 {
+		return nil
+	}
+	return notifiers[0]
+}
+
+func newLoginProtection(cfg *config.Config, log *logger.Logger, label, alertSource string, notifier SecurityAlertNotifier, settingsProvider func() config.LoginSecurityConfig) *EmbyLoginProtection {
 	return &EmbyLoginProtection{
-		cfg: cfg, logger: log, now: time.Now,
-		pairs:  make(map[string]*loginFailureBucket),
-		ips:    make(map[string]*loginFailureBucket),
+		cfg: cfg, logger: log, settingsProvider: settingsProvider, logLabel: label,
+		alertSource: alertSource, notifier: notifier, now: time.Now,
+		pairs: make(map[string]*loginFailureBucket), ips: make(map[string]*loginFailureBucket),
 		events: make([]EmbyLoginSecurityEvent, 0, 500),
 	}
 }
@@ -93,7 +123,14 @@ func (p *EmbyLoginProtection) Inspect(req *http.Request) (*EmbyLoginAttempt, boo
 	if p == nil || !p.settings().Enabled || !isEmbyLoginRequest(req) {
 		return nil, false
 	}
-	username := readEmbyLoginUsername(req)
+	return p.InspectCredentials(req, readEmbyLoginUsername(req))
+}
+
+// InspectCredentials 检查已由调用方解析出的登录用户名。
+func (p *EmbyLoginProtection) InspectCredentials(req *http.Request, username string) (*EmbyLoginAttempt, bool) {
+	if p == nil || !p.settings().Enabled || req == nil {
+		return nil, false
+	}
 	attempt := &EmbyLoginAttempt{IP: p.clientIP(req), Username: strings.TrimSpace(username)}
 	if attempt.IP == "" {
 		attempt.IP = "unknown"
@@ -190,11 +227,13 @@ func (p *EmbyLoginProtection) recordFailure(attempt *EmbyLoginAttempt) {
 		pair.blockedUntil = blockedUntil
 		p.appendEventLocked(now, "blocked", attempt, "account_ip")
 		p.logBlocked(attempt, "account_ip", blockedUntil)
+		p.notifyBlocked(attempt, "account_ip", len(pair.failures), blockedUntil, now)
 	}
 	if len(ip.failures) >= settings.MaxFailuresPerIP && !ip.blockedUntil.After(now) {
 		ip.blockedUntil = blockedUntil
 		p.appendEventLocked(now, "blocked", attempt, "ip")
 		p.logBlocked(attempt, "ip", blockedUntil)
+		p.notifyBlocked(attempt, "ip", len(ip.failures), blockedUntil, now)
 	}
 }
 
@@ -229,8 +268,18 @@ func (p *EmbyLoginProtection) appendEventLocked(now time.Time, eventType string,
 
 func (p *EmbyLoginProtection) logBlocked(attempt *EmbyLoginAttempt, scope string, until time.Time) {
 	if p.logger != nil {
-		p.logger.Warnf("[EMBY SECURITY] 登录已临时封禁 scope=%s ip=%s username=%q until=%s", scope, attempt.IP, attempt.Username, until.Format(time.RFC3339))
+		p.logger.Warnf("[%s] 登录已临时封禁 scope=%s ip=%s username=%q until=%s", p.logLabel, scope, attempt.IP, attempt.Username, until.Format(time.RFC3339))
 	}
+}
+
+func (p *EmbyLoginProtection) notifyBlocked(attempt *EmbyLoginAttempt, scope string, failureCount int, until, now time.Time) {
+	if p.notifier == nil {
+		return
+	}
+	p.notifier.NotifySecurityAlert(SecurityAlert{
+		Source: p.alertSource, IP: attempt.IP, Username: attempt.Username, Scope: scope,
+		FailureCount: failureCount, BlockedUntil: until, TriggeredAt: now,
+	})
 }
 
 func (p *EmbyLoginProtection) Snapshot() EmbyLoginSecuritySnapshot {
@@ -313,7 +362,7 @@ func (p *EmbyLoginProtection) Unblock(scope, ip, username string) bool {
 	return removed
 }
 
-func (p *EmbyLoginProtection) pruneLocked(now time.Time, settings config.EmbySecurityConfig) {
+func (p *EmbyLoginProtection) pruneLocked(now time.Time, settings config.LoginSecurityConfig) {
 	windowStart := now.Add(-time.Duration(settings.WindowMinutes) * time.Minute)
 	prune := func(buckets map[string]*loginFailureBucket) {
 		for key, bucket := range buckets {
@@ -337,10 +386,10 @@ func (p *EmbyLoginProtection) pruneLocked(now time.Time, settings config.EmbySec
 	prune(p.ips)
 }
 
-func (p *EmbyLoginProtection) settings() config.EmbySecurityConfig {
-	settings := config.EmbySecurityConfig{}
-	if p != nil && p.cfg != nil {
-		settings = p.cfg.Emby.Security
+func (p *EmbyLoginProtection) settings() config.LoginSecurityConfig {
+	settings := config.LoginSecurityConfig{}
+	if p != nil && p.settingsProvider != nil {
+		settings = p.settingsProvider()
 	}
 	if settings.WindowMinutes <= 0 {
 		settings.WindowMinutes = 10
