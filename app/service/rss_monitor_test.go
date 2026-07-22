@@ -205,6 +205,64 @@ func TestRSSRefreshBuildsBaselineThenNotifiesNewMatch(t *testing.T) {
 	}
 }
 
+func TestRSSRefreshProcessesMultipleSourcesIndependently(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:rss-monitor-multi-source?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.RSSMonitorSetting{}, &model.RSSNotificationRule{}, &model.RSSMonitorItem{}); err != nil {
+		t.Fatal(err)
+	}
+
+	transport := rssRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if strings.Contains(request.URL.Host, "broken") {
+			return nil, errors.New("source unavailable")
+		}
+		name := strings.Split(request.URL.Host, ".")[0]
+		body := fmt.Sprintf(`<?xml version="1.0"?><rss version="2.0"><channel><title>%s feed</title><item><title>%s item</title><guid>%s-guid</guid></item></channel></rss>`, name, name, name)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/rss+xml"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})
+
+	monitor := NewRSSMonitorService(&config.Config{}, nil, &recordingRSSSender{}, nil)
+	monitor.db = db
+	monitor.client = &http.Client{Transport: transport}
+	for _, input := range []RSSSettingsInput{
+		{Enabled: true, FeedName: "Alpha", FeedURL: "https://alpha.example/feed", IntervalMinutes: 2},
+		{Enabled: true, FeedName: "Beta", FeedURL: "https://beta.example/feed", IntervalMinutes: 5},
+		{Enabled: true, FeedName: "Broken", FeedURL: "https://broken.example/feed", IntervalMinutes: 10},
+	} {
+		if _, err := monitor.CreateSource(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := monitor.Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.SourceResults) != 3 || result.NewItems != 2 || result.FailedSources != 1 {
+		t.Fatalf("unexpected aggregate result: %+v", result)
+	}
+	var items []model.RSSMonitorItem
+	if err := db.Order("source_id ASC").Find(&items).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].SourceName != "Alpha" || items[1].SourceName != "Beta" {
+		t.Fatalf("items should retain their source identity: %+v", items)
+	}
+	var broken model.RSSMonitorSetting
+	if err := db.Where("feed_name = ?", "Broken").First(&broken).Error; err != nil {
+		t.Fatal(err)
+	}
+	if broken.LastError == "" || broken.LastCheckedAt == nil {
+		t.Fatalf("broken source should record its own error: %+v", broken)
+	}
+}
+
 type retryRSSRecognizer struct {
 	calls []string
 }

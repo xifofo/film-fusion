@@ -73,19 +73,26 @@ type rssXMLItem struct {
 }
 
 type RSSRefreshResult struct {
-	Baseline       bool      `json:"baseline"`
-	Fetched        int       `json:"fetched"`
-	NewItems       int       `json:"new_items"`
-	Matched        int       `json:"matched"`
-	Notified       int       `json:"notified"`
-	Failed         int       `json:"failed"`
-	NotModified    bool      `json:"not_modified"`
-	CompletedAt    time.Time `json:"completed_at"`
-	SourceFeedName string    `json:"source_feed_name,omitempty"`
+	Baseline       bool               `json:"baseline"`
+	Fetched        int                `json:"fetched"`
+	NewItems       int                `json:"new_items"`
+	Matched        int                `json:"matched"`
+	Notified       int                `json:"notified"`
+	Failed         int                `json:"failed"`
+	NotModified    bool               `json:"not_modified"`
+	CompletedAt    time.Time          `json:"completed_at"`
+	SourceFeedName string             `json:"source_feed_name,omitempty"`
+	SourceID       uint               `json:"source_id,omitempty"`
+	SourceName     string             `json:"source_name,omitempty"`
+	Error          string             `json:"error,omitempty"`
+	FailedSources  int                `json:"failed_sources,omitempty"`
+	SourceResults  []RSSRefreshResult `json:"source_results,omitempty"`
 }
 
 type RSSMonitorDashboard struct {
-	Settings      model.RSSMonitorSetting     `json:"settings"`
+	// Settings is kept for backwards compatibility with single-source clients.
+	Settings      *model.RSSMonitorSetting    `json:"settings,omitempty"`
+	Sources       []model.RSSMonitorSetting   `json:"sources"`
 	Rules         []model.RSSNotificationRule `json:"rules"`
 	RecentItems   []model.RSSMonitorItem      `json:"recent_items"`
 	Running       bool                        `json:"running"`
@@ -152,22 +159,6 @@ func (s *RSSMonitorService) EnsureDefaults() error {
 		return errors.New("RSS 监控数据库未初始化")
 	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		var setting model.RSSMonitorSetting
-		createdSetting := false
-		err := tx.First(&setting, 1).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			setting = model.RSSMonitorSetting{ID: 1, FeedName: "Torrent RSS", IntervalMinutes: defaultRSSIntervalMinutes}
-			if err := tx.Create(&setting).Error; err != nil {
-				return err
-			}
-			createdSetting = true
-		} else if err != nil {
-			return err
-		}
-		if !createdSetting {
-			return nil
-		}
-
 		var count int64
 		if err := tx.Model(&model.RSSNotificationRule{}).Count(&count).Error; err != nil {
 			return err
@@ -216,10 +207,10 @@ func (s *RSSMonitorService) Stop() {
 func (s *RSSMonitorService) scheduleLoop() {
 	defer s.wg.Done()
 	for {
-		setting, err := s.getSetting()
+		sources, err := s.listEnabledSources()
 		delay := time.Hour
-		if err == nil && setting.Enabled && strings.TrimSpace(setting.FeedURL) != "" {
-			delay = nextRSSDelay(setting, time.Now())
+		if err == nil && len(sources) > 0 {
+			delay = nextRSSSourcesDelay(sources, time.Now())
 		}
 		timer := time.NewTimer(delay)
 		select {
@@ -230,11 +221,22 @@ func (s *RSSMonitorService) scheduleLoop() {
 			timer.Stop()
 			continue
 		case <-timer.C:
-			if _, err := s.Refresh(s.ctx); err != nil && !errors.Is(err, ErrRSSRefreshRunning) && s.log != nil {
+			if _, err := s.refresh(s.ctx, true); err != nil && !errors.Is(err, ErrRSSRefreshRunning) && s.log != nil {
 				s.log.Warnf("[RSS] 定时刷新失败: %v", err)
 			}
 		}
 	}
+}
+
+func nextRSSSourcesDelay(sources []model.RSSMonitorSetting, now time.Time) time.Duration {
+	delay := time.Hour
+	for _, source := range sources {
+		candidate := nextRSSDelay(source, now)
+		if candidate < delay {
+			delay = candidate
+		}
+	}
+	return delay
 }
 
 func nextRSSDelay(setting model.RSSMonitorSetting, now time.Time) time.Duration {
@@ -260,10 +262,16 @@ func (s *RSSMonitorService) Wake() {
 	}
 }
 
-func (s *RSSMonitorService) getSetting() (model.RSSMonitorSetting, error) {
-	var setting model.RSSMonitorSetting
-	err := s.db.First(&setting, 1).Error
-	return setting, err
+func (s *RSSMonitorService) listSources() ([]model.RSSMonitorSetting, error) {
+	var sources []model.RSSMonitorSetting
+	err := s.db.Order("id ASC").Find(&sources).Error
+	return sources, err
+}
+
+func (s *RSSMonitorService) listEnabledSources() ([]model.RSSMonitorSetting, error) {
+	var sources []model.RSSMonitorSetting
+	err := s.db.Where("enabled = ? AND feed_url <> ?", true, "").Order("id ASC").Find(&sources).Error
+	return sources, err
 }
 
 func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
@@ -273,7 +281,7 @@ func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	setting, err := s.getSetting()
+	sources, err := s.listSources()
 	if err != nil {
 		return RSSMonitorDashboard{}, err
 	}
@@ -289,15 +297,19 @@ func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
 	s.db.Model(&model.RSSMonitorItem{}).Count(&totalSeen)
 	s.db.Model(&model.RSSMonitorItem{}).Where("notification_status = ?", model.RSSNotificationSent).Count(&totalNotified)
 	telegramReady := s.cfg != nil && s.cfg.Telegram.Enabled && strings.TrimSpace(s.cfg.Telegram.BotToken) != "" && strings.TrimSpace(s.cfg.Telegram.ChatID) != ""
-	return RSSMonitorDashboard{
-		Settings:      setting,
+	dashboard := RSSMonitorDashboard{
+		Sources:       sources,
 		Rules:         rules,
 		RecentItems:   items,
 		Running:       s.running.Load(),
 		TelegramReady: telegramReady,
 		TotalSeen:     totalSeen,
 		TotalNotified: totalNotified,
-	}, nil
+	}
+	if len(sources) > 0 {
+		dashboard.Settings = &sources[0]
+	}
+	return dashboard, nil
 }
 
 type RSSSettingsInput struct {
@@ -307,31 +319,57 @@ type RSSSettingsInput struct {
 	IntervalMinutes int    `json:"interval_minutes"`
 }
 
-func (s *RSSMonitorService) UpdateSettings(input RSSSettingsInput) (model.RSSMonitorSetting, error) {
+func validateRSSSettingsInput(input *RSSSettingsInput) error {
 	input.FeedName = strings.TrimSpace(input.FeedName)
 	input.FeedURL = strings.TrimSpace(input.FeedURL)
 	if input.FeedName == "" {
 		input.FeedName = "Torrent RSS"
 	}
 	if len(input.FeedName) > 120 {
-		return model.RSSMonitorSetting{}, errors.New("RSS 源名称不能超过 120 个字符")
+		return errors.New("RSS 源名称不能超过 120 个字符")
 	}
 	if input.IntervalMinutes < 1 || input.IntervalMinutes > 1440 {
-		return model.RSSMonitorSetting{}, errors.New("刷新间隔必须在 1 到 1440 分钟之间")
+		return errors.New("刷新间隔必须在 1 到 1440 分钟之间")
 	}
 	if input.FeedURL == "" && input.Enabled {
-		return model.RSSMonitorSetting{}, errors.New("启用监控前请填写 RSS 地址")
+		return errors.New("启用监控前请填写 RSS 地址")
 	}
 	if input.FeedURL != "" {
 		parsed, err := url.ParseRequestURI(input.FeedURL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-			return model.RSSMonitorSetting{}, errors.New("RSS 地址必须是有效的 HTTP 或 HTTPS URL")
+			return errors.New("RSS 地址必须是有效的 HTTP 或 HTTPS URL")
 		}
+	}
+	return nil
+}
+
+func (s *RSSMonitorService) CreateSource(input RSSSettingsInput) (model.RSSMonitorSetting, error) {
+	if err := validateRSSSettingsInput(&input); err != nil {
+		return model.RSSMonitorSetting{}, err
 	}
 	if err := s.EnsureDefaults(); err != nil {
 		return model.RSSMonitorSetting{}, err
 	}
-	current, err := s.getSetting()
+	source := model.RSSMonitorSetting{
+		Enabled: input.Enabled, FeedName: input.FeedName, FeedURL: input.FeedURL,
+		IntervalMinutes: input.IntervalMinutes,
+	}
+	if err := s.db.Create(&source).Error; err != nil {
+		return model.RSSMonitorSetting{}, err
+	}
+	s.Wake()
+	return source, nil
+}
+
+func (s *RSSMonitorService) UpdateSource(id uint, input RSSSettingsInput) (model.RSSMonitorSetting, error) {
+	if id == 0 {
+		return model.RSSMonitorSetting{}, errors.New("RSS 源 ID 无效")
+	}
+	if err := validateRSSSettingsInput(&input); err != nil {
+		return model.RSSMonitorSetting{}, err
+	}
+	var current model.RSSMonitorSetting
+	err := s.db.First(&current, id).Error
 	if err != nil {
 		return model.RSSMonitorSetting{}, err
 	}
@@ -349,11 +387,53 @@ func (s *RSSMonitorService) UpdateSettings(input RSSSettingsInput) (model.RSSMon
 		updates["last_success_at"] = nil
 		updates["last_error"] = ""
 	}
-	if err := s.db.Model(&model.RSSMonitorSetting{}).Where("id = ?", 1).Updates(updates).Error; err != nil {
+	if err := s.db.Model(&current).Updates(updates).Error; err != nil {
 		return model.RSSMonitorSetting{}, err
 	}
 	s.Wake()
-	return s.getSetting()
+	if err := s.db.First(&current, id).Error; err != nil {
+		return model.RSSMonitorSetting{}, err
+	}
+	return current, nil
+}
+
+// UpdateSettings preserves the original single-source API by updating source 1,
+// or creating the first source when upgrading an empty installation.
+func (s *RSSMonitorService) UpdateSettings(input RSSSettingsInput) (model.RSSMonitorSetting, error) {
+	var source model.RSSMonitorSetting
+	err := s.db.First(&source, 1).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		input.FeedName = strings.TrimSpace(input.FeedName)
+		input.FeedURL = strings.TrimSpace(input.FeedURL)
+		if err := validateRSSSettingsInput(&input); err != nil {
+			return model.RSSMonitorSetting{}, err
+		}
+		source = model.RSSMonitorSetting{ID: 1, Enabled: input.Enabled, FeedName: input.FeedName, FeedURL: input.FeedURL, IntervalMinutes: input.IntervalMinutes}
+		if err := s.db.Create(&source).Error; err != nil {
+			return model.RSSMonitorSetting{}, err
+		}
+		s.Wake()
+		return source, nil
+	}
+	if err != nil {
+		return model.RSSMonitorSetting{}, err
+	}
+	return s.UpdateSource(1, input)
+}
+
+func (s *RSSMonitorService) DeleteSource(id uint) error {
+	if id == 0 {
+		return errors.New("RSS 源 ID 无效")
+	}
+	result := s.db.Delete(&model.RSSMonitorSetting{}, id)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	s.Wake()
+	return nil
 }
 
 func (s *RSSMonitorService) ListRules() ([]model.RSSNotificationRule, error) {
@@ -471,29 +551,76 @@ func (s *RSSMonitorService) TestRule(rule model.RSSNotificationRule, item RSSFee
 }
 
 func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, error) {
+	return s.refresh(ctx, false)
+}
+
+func (s *RSSMonitorService) refresh(ctx context.Context, dueOnly bool) (RSSRefreshResult, error) {
 	if !s.running.CompareAndSwap(false, true) {
 		return RSSRefreshResult{}, ErrRSSRefreshRunning
 	}
 	defer s.running.Store(false)
 
-	setting, err := s.getSetting()
+	sources, err := s.listEnabledSources()
 	if err != nil {
 		return RSSRefreshResult{}, err
 	}
-	if strings.TrimSpace(setting.FeedURL) == "" {
-		return RSSRefreshResult{}, errors.New("RSS 地址未配置")
+	if len(sources) == 0 {
+		return RSSRefreshResult{}, errors.New("没有已启用的 RSS 源")
 	}
-	result := RSSRefreshResult{Baseline: !setting.Initialized}
+
+	now := time.Now()
+	result := RSSRefreshResult{Baseline: true, NotModified: true, CompletedAt: now}
+	for _, source := range sources {
+		if dueOnly && source.LastCheckedAt != nil && nextRSSDelay(source, now) > time.Second {
+			continue
+		}
+		sourceResult, refreshErr := s.refreshSource(ctx, source)
+		if refreshErr != nil {
+			sourceResult.Error = refreshErr.Error()
+			result.FailedSources++
+			if s.log != nil {
+				s.log.Warnf("[RSS] 源 %s 刷新失败: %v", source.FeedName, refreshErr)
+			}
+		}
+		result.SourceResults = append(result.SourceResults, sourceResult)
+		result.Fetched += sourceResult.Fetched
+		result.NewItems += sourceResult.NewItems
+		result.Matched += sourceResult.Matched
+		result.Notified += sourceResult.Notified
+		result.Failed += sourceResult.Failed
+		result.Baseline = result.Baseline && sourceResult.Baseline
+		result.NotModified = result.NotModified && sourceResult.NotModified
+	}
+	if len(result.SourceResults) == 0 {
+		return result, nil
+	}
+	if len(result.SourceResults) == 1 {
+		result.SourceID = result.SourceResults[0].SourceID
+		result.SourceName = result.SourceResults[0].SourceName
+		result.SourceFeedName = result.SourceResults[0].SourceFeedName
+		result.Error = result.SourceResults[0].Error
+	}
+	s.pruneOldItems(5000)
+	return result, nil
+}
+
+func (s *RSSMonitorService) refreshSource(ctx context.Context, setting model.RSSMonitorSetting) (RSSRefreshResult, error) {
+	result := RSSRefreshResult{
+		Baseline:   !setting.Initialized,
+		SourceID:   setting.ID,
+		SourceName: setting.FeedName,
+	}
 	feed, notModified, etag, lastModified, err := s.fetch(ctx, setting)
 	now := time.Now()
 	if err != nil {
-		s.recordRefreshFailure(now, err)
+		s.recordRefreshFailure(setting.ID, now, err)
 		return result, err
 	}
 	result.NotModified = notModified
 	result.CompletedAt = now
 	if notModified {
 		s.recordRefreshSuccess(
+			setting.ID,
 			now,
 			rssFirstNonEmpty(etag, setting.ETag),
 			rssFirstNonEmpty(lastModified, setting.LastModified),
@@ -506,7 +633,7 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 
 	rules, err := s.ListRules()
 	if err != nil {
-		s.recordRefreshFailure(now, err)
+		s.recordRefreshFailure(setting.ID, now, err)
 		return result, err
 	}
 	activeRules := make([]model.RSSNotificationRule, 0, len(rules))
@@ -535,7 +662,7 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 		fingerprint := rssFingerprint(setting.FeedURL, feedItem)
 		var count int64
 		if err := s.db.Model(&model.RSSMonitorItem{}).Where("fingerprint = ?", fingerprint).Count(&count).Error; err != nil {
-			s.recordRefreshFailure(now, err)
+			s.recordRefreshFailure(setting.ID, now, err)
 			return result, fmt.Errorf("查询 RSS 去重记录失败: %w", err)
 		}
 		if count > 0 {
@@ -543,6 +670,8 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 		}
 
 		stored := model.RSSMonitorItem{
+			SourceID:           setting.ID,
+			SourceName:         setting.FeedName,
 			Fingerprint:        fingerprint,
 			GUID:               feedItem.GUID,
 			Title:              feedItem.Title,
@@ -556,7 +685,7 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 		if result.Baseline {
 			stored.NotificationStatus = model.RSSNotificationBaseline
 			if err := s.db.Create(&stored).Error; err != nil {
-				s.recordRefreshFailure(now, err)
+				s.recordRefreshFailure(setting.ID, now, err)
 				return result, fmt.Errorf("保存 RSS 基线记录失败: %w", err)
 			}
 			result.NewItems++
@@ -579,7 +708,7 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 			stored.RuleName = matchedRule.Name
 		}
 		if err := s.db.Create(&stored).Error; err != nil {
-			s.recordRefreshFailure(now, err)
+			s.recordRefreshFailure(setting.ID, now, err)
 			return result, fmt.Errorf("保存 RSS 新条目失败: %w", err)
 		}
 		result.NewItems++
@@ -647,8 +776,7 @@ func (s *RSSMonitorService) Refresh(ctx context.Context) (RSSRefreshResult, erro
 		})
 	}
 
-	s.recordRefreshSuccess(now, etag, lastModified, true)
-	s.pruneOldItems(5000)
+	s.recordRefreshSuccess(setting.ID, now, etag, lastModified, true)
 	return result, nil
 }
 
@@ -1064,14 +1192,14 @@ func safeRSSNetworkError(err error, rawURL string) string {
 	return message
 }
 
-func (s *RSSMonitorService) recordRefreshFailure(checkedAt time.Time, refreshErr error) {
-	s.db.Model(&model.RSSMonitorSetting{}).Where("id = ?", 1).Updates(map[string]any{
+func (s *RSSMonitorService) recordRefreshFailure(sourceID uint, checkedAt time.Time, refreshErr error) {
+	s.db.Model(&model.RSSMonitorSetting{}).Where("id = ?", sourceID).Updates(map[string]any{
 		"last_checked_at": checkedAt,
 		"last_error":      refreshErr.Error(),
 	})
 }
 
-func (s *RSSMonitorService) recordRefreshSuccess(checkedAt time.Time, etag, lastModified string, initialized bool) {
+func (s *RSSMonitorService) recordRefreshSuccess(sourceID uint, checkedAt time.Time, etag, lastModified string, initialized bool) {
 	updates := map[string]any{
 		"last_checked_at": checkedAt,
 		"last_success_at": checkedAt,
@@ -1080,7 +1208,7 @@ func (s *RSSMonitorService) recordRefreshSuccess(checkedAt time.Time, etag, last
 		"etag":            etag,
 		"last_modified":   lastModified,
 	}
-	s.db.Model(&model.RSSMonitorSetting{}).Where("id = ?", 1).Updates(updates)
+	s.db.Model(&model.RSSMonitorSetting{}).Where("id = ?", sourceID).Updates(updates)
 }
 
 func (s *RSSMonitorService) pruneOldItems(keep int) {

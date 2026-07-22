@@ -9,7 +9,7 @@ const (
 	RSSNotificationFailed   = "failed"
 )
 
-// RSSMonitorSetting stores the single RSS source managed by FilmFusion.
+// RSSMonitorSetting stores one RSS source managed by FilmFusion.
 type RSSMonitorSetting struct {
 	ID              uint       `gorm:"primarykey" json:"id"`
 	Enabled         bool       `gorm:"default:false" json:"enabled"`
@@ -47,6 +47,8 @@ func (RSSNotificationRule) TableName() string { return "rss_notification_rules" 
 // RSSMonitorItem is both the deduplication ledger and recent activity history.
 type RSSMonitorItem struct {
 	ID                 uint       `gorm:"primarykey" json:"id"`
+	SourceID           uint       `gorm:"index" json:"source_id"`
+	SourceName         string     `gorm:"size:120;index" json:"source_name,omitempty"`
 	Fingerprint        string     `gorm:"size:64;not null;uniqueIndex" json:"-"`
 	GUID               string     `gorm:"size:255;index" json:"guid,omitempty"`
 	Title              string     `gorm:"type:text;not null" json:"title"`

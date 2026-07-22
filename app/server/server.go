@@ -328,6 +328,9 @@ func (s *Server) setupRoutes() {
 		{
 			rssMonitor.GET("", rssMonitorHandler.Dashboard)
 			rssMonitor.PUT("/settings", rssMonitorHandler.UpdateSettings)
+			rssMonitor.POST("/sources", rssMonitorHandler.CreateSource)
+			rssMonitor.PUT("/sources/:id", rssMonitorHandler.UpdateSource)
+			rssMonitor.DELETE("/sources/:id", rssMonitorHandler.DeleteSource)
 			rssMonitor.POST("/refresh", rssMonitorHandler.Refresh)
 			rssMonitor.POST("/rules", rssMonitorHandler.CreateRule)
 			rssMonitor.PUT("/rules/:id", rssMonitorHandler.UpdateRule)

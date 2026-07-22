@@ -46,6 +46,60 @@ func (h *RSSMonitorHandler) UpdateSettings(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("RSS 配置已保存", setting))
 }
 
+func (h *RSSMonitorHandler) CreateSource(c *gin.Context) {
+	var source service.RSSSettingsInput
+	if err := c.ShouldBindJSON(&source); err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("请求参数错误", err.Error()))
+		return
+	}
+	created, err := h.service.CreateSource(source)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("创建 RSS 源失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusCreated, NewSuccessResponse("RSS 源已创建", created))
+}
+
+func (h *RSSMonitorHandler) UpdateSource(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("RSS 源 ID 无效", ""))
+		return
+	}
+	var source service.RSSSettingsInput
+	if err := c.ShouldBindJSON(&source); err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("请求参数错误", err.Error()))
+		return
+	}
+	updated, err := h.service.UpdateSource(uint(id), source)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		c.JSON(http.StatusNotFound, NewErrorResponse("RSS 源不存在", ""))
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("更新 RSS 源失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("RSS 源已更新", updated))
+}
+
+func (h *RSSMonitorHandler) DeleteSource(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil || id == 0 {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("RSS 源 ID 无效", ""))
+		return
+	}
+	if err := h.service.DeleteSource(uint(id)); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, NewErrorResponse("RSS 源不存在", ""))
+			return
+		}
+		c.JSON(http.StatusInternalServerError, NewErrorResponse("删除 RSS 源失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("RSS 源已删除", gin.H{}))
+}
+
 func (h *RSSMonitorHandler) Refresh(c *gin.Context) {
 	result, err := h.service.Refresh(c.Request.Context())
 	if errors.Is(err, service.ErrRSSRefreshRunning) {
