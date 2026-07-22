@@ -237,6 +237,14 @@ type MoviePilotMediaInfo struct {
 	Category            string
 	TitleYear           string
 	TmdbID              string
+	PosterPath          string
+	BackdropPath        string
+	Rating              float64
+	Genres              []string
+	SeasonEpisode       string
+	ResourceType        string
+	ResourcePix         string
+	VideoEncode         string
 	GenreIDs            []string
 	OriginalLanguages   []string
 	OriginCountries     []string
@@ -246,15 +254,18 @@ type MoviePilotMediaInfo struct {
 }
 
 type MoviePilotSearchResult struct {
-	MediaType     string `json:"media_type"`
-	Title         string `json:"title"`
-	OriginalTitle string `json:"original_title,omitempty"`
-	Year          string `json:"year,omitempty"`
-	TitleYear     string `json:"title_year,omitempty"`
-	TmdbID        string `json:"tmdb_id"`
-	Category      string `json:"category,omitempty"`
-	PosterPath    string `json:"poster_path,omitempty"`
-	Overview      string `json:"overview,omitempty"`
+	MediaType     string   `json:"media_type"`
+	Title         string   `json:"title"`
+	OriginalTitle string   `json:"original_title,omitempty"`
+	Year          string   `json:"year,omitempty"`
+	TitleYear     string   `json:"title_year,omitempty"`
+	TmdbID        string   `json:"tmdb_id"`
+	Category      string   `json:"category,omitempty"`
+	PosterPath    string   `json:"poster_path,omitempty"`
+	BackdropPath  string   `json:"backdrop_path,omitempty"`
+	Rating        float64  `json:"rating,omitempty"`
+	Genres        []string `json:"genres,omitempty"`
+	Overview      string   `json:"overview,omitempty"`
 }
 
 func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilotSearchResult, error) {
@@ -274,6 +285,9 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 
 	body, err := s.doGet("/api/v1/media/search", values)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateMoviePilotSuccess(body); err != nil {
 		return nil, err
 	}
 
@@ -298,9 +312,26 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
 	values := url.Values{}
 	values.Set("path", filePath)
+	return s.recognizeMedia("/api/v1/media/recognize_file", values)
+}
 
-	body, err := s.doGet("/api/v1/media/recognize_file", values)
+// RecognizeTitle identifies a release title without treating it as a filesystem path.
+func (s *MoviePilotService) RecognizeTitle(title string) (MoviePilotMediaInfo, map[string]any, error) {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return MoviePilotMediaInfo{}, nil, errors.New("识别标题不能为空")
+	}
+	values := url.Values{}
+	values.Set("title", title)
+	return s.recognizeMedia("/api/v1/media/recognize", values)
+}
+
+func (s *MoviePilotService) recognizeMedia(endpoint string, values url.Values) (MoviePilotMediaInfo, map[string]any, error) {
+	body, err := s.doGet(endpoint, values)
 	if err != nil {
+		return MoviePilotMediaInfo{}, nil, err
+	}
+	if err := validateMoviePilotSuccess(body); err != nil {
 		return MoviePilotMediaInfo{}, nil, err
 	}
 
@@ -628,7 +659,10 @@ func parseSearchResult(data map[string]any) MoviePilotSearchResult {
 		TitleYear:     info.TitleYear,
 		TmdbID:        tmdbID,
 		Category:      info.Category,
-		PosterPath:    extractString(base, "poster_path", "posterPath", "poster", "image"),
+		PosterPath:    firstNonEmptyMoviePilotString(extractString(base, "poster_path", "posterPath", "poster", "image", "cover", "cover_url"), info.PosterPath),
+		BackdropPath:  firstNonEmptyMoviePilotString(extractString(base, "backdrop_path", "backdropPath", "backdrop", "background", "background_image"), info.BackdropPath),
+		Rating:        firstNonZeroMoviePilotFloat(extractFloat64(base, "vote_average", "voteAverage", "rating", "score"), info.Rating),
+		Genres:        firstNonEmptyMoviePilotSlice(extractNamedStringSlice(base, "genre_names", "genreNames", "genres"), info.Genres),
 		Overview:      extractString(base, "overview", "description", "desc"),
 	}
 }
@@ -682,6 +716,28 @@ func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {
 	info.TmdbID = extractString(base, "tmdb_id", "tmdbId")
 	if info.TmdbID == "" {
 		info.TmdbID = extractString(data, "tmdb_id", "tmdbId")
+	}
+	info.PosterPath = extractString(base, "poster_path", "posterPath", "poster", "image", "cover", "cover_url")
+	if info.PosterPath == "" {
+		info.PosterPath = extractString(data, "poster_path", "posterPath", "poster", "image", "cover", "cover_url")
+	}
+	info.BackdropPath = extractString(base, "backdrop_path", "backdropPath", "backdrop", "background", "background_image")
+	if info.BackdropPath == "" {
+		info.BackdropPath = extractString(data, "backdrop_path", "backdropPath", "backdrop", "background", "background_image")
+	}
+	info.Rating = extractFloat64(base, "vote_average", "voteAverage", "rating", "score")
+	if info.Rating == 0 {
+		info.Rating = extractFloat64(data, "vote_average", "voteAverage", "rating", "score")
+	}
+	info.Genres = extractNamedStringSlice(base, "genre_names", "genreNames", "genres")
+	if len(info.Genres) == 0 {
+		info.Genres = extractNamedStringSlice(data, "genre_names", "genreNames", "genres")
+	}
+	info.SeasonEpisode = extractSeasonEpisode(data)
+	if raw, ok := data["meta_info"].(map[string]any); ok {
+		info.ResourceType = extractString(raw, "resource_type", "resourceType")
+		info.ResourcePix = extractString(raw, "resource_pix", "resourcePix")
+		info.VideoEncode = extractString(raw, "video_encode", "videoEncode")
 	}
 
 	info.Year = extractYear(base)
@@ -751,6 +807,26 @@ func extractInt64(data map[string]any, keys ...string) int64 {
 				}
 			case string:
 				if n, err := strconv.ParseInt(typed, 10, 64); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func extractFloat64(data map[string]any, keys ...string) float64 {
+	for _, key := range keys {
+		if val, ok := data[key]; ok {
+			switch typed := val.(type) {
+			case float64:
+				return typed
+			case json.Number:
+				if n, err := typed.Float64(); err == nil {
+					return n
+				}
+			case string:
+				if n, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
 					return n
 				}
 			}
@@ -876,6 +952,108 @@ func extractStringSlice(data map[string]any, keys ...string) []string {
 		}
 	}
 	return nil
+}
+
+func extractNamedStringSlice(data map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		if val, ok := data[key]; ok {
+			switch typed := val.(type) {
+			case []string:
+				return typed
+			case []any:
+				out := make([]string, 0, len(typed))
+				for _, item := range typed {
+					switch value := item.(type) {
+					case string:
+						if value = strings.TrimSpace(value); value != "" {
+							out = append(out, value)
+						}
+					case map[string]any:
+						if name := strings.TrimSpace(extractString(value, "name", "title", "value")); name != "" {
+							out = append(out, name)
+						}
+					}
+				}
+				return out
+			case string:
+				return normalizeList(typed)
+			}
+		}
+	}
+	return nil
+}
+
+func firstNonEmptyMoviePilotString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstNonZeroMoviePilotFloat(values ...float64) float64 {
+	for _, value := range values {
+		if value != 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func firstNonEmptyMoviePilotSlice(values ...[]string) []string {
+	for _, value := range values {
+		if len(value) > 0 {
+			return value
+		}
+	}
+	return nil
+}
+
+func validateMoviePilotSuccess(body []byte) error {
+	var root map[string]any
+	if err := json.Unmarshal(body, &root); err != nil {
+		// Some older endpoints return an unwrapped array. Their existing parsers
+		// remain authoritative when no business-status object is present.
+		return nil
+	}
+	rawSuccess, exists := root["success"]
+	if !exists {
+		return nil
+	}
+
+	success, recognized := moviePilotSuccessValue(rawSuccess)
+	if !recognized || success {
+		return nil
+	}
+
+	message := strings.TrimSpace(extractString(root, "message", "msg", "detail", "error"))
+	if message == "" {
+		if data, ok := root["data"].(string); ok {
+			message = strings.TrimSpace(data)
+		}
+	}
+	if message == "" {
+		message = "未返回错误详情"
+	}
+	return fmt.Errorf("MoviePilot 业务请求失败: %s", message)
+}
+
+func moviePilotSuccessValue(value any) (bool, bool) {
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case float64:
+		return typed != 0, true
+	case json.Number:
+		n, err := typed.Float64()
+		return n != 0, err == nil
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return parsed, err == nil
+	default:
+		return false, false
+	}
 }
 
 func flattenToStrings(values []any) []string {

@@ -121,7 +121,61 @@ func (n *TelegramNotifier) SendTest(ctx context.Context) error {
 	return n.send(ctx, settings, message)
 }
 
+// SendMessage sends a business notification through the saved Telegram target.
+func (n *TelegramNotifier) SendMessage(ctx context.Context, text string) error {
+	if n == nil || n.cfg == nil {
+		return fmt.Errorf("Telegram 通知服务未初始化")
+	}
+	if !n.cfg.Telegram.Enabled {
+		return fmt.Errorf("Telegram 通知未启用")
+	}
+	if strings.TrimSpace(text) == "" {
+		return fmt.Errorf("Telegram 通知内容不能为空")
+	}
+	return n.send(ctx, n.cfg.Telegram, text)
+}
+
+// SendPhoto sends a remote image with an optional caption to the saved Telegram target.
+func (n *TelegramNotifier) SendPhoto(ctx context.Context, photoURL, caption string) error {
+	if n == nil || n.cfg == nil {
+		return fmt.Errorf("Telegram 通知服务未初始化")
+	}
+	if !n.cfg.Telegram.Enabled {
+		return fmt.Errorf("Telegram 通知未启用")
+	}
+	photoURL = strings.TrimSpace(photoURL)
+	if photoURL == "" {
+		return fmt.Errorf("Telegram 图片地址不能为空")
+	}
+	return n.sendPhoto(ctx, n.cfg.Telegram, photoURL, caption)
+}
+
 func (n *TelegramNotifier) send(parent context.Context, settings config.TelegramConfig, text string) error {
+	form := url.Values{
+		"chat_id":              {settings.ChatID},
+		"text":                 {text},
+		"disable_notification": {strconv.FormatBool(settings.Silent)},
+	}
+	if settings.MessageThreadID > 0 {
+		form.Set("message_thread_id", strconv.FormatInt(settings.MessageThreadID, 10))
+	}
+	return n.postForm(parent, settings, "sendMessage", form)
+}
+
+func (n *TelegramNotifier) sendPhoto(parent context.Context, settings config.TelegramConfig, photoURL, caption string) error {
+	form := url.Values{
+		"chat_id":              {settings.ChatID},
+		"photo":                {photoURL},
+		"caption":              {caption},
+		"disable_notification": {strconv.FormatBool(settings.Silent)},
+	}
+	if settings.MessageThreadID > 0 {
+		form.Set("message_thread_id", strconv.FormatInt(settings.MessageThreadID, 10))
+	}
+	return n.postForm(parent, settings, "sendPhoto", form)
+}
+
+func (n *TelegramNotifier) postForm(parent context.Context, settings config.TelegramConfig, method string, form url.Values) error {
 	if strings.TrimSpace(settings.BotToken) == "" || strings.TrimSpace(settings.ChatID) == "" {
 		return fmt.Errorf("请先配置 Bot Token 和 Chat ID")
 	}
@@ -134,15 +188,7 @@ func (n *TelegramNotifier) send(parent context.Context, settings config.Telegram
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(settings.TimeoutSeconds)*time.Second)
 	defer cancel()
-	form := url.Values{
-		"chat_id":              {settings.ChatID},
-		"text":                 {text},
-		"disable_notification": {strconv.FormatBool(settings.Silent)},
-	}
-	if settings.MessageThreadID > 0 {
-		form.Set("message_thread_id", strconv.FormatInt(settings.MessageThreadID, 10))
-	}
-	endpoint := strings.TrimRight(settings.APIBase, "/") + "/bot" + url.PathEscape(settings.BotToken) + "/sendMessage"
+	endpoint := strings.TrimRight(settings.APIBase, "/") + "/bot" + url.PathEscape(settings.BotToken) + "/" + method
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return fmt.Errorf("创建 Telegram 请求失败")
@@ -170,6 +216,7 @@ func (n *TelegramNotifier) send(parent context.Context, settings config.Telegram
 		if description == "" {
 			description = http.StatusText(resp.StatusCode)
 		}
+		description = redactTelegramError(description, settings.BotToken)
 		return fmt.Errorf("Telegram 发送失败 (HTTP %d): %s", resp.StatusCode, description)
 	}
 	return nil

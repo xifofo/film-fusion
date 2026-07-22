@@ -227,7 +227,9 @@ type OrganizePreviewTmdbSeason struct {
 
 type OrganizePreviewTaskListItem struct {
 	model.OrganizePreviewTask
-	TmdbRefs []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
+	TmdbRefs             []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
+	MultiEpisodeCount    int                      `json:"multi_episode_count,omitempty"`
+	MultiEpisodeExamples []string                 `json:"multi_episode_examples,omitempty"`
 }
 
 type MediaLookupSearchRequest struct {
@@ -733,9 +735,12 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 func buildOrganizePreviewTaskListItems(tasks []model.OrganizePreviewTask) []OrganizePreviewTaskListItem {
 	items := make([]OrganizePreviewTaskListItem, 0, len(tasks))
 	for _, task := range tasks {
+		multiEpisodeCount, multiEpisodeExamples := extractOrganizePreviewMultiEpisodes(task)
 		items = append(items, OrganizePreviewTaskListItem{
-			OrganizePreviewTask: task,
-			TmdbRefs:            extractOrganizePreviewTmdbRefs(task),
+			OrganizePreviewTask:  task,
+			TmdbRefs:             extractOrganizePreviewTmdbRefs(task),
+			MultiEpisodeCount:    multiEpisodeCount,
+			MultiEpisodeExamples: multiEpisodeExamples,
 		})
 	}
 	return items
@@ -847,6 +852,49 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 		})
 	}
 	return refs
+}
+
+func extractOrganizePreviewMultiEpisodes(task model.OrganizePreviewTask) (int, []string) {
+	raw := strings.TrimSpace(task.ResultJSON)
+	if raw == "" {
+		return 0, nil
+	}
+
+	var result struct {
+		Items []struct {
+			RenameTo string `json:"rename_to"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+		return 0, nil
+	}
+
+	count := 0
+	examples := make([]string, 0, 5)
+	seenExamples := make(map[string]struct{})
+	for _, item := range result.Items {
+		matches := multiEpisodeRenameRegexp.FindStringSubmatch(strings.TrimSpace(item.RenameTo))
+		if len(matches) < 6 {
+			continue
+		}
+		firstEpisode := atoiDefault(matches[3])
+		secondEpisode := atoiDefault(matches[4])
+		if secondEpisode == 0 {
+			secondEpisode = atoiDefault(matches[5])
+		}
+		if firstEpisode <= 0 || secondEpisode <= 0 || firstEpisode == secondEpisode {
+			continue
+		}
+
+		count++
+		example := strings.ToUpper(strings.ReplaceAll(matches[1], " ", ""))
+		if _, ok := seenExamples[example]; ok || len(examples) >= 5 {
+			continue
+		}
+		seenExamples[example] = struct{}{}
+		examples = append(examples, example)
+	}
+	return count, examples
 }
 
 func canonicalOrganizePreviewTmdbMediaType(mediaType, category string) string {
@@ -2801,6 +2849,7 @@ var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第
 
 var (
 	defaultFilenameFallbackRegexp = regexp.MustCompile(`.* - (.*)-.*`)
+	multiEpisodeRenameRegexp      = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
 	seasonEpisodeRegexp           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
 	seasonEpisodeXRegexp          = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
 	chineseSeasonEpisodeRegexp    = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)

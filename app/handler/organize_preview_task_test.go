@@ -80,7 +80,11 @@ func TestExtractOrganizePreviewTmdbRefsUsesTaskFallbackAndIgnoresInvalidJSON(t *
 
 func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testing.T) {
 	result := Organize115CookieResult{
-		Items: []Organize115ItemResult{{TmdbID: "400", MediaType: "movie"}},
+		Items: []Organize115ItemResult{{
+			TmdbID:    "400",
+			MediaType: "movie",
+			RenameTo:  "Show.S01E01-02.1080p.mkv",
+		}},
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -99,7 +103,40 @@ func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testin
 	if !strings.Contains(encoded, `"id":9`) || !strings.Contains(encoded, `"tmdb_id":"400"`) {
 		t.Fatalf("list payload missing task or TMDB ref: %s", encoded)
 	}
+	if !strings.Contains(encoded, `"multi_episode_count":1`) || !strings.Contains(encoded, `"multi_episode_examples":["S01E01-02"]`) {
+		t.Fatalf("list payload missing multi-episode summary: %s", encoded)
+	}
 	if strings.Contains(encoded, "result_json") {
 		t.Fatalf("list payload leaked result_json: %s", encoded)
+	}
+}
+
+func TestExtractOrganizePreviewMultiEpisodes(t *testing.T) {
+	result := Organize115CookieResult{
+		Items: []Organize115ItemResult{
+			{RenameTo: "Show.2024.S01E01-02.1080p.mkv"},
+			{RenameTo: "Show.2024.S01E03-E04.1080p.mkv"},
+			{RenameTo: "Show.2024.s01e05e06.1080p.mkv"},
+			{RenameTo: "Show.2024.S01E07.1080p.mkv"},
+			{RenameTo: "Show.2024.S01E08-1080p.mkv"},
+		},
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+
+	count, examples := extractOrganizePreviewMultiEpisodes(model.OrganizePreviewTask{ResultJSON: string(raw)})
+	if count != 3 {
+		t.Fatalf("count=%d want=3 examples=%v", count, examples)
+	}
+	wantExamples := []string{"S01E01-02", "S01E03-E04", "S01E05E06"}
+	if len(examples) != len(wantExamples) {
+		t.Fatalf("examples=%v want=%v", examples, wantExamples)
+	}
+	for i := range wantExamples {
+		if examples[i] != wantExamples[i] {
+			t.Fatalf("examples[%d]=%q want=%q", i, examples[i], wantExamples[i])
+		}
 	}
 }

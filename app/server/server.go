@@ -39,6 +39,7 @@ type Server struct {
 	embyLoginProtection    *service.EmbyLoginProtection
 	appLoginProtection     *service.EmbyLoginProtection
 	telegramNotifier       *service.TelegramNotifier
+	rssMonitorService      *service.RSSMonitorService
 	taskQueue              *service.PersistentTaskQueue
 }
 
@@ -101,6 +102,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		taskQueue:              taskQueue,
 	}
 	s.telegramNotifier = service.NewTelegramNotifier(cfg, log)
+	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.telegramNotifier, s.moviePilotService)
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.telegramNotifier)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.telegramNotifier)
 
@@ -157,6 +159,9 @@ func (s *Server) Start() error {
 	// 启动 Emby 缺集定时扫描调度
 	s.embyMissingService.Start()
 
+	// 启动 RSS 增量监控调度
+	s.rssMonitorService.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -201,6 +206,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.embyMissingService != nil {
 		s.embyMissingService.Stop()
+	}
+
+	if s.rssMonitorService != nil {
+		s.rssMonitorService.Stop()
 	}
 
 	// 停止Emby代理服务器
@@ -249,6 +258,7 @@ func (s *Server) setupRoutes() {
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	telegramHandler := handler.NewTelegramHandler(s.telegramNotifier)
+	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -311,6 +321,17 @@ func (s *Server) setupRoutes() {
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
 		protected.POST("/telegram/test", telegramHandler.Test)
+
+		rssMonitor := protected.Group("/rss-monitor")
+		{
+			rssMonitor.GET("", rssMonitorHandler.Dashboard)
+			rssMonitor.PUT("/settings", rssMonitorHandler.UpdateSettings)
+			rssMonitor.POST("/refresh", rssMonitorHandler.Refresh)
+			rssMonitor.POST("/rules", rssMonitorHandler.CreateRule)
+			rssMonitor.PUT("/rules/:id", rssMonitorHandler.UpdateRule)
+			rssMonitor.DELETE("/rules/:id", rssMonitorHandler.DeleteRule)
+			rssMonitor.POST("/rules/test", rssMonitorHandler.TestRule)
+		}
 
 		config := protected.Group("/config")
 		{

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +43,46 @@ func TestTelegramNotifierSendTest(t *testing.T) {
 	}
 	if !strings.Contains(gotText, "家庭媒体") || !strings.Contains(gotText, "测试通知") {
 		t.Fatalf("unexpected message: %q", gotText)
+	}
+}
+
+func TestTelegramNotifierSendPhoto(t *testing.T) {
+	var gotPath string
+	var gotForm url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		gotForm = r.Form
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":2}}`))
+	}))
+	defer server.Close()
+
+	cfg := &config.Config{Telegram: config.TelegramConfig{
+		Enabled: true, BotToken: "123456:test-token", ChatID: "-100123",
+		MessageThreadID: 42, APIBase: server.URL, TimeoutSeconds: 2, Silent: true,
+	}}
+	notifier := NewTelegramNotifier(cfg, nil)
+	if err := notifier.SendPhoto(context.Background(), "https://image.tmdb.org/t/p/w780/poster.jpg", "百花杀 (2026) S01E01"); err != nil {
+		t.Fatalf("SendPhoto: %v", err)
+	}
+
+	if gotPath != "/bot123456:test-token/sendPhoto" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	wants := map[string]string{
+		"chat_id":              "-100123",
+		"message_thread_id":    "42",
+		"photo":                "https://image.tmdb.org/t/p/w780/poster.jpg",
+		"caption":              "百花杀 (2026) S01E01",
+		"disable_notification": "true",
+	}
+	for key, want := range wants {
+		if got := gotForm.Get(key); got != want {
+			t.Errorf("form[%q] = %q, want %q", key, got, want)
+		}
 	}
 }
 

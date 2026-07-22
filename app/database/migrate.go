@@ -52,6 +52,9 @@ func AutoMigrate() error {
 		&model.EmbyWatchUser{},
 		&model.EmbyWatchRecord{},
 		&model.EmbyWatchSetting{},
+		&model.RSSMonitorSetting{},
+		&model.RSSNotificationRule{},
+		&model.RSSMonitorItem{},
 	); err != nil {
 		return err
 	}
