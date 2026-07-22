@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -38,10 +39,13 @@ func NewTMDBService(cfg *config.Config, log *logger.Logger) *TMDBService {
 	}
 }
 
-func (s *TMDBService) GetTVEpisodeCount(ctx context.Context, tmdbID string) (int, error) {
+func (s *TMDBService) GetTVSeasonEpisodeCount(ctx context.Context, tmdbID string, seasonNumber int) (int, error) {
 	tmdbID = strings.TrimSpace(tmdbID)
 	if tmdbID == "" {
 		return 0, errors.New("TMDB ID 不能为空")
+	}
+	if seasonNumber < 0 {
+		return 0, errors.New("TMDB 季号不能小于 0")
 	}
 	if s == nil || s.cfg == nil || !s.cfg.TMDB.Enabled {
 		return 0, errors.New("TMDB 未启用")
@@ -50,24 +54,25 @@ func (s *TMDBService) GetTVEpisodeCount(ctx context.Context, tmdbID string) (int
 		return 0, errors.New("TMDB API Key 或 Access Token 未配置")
 	}
 
-	if count, ok := s.getCached(tmdbID); ok {
+	cacheKey := tmdbID + ":season:" + strconv.Itoa(seasonNumber)
+	if count, ok := s.getCached(cacheKey); ok {
 		return count, nil
 	}
 
-	count, err := s.fetchTVEpisodeCount(ctx, tmdbID)
+	count, err := s.fetchTVSeasonEpisodeCount(ctx, tmdbID, seasonNumber)
 	if err != nil {
 		return 0, err
 	}
-	s.setCached(tmdbID, count)
+	s.setCached(cacheKey, count)
 	return count, nil
 }
 
-func (s *TMDBService) fetchTVEpisodeCount(ctx context.Context, tmdbID string) (int, error) {
+func (s *TMDBService) fetchTVSeasonEpisodeCount(ctx context.Context, tmdbID string, seasonNumber int) (int, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/")
 	if baseURL == "" {
 		baseURL = "https://api.themoviedb.org"
 	}
-	endpoint := baseURL + "/3/tv/" + url.PathEscape(tmdbID)
+	endpoint := baseURL + "/3/tv/" + url.PathEscape(tmdbID) + "/season/" + strconv.Itoa(seasonNumber)
 
 	query := url.Values{}
 	query.Set("language", "zh-CN")
@@ -103,7 +108,7 @@ func (s *TMDBService) fetchTVEpisodeCount(ctx context.Context, tmdbID string) (i
 		return 0, fmt.Errorf("TMDB 请求失败: %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
-	count, err := ParseTMDBEpisodeCountResponse(body)
+	count, err := ParseTMDBSeasonEpisodeCountResponse(body)
 	if err != nil {
 		return 0, fmt.Errorf("解析 TMDB 响应失败: %w", err)
 	}
@@ -137,15 +142,15 @@ func (s *TMDBService) setCached(tmdbID string, count int) {
 	}
 }
 
-func ParseTMDBEpisodeCountResponse(body []byte) (int, error) {
+func ParseTMDBSeasonEpisodeCountResponse(body []byte) (int, error) {
 	var data struct {
-		NumberOfEpisodes int `json:"number_of_episodes"`
+		Episodes []json.RawMessage `json:"episodes"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil {
 		return 0, err
 	}
-	if data.NumberOfEpisodes <= 0 {
-		return 0, errors.New("number_of_episodes 无效")
+	if data.Episodes == nil {
+		return 0, errors.New("episodes 无效")
 	}
-	return data.NumberOfEpisodes, nil
+	return len(data.Episodes), nil
 }

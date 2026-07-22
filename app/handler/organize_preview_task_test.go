@@ -8,11 +8,12 @@ import (
 	"film-fusion/app/model"
 )
 
-func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T) {
+func TestExtractOrganizePreviewTmdbRefsDeduplicatesSeasonsByMediaTypeAndID(t *testing.T) {
 	result := Organize115CookieResult{
 		Items: []Organize115ItemResult{
-			{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024"},
-			{TmdbID: "100", MediaType: "series", Title: "Show", Year: "2024"},
+			{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024", SourceSeason: 2},
+			{TmdbID: "100", MediaType: "series", Title: "Show", Year: "2024", SourceSeason: 2},
+			{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024", TargetSeason: 1},
 			{TmdbID: "100", MediaType: "movie", Title: "Movie", Year: "2020"},
 			{TmdbID: " 200 ", Category: "movie", Title: "Second Movie", Year: "2021"},
 			{MediaType: "movie", Title: "Missing ID"},
@@ -25,7 +26,16 @@ func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T
 
 	refs := extractOrganizePreviewTmdbRefs(model.OrganizePreviewTask{ResultJSON: string(raw)})
 	want := []OrganizePreviewTmdbRef{
-		{TmdbID: "100", MediaType: "tv", Title: "Show", Year: "2024"},
+		{
+			TmdbID:    "100",
+			MediaType: "tv",
+			Title:     "Show",
+			Year:      "2024",
+			Seasons: []OrganizePreviewTmdbSeason{
+				{SeasonNumber: 1},
+				{SeasonNumber: 2},
+			},
+		},
 		{TmdbID: "100", MediaType: "movie", Title: "Movie", Year: "2020"},
 		{TmdbID: "200", MediaType: "movie", Title: "Second Movie", Year: "2021"},
 	}
@@ -33,8 +43,16 @@ func TestExtractOrganizePreviewTmdbRefsDeduplicatesByMediaTypeAndID(t *testing.T
 		t.Fatalf("len(refs)=%d want=%d refs=%+v", len(refs), len(want), refs)
 	}
 	for i := range want {
-		if refs[i] != want[i] {
+		if refs[i].TmdbID != want[i].TmdbID || refs[i].MediaType != want[i].MediaType || refs[i].Title != want[i].Title || refs[i].Year != want[i].Year {
 			t.Fatalf("refs[%d]=%+v want=%+v", i, refs[i], want[i])
+		}
+		if len(refs[i].Seasons) != len(want[i].Seasons) {
+			t.Fatalf("refs[%d].Seasons=%+v want=%+v", i, refs[i].Seasons, want[i].Seasons)
+		}
+		for seasonIndex := range want[i].Seasons {
+			if refs[i].Seasons[seasonIndex] != want[i].Seasons[seasonIndex] {
+				t.Fatalf("refs[%d].Seasons[%d]=%+v want=%+v", i, seasonIndex, refs[i].Seasons[seasonIndex], want[i].Seasons[seasonIndex])
+			}
 		}
 	}
 }

@@ -213,11 +213,16 @@ type OrganizePreviewTaskCreateRequest struct {
 }
 
 type OrganizePreviewTmdbRef struct {
-	TmdbID       string `json:"tmdb_id"`
-	MediaType    string `json:"media_type,omitempty"`
-	Title        string `json:"title,omitempty"`
-	Year         string `json:"year,omitempty"`
-	EpisodeCount int    `json:"episode_count,omitempty"`
+	TmdbID    string                      `json:"tmdb_id"`
+	MediaType string                      `json:"media_type,omitempty"`
+	Title     string                      `json:"title,omitempty"`
+	Year      string                      `json:"year,omitempty"`
+	Seasons   []OrganizePreviewTmdbSeason `json:"seasons,omitempty"`
+}
+
+type OrganizePreviewTmdbSeason struct {
+	SeasonNumber int  `json:"season_number"`
+	EpisodeCount *int `json:"episode_count,omitempty"`
 }
 
 type OrganizePreviewTaskListItem struct {
@@ -747,14 +752,17 @@ func (h *OrganizeHandler) buildOrganizePreviewTaskListItems(ctx context.Context,
 			if ref.MediaType != "tv" || strings.TrimSpace(ref.TmdbID) == "" {
 				continue
 			}
-			count, err := h.tmdbSvc.GetTVEpisodeCount(ctx, ref.TmdbID)
-			if err != nil {
-				if h.logger != nil {
-					h.logger.Debugf("[organize] 获取 TMDB 总集数失败 tmdb_id=%s: %v", ref.TmdbID, err)
+			for seasonIndex := range ref.Seasons {
+				season := &ref.Seasons[seasonIndex]
+				count, err := h.tmdbSvc.GetTVSeasonEpisodeCount(ctx, ref.TmdbID, season.SeasonNumber)
+				if err != nil {
+					if h.logger != nil {
+						h.logger.Debugf("[organize] 获取 TMDB 本季集数失败 tmdb_id=%s season=%d: %v", ref.TmdbID, season.SeasonNumber, err)
+					}
+					continue
 				}
-				continue
+				season.EpisodeCount = &count
 			}
-			ref.EpisodeCount = count
 		}
 	}
 	return items
@@ -767,11 +775,13 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 	}
 
 	type previewItem struct {
-		TmdbID    string `json:"tmdb_id"`
-		MediaType string `json:"media_type"`
-		Category  string `json:"category"`
-		Title     string `json:"title"`
-		Year      string `json:"year"`
+		TmdbID       string `json:"tmdb_id"`
+		MediaType    string `json:"media_type"`
+		Category     string `json:"category"`
+		Title        string `json:"title"`
+		Year         string `json:"year"`
+		SourceSeason int    `json:"source_season"`
+		TargetSeason int    `json:"target_season"`
 	}
 	var result struct {
 		MediaType string        `json:"media_type"`
@@ -787,7 +797,8 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 		resultMediaType = canonicalOrganizePreviewTmdbMediaType(task.MediaType, task.Category)
 	}
 	refs := make([]OrganizePreviewTmdbRef, 0)
-	seen := make(map[string]struct{})
+	refIndexes := make(map[string]int)
+	seenSeasons := make(map[string]map[int]struct{})
 	for _, item := range result.Items {
 		tmdbID := strings.TrimSpace(item.TmdbID)
 		if tmdbID == "" {
@@ -798,15 +809,41 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 			mediaType = resultMediaType
 		}
 		key := mediaType + "\x00" + tmdbID
-		if _, ok := seen[key]; ok {
+		refIndex, ok := refIndexes[key]
+		if !ok {
+			refIndex = len(refs)
+			refIndexes[key] = refIndex
+			refs = append(refs, OrganizePreviewTmdbRef{
+				TmdbID:    tmdbID,
+				MediaType: mediaType,
+				Title:     strings.TrimSpace(item.Title),
+				Year:      strings.TrimSpace(item.Year),
+			})
+		}
+		if mediaType != "tv" {
 			continue
 		}
-		seen[key] = struct{}{}
-		refs = append(refs, OrganizePreviewTmdbRef{
-			TmdbID:    tmdbID,
-			MediaType: mediaType,
-			Title:     strings.TrimSpace(item.Title),
-			Year:      strings.TrimSpace(item.Year),
+		seasonNumber := item.SourceSeason
+		if seasonNumber <= 0 {
+			seasonNumber = item.TargetSeason
+		}
+		if seasonNumber <= 0 {
+			continue
+		}
+		if seenSeasons[key] == nil {
+			seenSeasons[key] = make(map[int]struct{})
+		}
+		if _, ok := seenSeasons[key][seasonNumber]; ok {
+			continue
+		}
+		seenSeasons[key][seasonNumber] = struct{}{}
+		refs[refIndex].Seasons = append(refs[refIndex].Seasons, OrganizePreviewTmdbSeason{
+			SeasonNumber: seasonNumber,
+		})
+	}
+	for refIndex := range refs {
+		sort.Slice(refs[refIndex].Seasons, func(i, j int) bool {
+			return refs[refIndex].Seasons[i].SeasonNumber < refs[refIndex].Seasons[j].SeasonNumber
 		})
 	}
 	return refs
