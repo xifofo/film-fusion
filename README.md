@@ -90,12 +90,18 @@ emby:
 ### Webhook 集成
 配置第三方服务的 Webhook 地址：
 #### **CloudDrive2**
-添加 webhook 并找到 base_url 改成自己部署的地址，把 enabled 改成 true
-```
+先在 FilmFusion「系统设置 → Webhook」生成并保存独立 Token，再在 CloudDrive2 添加 webhook，修改服务地址并启用：
+```toml
 base_url = "http://xxx.xxx.xxx.xxx:8095/webhook/clouddrive2"
 # Whether the webhook is enabled
 enabled = true
+
+[global_params.default_headers]
+content-type = "application/json"
+authorization = "Bearer <FilmFusion 中生成的 Token>"
 ```
+
+不要复用 FilmFusion 管理后台密码。公网或不可信网络部署时，请在 HTTPS 反向代理或 VPN 后使用 Webhook。
 
 #### **MoviePilot2**:
 添加 webhook 插件 选择 `POST` 填入以下链接

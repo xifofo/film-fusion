@@ -12,6 +12,7 @@ import (
 
 type Config struct {
 	Server     ServerConfig     `mapstructure:"server" json:"server"`
+	Webhook    WebhookConfig    `mapstructure:"webhook" json:"webhook"`
 	Log        LogConfig        `mapstructure:"log" json:"log"`
 	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
 	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
@@ -19,6 +20,17 @@ type Config struct {
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
+}
+
+// WebhookConfig 保存外部 webhook 的独立鉴权配置。
+// webhook 密钥不得复用管理后台密码或 JWT 密钥。
+type WebhookConfig struct {
+	CloudDrive2 CloudDrive2WebhookConfig `mapstructure:"clouddrive2" json:"clouddrive2"`
+}
+
+type CloudDrive2WebhookConfig struct {
+	Enabled bool   `mapstructure:"enabled" json:"enabled"`
+	Token   string `mapstructure:"token" json:"token"`
 }
 
 type ServerConfig struct {
@@ -205,6 +217,9 @@ func Save(c *Config) error {
 	viper.Set("server.process_new_media", c.Server.ProcessNewMedia)
 	setLoginSecurity("server.security", c.Server.Security)
 
+	viper.Set("webhook.clouddrive2.enabled", c.Webhook.CloudDrive2.Enabled)
+	viper.Set("webhook.clouddrive2.token", c.Webhook.CloudDrive2.Token)
+
 	viper.Set("log.level", c.Log.Level)
 	viper.Set("log.format", c.Log.Format)
 	viper.Set("log.output", c.Log.Output)
@@ -313,6 +328,10 @@ func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
 	setDefaultLoginSecurity("server.security")
+
+	// CloudDrive2 webhook 默认关闭，必须显式设置独立 Token 后开启。
+	viper.SetDefault("webhook.clouddrive2.enabled", false)
+	viper.SetDefault("webhook.clouddrive2.token", "")
 
 	// Telegram 告警默认配置
 	viper.SetDefault("telegram.enabled", false)
@@ -535,6 +554,17 @@ func validateConfig(config *Config) error {
 	}
 	if err := ValidateTelegram(config.Telegram); err != nil {
 		return err
+	}
+	if err := ValidateWebhook(config.Webhook); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateWebhook 验证 webhook 鉴权配置。32 字符下限用于避免误填短口令。
+func ValidateWebhook(settings WebhookConfig) error {
+	if settings.CloudDrive2.Enabled && len(strings.TrimSpace(settings.CloudDrive2.Token)) < 32 {
+		return fmt.Errorf("CloudDrive2 Webhook Token 启用时至少需要 32 个字符")
 	}
 	return nil
 }

@@ -13,6 +13,12 @@ server:
     block_minutes: 30
     trusted_proxy_cidrs: []
 
+# CloudDrive2 webhook 默认关闭。请生成独立随机 Token 后再开启；不要复用后台密码。
+webhook:
+  clouddrive2:
+    enabled: false
+    token: ""  # openssl rand -hex 32
+
 telegram:
   enabled: false
   bot_token: ""              # 从 @BotFather 获取，后台读取时会脱敏

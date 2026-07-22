@@ -2,11 +2,16 @@ package pathhelper
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
 )
+
+var ErrUnsafePath = errors.New("unsafe path")
 
 // 正则表达式用于匹配 Windows 盘符格式
 var driveLetterPattern = regexp.MustCompile(`^[a-zA-Z]:[\\/]+`)
@@ -80,18 +85,72 @@ func SafeFilePathJoin(basePath, relativePath string) string {
 	return filepath.Join(basePath, relativePath)
 }
 
-// IsSubPath 检查 path 是否是 prefix 的子路径
-func IsSubPath(path, prefix string) bool {
-	// 一律转成 Linux 路径格式在进行比较
-	path = EnsureLeadingSlash(path)
-	prefix = EnsureLeadingSlash(prefix)
-
-	// 确保路径以 / 结尾，避免部分匹配问题
-	if !strings.HasSuffix(path, "/") {
-		path += "/"
+// NormalizeUntrustedPath 规范化外部传入的逻辑路径，并拒绝路径穿越。
+// CloudDrive2 可能上报 Windows 路径，因此统一转换为 / 后再校验。
+func NormalizeUntrustedPath(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("%w: empty path", ErrUnsafePath)
+	}
+	if strings.ContainsRune(raw, '\x00') {
+		return "", fmt.Errorf("%w: NUL byte", ErrUnsafePath)
 	}
 
-	return strings.HasPrefix(path, prefix)
+	converted := ConvertToLinuxPath(raw)
+	for _, segment := range strings.Split(converted, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("%w: parent traversal", ErrUnsafePath)
+		}
+	}
+
+	normalized := path.Clean("/" + strings.TrimLeft(converted, "/"))
+	return normalized, nil
+}
+
+// SafeRelativePath 将外部逻辑路径转换为可交给 os.Root 的相对路径。
+func SafeRelativePath(raw string) (string, error) {
+	normalized, err := NormalizeUntrustedPath(raw)
+	if err != nil {
+		return "", err
+	}
+	relative := strings.TrimPrefix(normalized, "/")
+	if relative == "" {
+		return ".", nil
+	}
+	return filepath.FromSlash(relative), nil
+}
+
+// JoinUnderRoot 在可信根目录下拼接外部路径，并再次验证结果没有越界。
+func JoinUnderRoot(root, raw string) (string, error) {
+	relative, err := SafeRelativePath(raw)
+	if err != nil {
+		return "", err
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(rootAbs, relative)
+	check, err := filepath.Rel(rootAbs, target)
+	if err != nil || check == ".." || strings.HasPrefix(check, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("%w: target escapes root", ErrUnsafePath)
+	}
+	return target, nil
+}
+
+// IsSubPath 检查 candidate 是否位于 prefix 内（包含 prefix 本身）。
+func IsSubPath(candidate, prefix string) bool {
+	candidatePath, err := NormalizeUntrustedPath(candidate)
+	if err != nil {
+		return false
+	}
+	prefixPath, err := NormalizeUntrustedPath(prefix)
+	if err != nil {
+		return false
+	}
+	if prefixPath == "/" {
+		return true
+	}
+	return candidatePath == prefixPath || strings.HasPrefix(candidatePath, prefixPath+"/")
 }
 
 // IsFileInAnyFilterRules 检查文件是否在任一过滤规则中（include 或 download）

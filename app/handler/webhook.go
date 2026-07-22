@@ -42,13 +42,23 @@ func NewWebhookHandler(log *logger.Logger, cfg *config.Config, download115Svc *s
 
 // CloudDrive2FileNotify 处理 clouddrive2 文件系统监听器的 webhook
 func (h *WebhookHandler) CloudDrive2FileNotify(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
 	// 解析请求体
 	var requestBody service.Cd2FileNotifyRequest
-	if err := c.Bind(&requestBody); err != nil {
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
 		h.logger.Errorf("解析 clouddrive2 文件通知请求体失败: %v", err)
 		service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
 			Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusFailed,
 			Trigger: model.OrganizeTriggerCD2, Error: err.Error(), Message: "解析 clouddrive2 请求体失败",
+		})
+		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
+		return
+	}
+	if err := requestBody.Validate(); err != nil {
+		h.logger.Warnf("拒绝不安全的 clouddrive2 文件通知: %v", err)
+		service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+			Action: model.OrganizeActionWebhookRecv, Status: model.OrganizeStatusFailed,
+			Trigger: model.OrganizeTriggerCD2, Error: err.Error(), Message: "拒绝不安全的 clouddrive2 请求",
 		})
 		c.JSON(http.StatusBadRequest, gin.H{"message": err.Error()})
 		return

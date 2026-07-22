@@ -35,6 +35,10 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return nil
 	}
+	if !pathhelper.IsSubPath(path, cloudPath.SourcePath) {
+		s.logger.Warnf("拒绝在监控根目录外创建 STRM: %s", path)
+		return pathhelper.ErrUnsafePath
+	}
 
 	// 判断是否在 include 过滤规则中
 	if cloudPath.FilterRules != "" {
@@ -56,33 +60,32 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 	return nil
 }
 
-func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.CloudPath) {
+func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.CloudPath, originalInside, destinationInside bool) {
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
-	// 判断是否在 include 过滤规则中
-	if cloudPath.FilterRules != "" {
+	// 目标仍在监控目录内时才创建新文件。
+	if destinationInside && cloudPath.FilterRules != "" {
 		// 获取文件扩展名
 		fileExt := strings.ToLower(filepath.Ext(path))
 
 		if !pathhelper.IsFileInAnyFilterRules(fileExt, cloudPath.FilterRules) {
 			s.logger.Debugf("文件 %s 不在 include 过滤规则中，跳过处理", path)
-			return
+			destinationInside = false
 		}
 	}
 
 	// 处理 115OPEN API 创建 STRM 文件
-	if cloudPath.CloudStorage.StorageType == model.StorageType115Open {
+	if destinationInside && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
 		s.CreateStrmOrDownloadWith115OpenAPI(path, cloudPath, "")
 		// 不能 Return --- 因为可能需要删除原来的文件
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
-	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
-		savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, originalPath)
-		s.DeleteAction(savePath, false)
+	if originalInside {
+		s.DeleteAction(cloudPath.LocalPath, originalPath, false)
 	}
 }
 
@@ -97,20 +100,19 @@ func (s *StrmService) CreateDir(path string, cloudPath model.CloudPath) {
 	}
 }
 
-func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath) {
+func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath, originalInside, destinationInside bool) {
 	if cloudPath.LocalPath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
-	if cloudPath.CloudStorage.StorageType == model.StorageType115Open && pathhelper.IsSubPath(path, cloudPath.SourcePath) {
+	if destinationInside && cloudPath.CloudStorage.StorageType == model.StorageType115Open {
 		s.WalkDirWith115OpenAPI(path, cloudPath)
 	}
 
 	// 原路径也在监控目录内时，需要删除本地的内容
-	if pathhelper.IsSubPath(originalPath, cloudPath.SourcePath) {
-		savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, originalPath)
-		s.DeleteAction(savePath, true)
+	if originalInside {
+		s.DeleteAction(cloudPath.LocalPath, originalPath, true)
 	}
 }
 
@@ -218,7 +220,16 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 }
 
 func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath, pickcode string) {
-	savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, path)
+	savePath, err := pathhelper.JoinUnderRoot(cloudPath.LocalPath, path)
+	if err != nil {
+		s.logger.Warnf("拒绝不安全的 STRM 目标路径 %q: %v", path, err)
+		return
+	}
+	relativePath, err := pathhelper.SafeRelativePath(path)
+	if err != nil || relativePath == "." {
+		s.logger.Warnf("拒绝不安全的 STRM 相对路径 %q: %v", path, err)
+		return
+	}
 	fileExt := strings.ToLower(filepath.Ext(savePath))
 
 	fullPathName := savePath[:len(savePath)-len(fileExt)]
@@ -273,10 +284,22 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 
 	// 添加新的扩展名
 	strmFilePath := fullPathName + ".strm"
+	relativeFullPath := relativePath[:len(relativePath)-len(fileExt)]
+	strmRelativePath := relativeFullPath + ".strm"
+	if err := os.MkdirAll(cloudPath.LocalPath, 0755); err != nil {
+		s.logger.Errorf("创建 STRM 根目录失败: %v", err)
+		return
+	}
+	localRoot, err := os.OpenRoot(cloudPath.LocalPath)
+	if err != nil {
+		s.logger.Errorf("打开 STRM 根目录失败: %v", err)
+		return
+	}
+	defer localRoot.Close()
 
 	// 判断本地文件是否存在，如果存在则删除
-	if _, err := os.Stat(strmFilePath); err == nil {
-		err := os.Remove(strmFilePath)
+	if _, err := localRoot.Stat(strmRelativePath); err == nil {
+		err := localRoot.Remove(strmRelativePath)
 		if err != nil {
 			s.logger.Errorf("删除已存在的 STRM 文件失败: %v", err)
 			return
@@ -297,13 +320,13 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	content := pathhelper.SafeFilePathJoin(cloudPath.ContentPrefix, nextPath)
 
 	// 提前创建文件夹
-	err := os.MkdirAll(filepath.Dir(savePath), 0755)
+	err = localRoot.MkdirAll(filepath.Dir(relativePath), 0755)
 	if err != nil {
 		s.logger.Errorf("创建目录失败: %v", err)
 		return
 	}
 
-	err = os.WriteFile(strmFilePath, []byte(content), 0777)
+	err = localRoot.WriteFile(strmRelativePath, []byte(content), 0777)
 	if err != nil {
 		s.logger.Errorf("创建 STRM 文件失败: %v", err)
 		WriteOrganizeLog(s.logger, OrganizeLogEntry{
@@ -343,14 +366,32 @@ func (s *StrmService) DeleteStrm(path string, cloudPath model.CloudPath, isDir b
 		return
 	}
 
-	savePath := pathhelper.SafeFilePathJoin(cloudPath.LocalPath, path)
-	s.DeleteAction(savePath, isDir)
+	s.DeleteAction(cloudPath.LocalPath, path, isDir)
 }
 
-func (s *StrmService) DeleteAction(localPath string, isDirectory bool) {
+func (s *StrmService) DeleteAction(localRootPath, eventPath string, isDirectory bool) {
+	relativePath, err := pathhelper.SafeRelativePath(eventPath)
+	if err != nil || relativePath == "." {
+		s.logger.Warnf("拒绝不安全的删除路径 %q: %v", eventPath, err)
+		return
+	}
+	localPath, err := pathhelper.JoinUnderRoot(localRootPath, eventPath)
+	if err != nil {
+		s.logger.Warnf("拒绝越界删除路径 %q: %v", eventPath, err)
+		return
+	}
+	root, err := os.OpenRoot(localRootPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			s.logger.Errorf("打开 STRM 根目录失败：%v", err)
+		}
+		return
+	}
+	defer root.Close()
+
 	// 如果是文件夹直接全部删除
 	if isDirectory {
-		err := os.RemoveAll(localPath)
+		err := root.RemoveAll(relativePath)
 		if err != nil && !os.IsNotExist(err) {
 			s.logger.Errorf("删除本地文件夹失败： %s", localPath)
 		}
@@ -365,7 +406,8 @@ func (s *StrmService) DeleteAction(localPath string, isDirectory bool) {
 	nfoFilename := fullPathName + ".nfo"
 
 	// 删除对应的 nfo 文件
-	err := os.Remove(nfoFilename)
+	nfoRelative := relativePath[:len(relativePath)-len(ext)] + ".nfo"
+	err = root.Remove(nfoRelative)
 	if err != nil && !os.IsNotExist(err) {
 		s.logger.Errorf("删除本地 nfo 文件失败：%s", nfoFilename)
 		s.logger.Errorf("错误原因：%v", err)
@@ -373,7 +415,8 @@ func (s *StrmService) DeleteAction(localPath string, isDirectory bool) {
 
 	// 删除 STRM 文件
 	strmFilename := fullPathName + ".strm"
-	err = os.Remove(strmFilename)
+	strmRelative := relativePath[:len(relativePath)-len(ext)] + ".strm"
+	err = root.Remove(strmRelative)
 	if err != nil && !os.IsNotExist(err) {
 		s.logger.Errorf("删除本地 strm 文件失败：%s", strmFilename)
 		s.logger.Errorf("错误原因：%v", err)

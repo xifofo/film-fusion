@@ -178,7 +178,11 @@ Webhook 与 Web 界面同端口（默认 `9000`），地址形如 `http://服务
 - **Emby**：通知中添加 Webhook，地址 `http://服务器IP:9000/webhook/emby`
   - 入库补充媒体信息：勾选「新媒体已添加」
   - 观看记录采集：勾选「播放停止 / 标记已播放」等事件
-- **CloudDrive2**：`http://服务器IP:9000/webhook/clouddrive2/file_notify`，并将 `enabled` 设为 `true`
+- **CloudDrive2**：
+  1. 在 FilmFusion「系统设置 → Webhook」生成并保存独立 Token，开启 CloudDrive2 Webhook。
+  2. 地址填写 `http://服务器IP:9000/webhook/clouddrive2/file_notify`，并将 CloudDrive2 的 `enabled` 设为 `true`。
+  3. 在 CloudDrive2 的 `[global_params.default_headers]` 中配置 `authorization = "Bearer <Token>"`。
+  4. 不要复用后台密码；公网或不可信网络应通过 HTTPS 反向代理或 VPN 访问。
 - **MoviePilot2**：添加 Webhook 插件（`POST`），地址 `http://服务器IP:9000/webhook/movie-pilot/v2`
 
 ---

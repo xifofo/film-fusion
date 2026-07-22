@@ -299,7 +299,9 @@ func (s *Server) setupRoutes() {
 	webhook := s.gin.Group("/webhook")
 	{
 		// clouddrive2 相关 webhook
-		webhook.POST("/clouddrive2/file_notify", webhookHandler.CloudDrive2FileNotify)
+		cloudDrive2Webhook := webhook.Group("/clouddrive2")
+		cloudDrive2Webhook.Use(middleware.CloudDrive2WebhookAuth(s.Config))
+		cloudDrive2Webhook.POST("/file_notify", webhookHandler.CloudDrive2FileNotify)
 		// webhook.POST("/clouddrive2/mount_notify", webhookHandler.CloudDrive2MountNotify)
 
 		// movie-pilot v2 webhook

@@ -39,18 +39,20 @@ func (h *AppConfigHandler) error(c *gin.Context, statusCode int, errorCode int, 
 func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
 	secrets := gin.H{
-		"server.password":      h.cfg.Server.Password != "",
-		"jwt.secret":           h.cfg.JWT.Secret != "",
-		"emby.api_key":         h.cfg.Emby.APIKey != "",
-		"moviepilot.password":  h.cfg.MoviePilot.Password != "",
-		"tmdb.api_key":         h.cfg.TMDB.APIKey != "",
-		"tmdb.access_token":    h.cfg.TMDB.AccessToken != "",
-		"telegram.bot_token":   h.cfg.Telegram.BotToken != "",
-		"hdhive.api_key":       h.cfg.HDHive.APIKey != "",
-		"hdhive.access_token":  h.cfg.HDHive.AccessToken != "",
-		"hdhive.refresh_token": h.cfg.HDHive.RefreshToken != "",
+		"server.password":           h.cfg.Server.Password != "",
+		"webhook.clouddrive2.token": h.cfg.Webhook.CloudDrive2.Token != "",
+		"jwt.secret":                h.cfg.JWT.Secret != "",
+		"emby.api_key":              h.cfg.Emby.APIKey != "",
+		"moviepilot.password":       h.cfg.MoviePilot.Password != "",
+		"tmdb.api_key":              h.cfg.TMDB.APIKey != "",
+		"tmdb.access_token":         h.cfg.TMDB.AccessToken != "",
+		"telegram.bot_token":        h.cfg.Telegram.BotToken != "",
+		"hdhive.api_key":            h.cfg.HDHive.APIKey != "",
+		"hdhive.access_token":       h.cfg.HDHive.AccessToken != "",
+		"hdhive.refresh_token":      h.cfg.HDHive.RefreshToken != "",
 	}
 	v.Server.Password = ""
+	v.Webhook.CloudDrive2.Token = ""
 	v.JWT.Secret = ""
 	v.Emby.APIKey = ""
 	v.MoviePilot.Password = ""
@@ -93,6 +95,9 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	// 密钥脱敏：前端留空表示沿用旧值
 	if strings.TrimSpace(in.Server.Password) == "" {
 		in.Server.Password = h.cfg.Server.Password
+	}
+	if strings.TrimSpace(in.Webhook.CloudDrive2.Token) == "" {
+		in.Webhook.CloudDrive2.Token = h.cfg.Webhook.CloudDrive2.Token
 	}
 	if strings.TrimSpace(in.JWT.Secret) == "" {
 		in.JWT.Secret = h.cfg.JWT.Secret
@@ -157,6 +162,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	if err := config.ValidateTelegram(in.Telegram); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if err := config.ValidateWebhook(in.Webhook); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
