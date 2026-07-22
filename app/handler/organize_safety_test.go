@@ -293,3 +293,29 @@ func TestAnnotateOrganizeItemsTVBestVersionPerEpisode(t *testing.T) {
 		t.Fatalf("e02-1080 item=%+v, want independent best version", byID["e02-1080"])
 	}
 }
+
+func TestBuildOrganizeVersionGroupsCreatesEpisodeTabs(t *testing.T) {
+	groups := []Organize115CookieGroup{{
+		Items: []Organize115ItemResult{
+			{FileID: "1080-e01", FileName: "Show.S01E01.1080p.WEB-DL.H264.mkv", MediaType: "tv", TmdbID: "100", SourceSeason: 1, SourceEpisode: 1},
+			{FileID: "1080-e02", FileName: "Show.S01E02.1080p.WEB-DL.H264.mkv", MediaType: "tv", TmdbID: "100", SourceSeason: 1, SourceEpisode: 2},
+			{FileID: "2160-e01", FileName: "Show.S01E01.2160p.WEB-DL.HEVC.Atmos.mkv", MediaType: "tv", TmdbID: "100", SourceSeason: 1, SourceEpisode: 1},
+			{FileID: "2160-e02", FileName: "Show.S01E02.2160p.WEB-DL.HEVC.Atmos.mkv", MediaType: "tv", TmdbID: "100", SourceSeason: 1, SourceEpisode: 2},
+		},
+	}}
+
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{bestVersionEnabled: true})
+	versionGroups := buildOrganizeVersionGroups(items)
+	if len(versionGroups) != 2 {
+		t.Fatalf("len(versionGroups)=%d want 2 groups=%+v", len(versionGroups), versionGroups)
+	}
+	if !versionGroups[0].Recommended || versionGroups[0].EpisodeCount != 2 || versionGroups[0].FileCount != 2 {
+		t.Fatalf("recommended group=%+v, want complete two-episode version", versionGroups[0])
+	}
+	if !strings.Contains(versionGroups[0].Label, "4K") {
+		t.Fatalf("recommended label=%q want 4K profile", versionGroups[0].Label)
+	}
+	if versionGroups[1].EpisodeCount != 2 || len(versionGroups[1].FileIDs) != 2 {
+		t.Fatalf("alternate group=%+v, want two files and episodes", versionGroups[1])
+	}
+}

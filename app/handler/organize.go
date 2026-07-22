@@ -126,6 +126,8 @@ type Organize115CookieResult struct {
 	Total                    int                      `json:"total"`
 	DirDebug                 []Organize115DirDebug    `json:"dir_debug,omitempty"`
 	Items                    []Organize115ItemResult  `json:"items,omitempty"`
+	TmdbRefs                 []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
+	VersionGroups            []OrganizeVersionGroup   `json:"version_groups,omitempty"`
 	Groups                   []Organize115CookieGroup `json:"groups,omitempty"`
 	SourceFolderDeleted      bool                     `json:"source_folder_deleted,omitempty"`
 	SourceFolderDeletedCount int                      `json:"source_folder_deleted_count,omitempty"`
@@ -167,6 +169,8 @@ type Organize115ItemResult struct {
 	SubtitleFiles  []string `json:"external_subtitle_files,omitempty"`
 	VersionScore   int      `json:"version_score,omitempty"`
 	VersionReasons []string `json:"version_reasons,omitempty"`
+	VersionKey     string   `json:"version_key,omitempty"`
+	VersionLabel   string   `json:"version_label,omitempty"`
 	BestVersion    bool     `json:"best_version,omitempty"`
 	AltVersion     bool     `json:"alternate_version,omitempty"`
 	SourceSeason   int      `json:"source_season,omitempty"`
@@ -175,6 +179,17 @@ type Organize115ItemResult struct {
 	TargetEpisode  int      `json:"target_episode,omitempty"`
 	EpisodeMatched *bool    `json:"episode_matched,omitempty"`
 	Error          string   `json:"error,omitempty"`
+}
+
+type OrganizeVersionGroup struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label"`
+	FileIDs      []string `json:"file_ids"`
+	FileCount    int      `json:"file_count"`
+	EpisodeCount int      `json:"episode_count"`
+	BestCount    int      `json:"best_count"`
+	Score        int      `json:"score"`
+	Recommended  bool     `json:"recommended,omitempty"`
 }
 
 type Organize115DirLookup struct {
@@ -223,6 +238,16 @@ type OrganizePreviewTmdbRef struct {
 type OrganizePreviewTmdbSeason struct {
 	SeasonNumber int  `json:"season_number"`
 	EpisodeCount *int `json:"episode_count,omitempty"`
+}
+
+type organizePreviewTmdbItem struct {
+	TmdbID       string `json:"tmdb_id"`
+	MediaType    string `json:"media_type"`
+	Category     string `json:"category"`
+	Title        string `json:"title"`
+	Year         string `json:"year"`
+	SourceSeason int    `json:"source_season"`
+	TargetSeason int    `json:"target_season"`
 }
 
 type OrganizePreviewTaskListItem struct {
@@ -746,31 +771,27 @@ func buildOrganizePreviewTaskListItems(tasks []model.OrganizePreviewTask) []Orga
 	return items
 }
 
-func (h *OrganizeHandler) buildOrganizePreviewTaskListItems(ctx context.Context, tasks []model.OrganizePreviewTask) []OrganizePreviewTaskListItem {
-	items := buildOrganizePreviewTaskListItems(tasks)
+func (h *OrganizeHandler) populateOrganizePreviewTmdbEpisodeCounts(ctx context.Context, refs []OrganizePreviewTmdbRef) {
 	if h == nil || h.tmdbSvc == nil {
-		return items
+		return
 	}
-	for itemIndex := range items {
-		for refIndex := range items[itemIndex].TmdbRefs {
-			ref := &items[itemIndex].TmdbRefs[refIndex]
-			if ref.MediaType != "tv" || strings.TrimSpace(ref.TmdbID) == "" {
+	for refIndex := range refs {
+		ref := &refs[refIndex]
+		if ref.MediaType != "tv" || strings.TrimSpace(ref.TmdbID) == "" {
+			continue
+		}
+		for seasonIndex := range ref.Seasons {
+			season := &ref.Seasons[seasonIndex]
+			count, err := h.tmdbSvc.GetTVSeasonEpisodeCount(ctx, ref.TmdbID, season.SeasonNumber)
+			if err != nil {
+				if h.logger != nil {
+					h.logger.Debugf("[organize] 获取 TMDB 本季集数失败 tmdb_id=%s season=%d: %v", ref.TmdbID, season.SeasonNumber, err)
+				}
 				continue
 			}
-			for seasonIndex := range ref.Seasons {
-				season := &ref.Seasons[seasonIndex]
-				count, err := h.tmdbSvc.GetTVSeasonEpisodeCount(ctx, ref.TmdbID, season.SeasonNumber)
-				if err != nil {
-					if h.logger != nil {
-						h.logger.Debugf("[organize] 获取 TMDB 本季集数失败 tmdb_id=%s season=%d: %v", ref.TmdbID, season.SeasonNumber, err)
-					}
-					continue
-				}
-				season.EpisodeCount = &count
-			}
+			season.EpisodeCount = &count
 		}
 	}
-	return items
 }
 
 func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePreviewTmdbRef {
@@ -779,32 +800,51 @@ func extractOrganizePreviewTmdbRefs(task model.OrganizePreviewTask) []OrganizePr
 		return nil
 	}
 
-	type previewItem struct {
-		TmdbID       string `json:"tmdb_id"`
-		MediaType    string `json:"media_type"`
-		Category     string `json:"category"`
-		Title        string `json:"title"`
-		Year         string `json:"year"`
-		SourceSeason int    `json:"source_season"`
-		TargetSeason int    `json:"target_season"`
-	}
 	var result struct {
-		MediaType string        `json:"media_type"`
-		Category  string        `json:"category"`
-		Items     []previewItem `json:"items"`
+		MediaType string                    `json:"media_type"`
+		Category  string                    `json:"category"`
+		Items     []organizePreviewTmdbItem `json:"items"`
+		TmdbRefs  []OrganizePreviewTmdbRef  `json:"tmdb_refs"`
 	}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
 		return nil
+	}
+	if len(result.TmdbRefs) > 0 {
+		return result.TmdbRefs
 	}
 
 	resultMediaType := canonicalOrganizePreviewTmdbMediaType(result.MediaType, result.Category)
 	if resultMediaType == "" {
 		resultMediaType = canonicalOrganizePreviewTmdbMediaType(task.MediaType, task.Category)
 	}
+	return buildOrganizePreviewTmdbRefs(result.Items, resultMediaType)
+}
+
+func extractOrganizePreviewTmdbRefsFromResult(result Organize115CookieResult, fallbackMediaType, fallbackCategory string) []OrganizePreviewTmdbRef {
+	resultMediaType := canonicalOrganizePreviewTmdbMediaType(result.MediaType, result.Category)
+	if resultMediaType == "" {
+		resultMediaType = canonicalOrganizePreviewTmdbMediaType(fallbackMediaType, fallbackCategory)
+	}
+	items := make([]organizePreviewTmdbItem, 0, len(result.Items))
+	for _, item := range result.Items {
+		items = append(items, organizePreviewTmdbItem{
+			TmdbID:       item.TmdbID,
+			MediaType:    item.MediaType,
+			Category:     item.Category,
+			Title:        item.Title,
+			Year:         item.Year,
+			SourceSeason: item.SourceSeason,
+			TargetSeason: item.TargetSeason,
+		})
+	}
+	return buildOrganizePreviewTmdbRefs(items, resultMediaType)
+}
+
+func buildOrganizePreviewTmdbRefs(items []organizePreviewTmdbItem, resultMediaType string) []OrganizePreviewTmdbRef {
 	refs := make([]OrganizePreviewTmdbRef, 0)
 	refIndexes := make(map[string]int)
 	seenSeasons := make(map[string]map[int]struct{})
-	for _, item := range result.Items {
+	for _, item := range items {
 		tmdbID := strings.TrimSpace(item.TmdbID)
 		if tmdbID == "" {
 			continue
@@ -933,7 +973,7 @@ func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
 		return
 	}
 	h.success(c, gin.H{
-		"list":  h.buildOrganizePreviewTaskListItems(c.Request.Context(), tasks),
+		"list":  buildOrganizePreviewTaskListItems(tasks),
 		"total": len(tasks),
 	}, "获取预整理队列成功")
 }
@@ -1121,6 +1161,8 @@ func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (se
 		FilenameRegexReplacement: task.FilenameRegexReplacement,
 	}
 	result, err := h.buildOrganize115CookieResult(task.UserID, req)
+	result.TmdbRefs = extractOrganizePreviewTmdbRefsFromResult(result, task.MediaType, task.Category)
+	h.populateOrganizePreviewTmdbEpisodeCounts(context.Background(), result.TmdbRefs)
 	data, marshalErr := json.Marshal(result)
 	processResult := service.OrganizePreviewProcessResult{
 		ResultJSON: string(data),
@@ -1361,6 +1403,7 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	flatItems := annotateOrganizeItems(groups, organizeAnnotateOptions{
 		bestVersionEnabled: bestVersionEnabled,
 	})
+	versionGroups := buildOrganizeVersionGroups(flatItems)
 	sourceFolderDeletedCount := 0
 	var sourceFolderDeleteErrors []string
 	if req.DeleteSourceFolder && !req.DryRun {
@@ -1381,6 +1424,7 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		Total:                    totalFiles,
 		DirDebug:                 flatDirDebug,
 		Items:                    flatItems,
+		VersionGroups:            versionGroups,
 		Groups:                   groups,
 		SourceFolderDeleted:      sourceFolderDeletedCount > 0,
 		SourceFolderDeletedCount: sourceFolderDeletedCount,
@@ -1821,6 +1865,7 @@ func annotateOrganizeItems(groups []Organize115CookieGroup, opts organizeAnnotat
 		}
 	}
 
+	annotateVersionProfiles(items)
 	if opts.bestVersionEnabled {
 		annotateBestVersions(items)
 	}
@@ -1829,6 +1874,16 @@ func annotateOrganizeItems(groups []Organize115CookieGroup, opts organizeAnnotat
 		flat = append(flat, *item)
 	}
 	return flat
+}
+
+func annotateVersionProfiles(items []*Organize115ItemResult) {
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.TmdbID) == "" {
+			continue
+		}
+		item.VersionScore, item.VersionReasons = scoreMediaVersion(*item)
+		item.VersionKey, item.VersionLabel = mediaVersionProfile(*item)
+	}
 }
 
 type versionCandidate struct {
@@ -1846,7 +1901,6 @@ func annotateBestVersions(items []*Organize115ItemResult) {
 		if key == "" {
 			continue
 		}
-		item.VersionScore, item.VersionReasons = scoreMediaVersion(*item)
 		groups[key] = append(groups[key], versionCandidate{item: item, index: idx})
 	}
 
@@ -1870,6 +1924,117 @@ func annotateBestVersions(items []*Organize115ItemResult) {
 			candidate.item.AltVersion = idx > 0
 		}
 	}
+}
+
+func mediaVersionProfile(item Organize115ItemResult) (string, string) {
+	traits := make([]string, 0, len(item.VersionReasons))
+	for _, reason := range item.VersionReasons {
+		label := versionReasonLabel(reason)
+		if label == "" || label == "文件体积" {
+			continue
+		}
+		traits = append(traits, label)
+	}
+	if len(traits) == 0 {
+		traits = append(traits, "其他版本")
+	}
+	label := strings.Join(traits, " · ")
+	key := organizeMediaKey(item) + "|" + strings.ToLower(strings.Join(traits, "|"))
+	return key, label
+}
+
+func versionReasonLabel(reason string) string {
+	reason = strings.TrimSpace(reason)
+	separator := strings.LastIndex(reason, " ")
+	if separator <= 0 {
+		return reason
+	}
+	if _, err := strconv.Atoi(strings.TrimSpace(reason[separator+1:])); err != nil {
+		return reason
+	}
+	return strings.TrimSpace(reason[:separator])
+}
+
+func buildOrganizeVersionGroups(items []Organize115ItemResult) []OrganizeVersionGroup {
+	type versionGroupAccumulator struct {
+		group       OrganizeVersionGroup
+		episodes    map[string]struct{}
+		totalScores int
+	}
+
+	accumulators := make(map[string]*versionGroupAccumulator)
+	order := make([]string, 0)
+	for _, item := range items {
+		key := strings.TrimSpace(item.VersionKey)
+		if key == "" || strings.TrimSpace(item.FileID) == "" {
+			continue
+		}
+		accumulator := accumulators[key]
+		if accumulator == nil {
+			accumulator = &versionGroupAccumulator{
+				group: OrganizeVersionGroup{
+					Key:   key,
+					Label: item.VersionLabel,
+				},
+				episodes: make(map[string]struct{}),
+			}
+			accumulators[key] = accumulator
+			order = append(order, key)
+		}
+		accumulator.group.FileIDs = append(accumulator.group.FileIDs, item.FileID)
+		accumulator.group.FileCount++
+		accumulator.totalScores += item.VersionScore
+		if item.BestVersion {
+			accumulator.group.BestCount++
+		}
+		if episodeKey := organizeVersionEpisodeKey(item); episodeKey != "" {
+			accumulator.episodes[episodeKey] = struct{}{}
+		}
+	}
+
+	groups := make([]OrganizeVersionGroup, 0, len(order))
+	for _, key := range order {
+		accumulator := accumulators[key]
+		accumulator.group.EpisodeCount = len(accumulator.episodes)
+		if accumulator.group.FileCount > 0 {
+			accumulator.group.Score = accumulator.totalScores / accumulator.group.FileCount
+		}
+		groups = append(groups, accumulator.group)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		if groups[i].EpisodeCount != groups[j].EpisodeCount {
+			return groups[i].EpisodeCount > groups[j].EpisodeCount
+		}
+		if groups[i].BestCount != groups[j].BestCount {
+			return groups[i].BestCount > groups[j].BestCount
+		}
+		if groups[i].Score != groups[j].Score {
+			return groups[i].Score > groups[j].Score
+		}
+		return groups[i].Label < groups[j].Label
+	})
+	if len(groups) > 0 {
+		groups[0].Recommended = true
+	}
+	return groups
+}
+
+func organizeVersionEpisodeKey(item Organize115ItemResult) string {
+	if !isOrganizeTVMedia(item.MediaType, item.Category) {
+		return ""
+	}
+	season := item.SourceSeason
+	if season <= 0 {
+		season = item.TargetSeason
+	}
+	episode := item.SourceEpisode
+	if episode <= 0 {
+		episode = item.TargetEpisode
+	}
+	if episode <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("s%d:e%d", season, episode)
 }
 
 func versionGroupKey(item Organize115ItemResult) string {

@@ -1,11 +1,16 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"film-fusion/app/config"
 	"film-fusion/app/model"
+	"film-fusion/app/service"
 )
 
 func TestExtractOrganizePreviewTmdbRefsDeduplicatesSeasonsByMediaTypeAndID(t *testing.T) {
@@ -75,6 +80,69 @@ func TestExtractOrganizePreviewTmdbRefsUsesTaskFallbackAndIgnoresInvalidJSON(t *
 	}
 	if refs := extractOrganizePreviewTmdbRefs(model.OrganizePreviewTask{ResultJSON: "{"}); len(refs) != 0 {
 		t.Fatalf("invalid JSON refs=%+v want empty", refs)
+	}
+}
+
+func TestExtractOrganizePreviewTmdbRefsUsesPersistedEpisodeCounts(t *testing.T) {
+	episodeCount := 12
+	result := Organize115CookieResult{
+		TmdbRefs: []OrganizePreviewTmdbRef{{
+			TmdbID:    "300",
+			MediaType: "tv",
+			Seasons: []OrganizePreviewTmdbSeason{{
+				SeasonNumber: 2,
+				EpisodeCount: &episodeCount,
+			}},
+		}},
+		Items: []Organize115ItemResult{{
+			TmdbID:       "300",
+			MediaType:    "tv",
+			SourceSeason: 2,
+		}},
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+
+	refs := extractOrganizePreviewTmdbRefs(model.OrganizePreviewTask{ResultJSON: string(raw)})
+	if len(refs) != 1 || len(refs[0].Seasons) != 1 || refs[0].Seasons[0].EpisodeCount == nil {
+		t.Fatalf("persisted refs missing: %+v", refs)
+	}
+	if got := *refs[0].Seasons[0].EpisodeCount; got != episodeCount {
+		t.Fatalf("episode count=%d want=%d", got, episodeCount)
+	}
+}
+
+func TestPopulateOrganizePreviewTmdbEpisodeCounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/tv/300/season/2" {
+			t.Errorf("unexpected TMDB path: %s", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"episodes":[{}, {}, {}]}`))
+	}))
+	defer server.Close()
+
+	h := &OrganizeHandler{
+		tmdbSvc: service.NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+			Enabled:        true,
+			BaseURL:        server.URL,
+			APIKey:         "test-key",
+			TimeoutSeconds: 1,
+		}}, nil),
+	}
+	refs := []OrganizePreviewTmdbRef{{
+		TmdbID:    "300",
+		MediaType: "tv",
+		Seasons:   []OrganizePreviewTmdbSeason{{SeasonNumber: 2}},
+	}}
+
+	h.populateOrganizePreviewTmdbEpisodeCounts(context.Background(), refs)
+	if refs[0].Seasons[0].EpisodeCount == nil || *refs[0].Seasons[0].EpisodeCount != 3 {
+		t.Fatalf("episode count not populated: %+v", refs)
 	}
 }
 
