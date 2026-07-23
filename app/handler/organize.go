@@ -1939,7 +1939,83 @@ func mediaVersionProfile(item Organize115ItemResult) (string, string) {
 		traits = append(traits, "其他版本")
 	}
 	label := strings.Join(traits, " · ")
-	key := organizeMediaKey(item) + "|" + strings.ToLower(strings.Join(traits, "|"))
+	profileKey := strings.ToLower(strings.Join(traits, "|"))
+	if isOrganizeTVMedia(item.MediaType, item.Category) {
+		if trackKey, _ := organizeEpisodeVersionTrack(item); trackKey != "" {
+			profileKey = trackKey
+		} else {
+			season := item.SourceSeason
+			if season <= 0 {
+				season = item.TargetSeason
+			}
+			if season > 0 {
+				profileKey = fmt.Sprintf("s%02de*|%s", season, profileKey)
+			}
+		}
+	}
+	key := organizeMediaKey(item) + "|" + profileKey
+	return key, label
+}
+
+// organizeEpisodeVersionTrack treats the season/episode marker as the boundary
+// between a show's title and its release track. The season remains part of the
+// key, the episode number is normalized, and the complete suffix stays intact.
+// Thus S01E01...GROUP-A and S01E02...GROUP-A share a track, while GROUP-B does
+// not get merged merely because its scored quality traits are the same.
+func organizeEpisodeVersionTrack(item Organize115ItemResult) (string, string) {
+	fileName := strings.TrimSpace(item.FileName)
+	if fileName == "" {
+		return "", ""
+	}
+
+	season := item.SourceSeason
+	if season <= 0 {
+		season = item.TargetSeason
+	}
+	episode := item.SourceEpisode
+	if episode <= 0 {
+		episode = item.TargetEpisode
+	}
+
+	var selected []int
+	selectedSeason := 0
+	matches := versionTrackSeasonEpisodeRegexp.FindAllStringSubmatchIndex(fileName, -1)
+	for _, match := range matches {
+		if len(match) < 8 {
+			continue
+		}
+		matchSeason, seasonErr := strconv.Atoi(fileName[match[4]:match[5]])
+		matchEpisode, episodeErr := strconv.Atoi(fileName[match[6]:match[7]])
+		if seasonErr != nil || episodeErr != nil {
+			continue
+		}
+		if selected == nil {
+			selected = match
+			selectedSeason = matchSeason
+		}
+		if (season <= 0 || matchSeason == season) && (episode <= 0 || matchEpisode == episode) {
+			selected = match
+			selectedSeason = matchSeason
+			break
+		}
+	}
+	if selected == nil || selectedSeason <= 0 {
+		return "", ""
+	}
+	season = selectedSeason
+
+	suffix := fileName[selected[3]:]
+	canonicalSuffix := strings.ToLower(strings.TrimSpace(suffix))
+	key := fmt.Sprintf("s%02de*|%s", season, canonicalSuffix)
+
+	displaySuffix := strings.TrimSpace(strings.TrimLeft(suffix, " ._-"))
+	if ext := filepath.Ext(displaySuffix); ext != "" {
+		displaySuffix = strings.TrimSpace(strings.TrimSuffix(displaySuffix, ext))
+	}
+	label := fmt.Sprintf("S%02dE*", season)
+	if displaySuffix != "" {
+		label += " · " + displaySuffix
+	}
 	return key, label
 }
 
@@ -1960,10 +2036,12 @@ func buildOrganizeVersionGroups(items []Organize115ItemResult) []OrganizeVersion
 		group       OrganizeVersionGroup
 		episodes    map[string]struct{}
 		totalScores int
+		trackLabel  string
 	}
 
 	accumulators := make(map[string]*versionGroupAccumulator)
 	order := make([]string, 0)
+	labelCounts := make(map[string]int)
 	for _, item := range items {
 		key := strings.TrimSpace(item.VersionKey)
 		if key == "" || strings.TrimSpace(item.FileID) == "" {
@@ -1977,9 +2055,14 @@ func buildOrganizeVersionGroups(items []Organize115ItemResult) []OrganizeVersion
 					Label: item.VersionLabel,
 				},
 				episodes: make(map[string]struct{}),
+				trackLabel: func() string {
+					_, label := organizeEpisodeVersionTrack(item)
+					return label
+				}(),
 			}
 			accumulators[key] = accumulator
 			order = append(order, key)
+			labelCounts[item.VersionLabel]++
 		}
 		accumulator.group.FileIDs = append(accumulator.group.FileIDs, item.FileID)
 		accumulator.group.FileCount++
@@ -1998,6 +2081,9 @@ func buildOrganizeVersionGroups(items []Organize115ItemResult) []OrganizeVersion
 		accumulator.group.EpisodeCount = len(accumulator.episodes)
 		if accumulator.group.FileCount > 0 {
 			accumulator.group.Score = accumulator.totalScores / accumulator.group.FileCount
+		}
+		if labelCounts[accumulator.group.Label] > 1 && accumulator.trackLabel != "" {
+			accumulator.group.Label += " · " + accumulator.trackLabel
 		}
 		groups = append(groups, accumulator.group)
 	}
@@ -3013,14 +3099,15 @@ var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
 var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第\s*(\d+)\s*季)$`)
 
 var (
-	defaultFilenameFallbackRegexp = regexp.MustCompile(`.* - (.*)-.*`)
-	multiEpisodeRenameRegexp      = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
-	seasonEpisodeRegexp           = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
-	seasonEpisodeXRegexp          = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
-	chineseSeasonEpisodeRegexp    = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
-	episodeOnlyRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
-	chineseEpisodeRegexp          = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
-	seasonOnlyRegexp              = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
+	defaultFilenameFallbackRegexp   = regexp.MustCompile(`.* - (.*)-.*`)
+	multiEpisodeRenameRegexp        = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
+	seasonEpisodeRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
+	versionTrackSeasonEpisodeRegexp = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})[\s._-]*e(\d{1,3})(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?)(?:$|[^0-9])`)
+	seasonEpisodeXRegexp            = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
+	chineseSeasonEpisodeRegexp      = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
+	episodeOnlyRegexp               = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
+	chineseEpisodeRegexp            = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
+	seasonOnlyRegexp                = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
 )
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。

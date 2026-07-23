@@ -319,3 +319,86 @@ func TestBuildOrganizeVersionGroupsCreatesEpisodeTabs(t *testing.T) {
 		t.Fatalf("alternate group=%+v, want two files and episodes", versionGroups[1])
 	}
 }
+
+func TestBuildOrganizeVersionGroupsUsesSeasonAndCompletePostEpisodeSuffix(t *testing.T) {
+	groups := []Organize115CookieGroup{{
+		Items: []Organize115ItemResult{
+			{
+				FileID:        "iq-e09",
+				FileName:      "An Ancient Love Song.2023.S01E09.WEB-DL.2160p.H265.DDP 2.0.IQ-OurTV.mkv",
+				MediaType:     "tv",
+				TmdbID:        "210849",
+				SourceSeason:  1,
+				SourceEpisode: 9,
+			},
+			{
+				FileID:        "iq-e10",
+				FileName:      "An Ancient Love Song.2023.S01E10.WEB-DL.2160p.H265.DDP 2.0.IQ-OurTV.mkv",
+				MediaType:     "tv",
+				TmdbID:        "210849",
+				SourceSeason:  1,
+				SourceEpisode: 10,
+			},
+			{
+				FileID:        "hds-e11",
+				FileName:      "An Ancient Love Song.2023.S01E11.WEB-DL.2160p.H265.DDP 2.0-HDSWEB.mkv",
+				MediaType:     "tv",
+				TmdbID:        "210849",
+				SourceSeason:  1,
+				SourceEpisode: 11,
+			},
+			{
+				FileID:        "hds-e12",
+				FileName:      "An Ancient Love Song.2023.S01E12.WEB-DL.2160p.H265.DDP 2.0-HDSWEB.mkv",
+				MediaType:     "tv",
+				TmdbID:        "210849",
+				SourceSeason:  1,
+				SourceEpisode: 12,
+			},
+		},
+	}}
+
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{bestVersionEnabled: true})
+	versionGroups := buildOrganizeVersionGroups(items)
+	if len(versionGroups) != 2 {
+		t.Fatalf("len(versionGroups)=%d want 2 groups=%+v", len(versionGroups), versionGroups)
+	}
+	for _, group := range versionGroups {
+		if group.EpisodeCount != 2 || group.FileCount != 2 {
+			t.Fatalf("group=%+v, want one two-episode release track", group)
+		}
+		if !strings.Contains(group.Label, "S01E*") {
+			t.Fatalf("group label=%q, want normalized season/episode marker", group.Label)
+		}
+	}
+
+	byID := make(map[string]Organize115ItemResult, len(items))
+	for _, item := range items {
+		byID[item.FileID] = item
+	}
+	if byID["iq-e09"].VersionKey != byID["iq-e10"].VersionKey {
+		t.Fatalf("same suffix keys differ: %q != %q", byID["iq-e09"].VersionKey, byID["iq-e10"].VersionKey)
+	}
+	if byID["iq-e09"].VersionKey == byID["hds-e12"].VersionKey {
+		t.Fatalf("different release suffixes share key %q", byID["iq-e09"].VersionKey)
+	}
+}
+
+func TestOrganizeEpisodeVersionTrackKeepsSeasonsSeparate(t *testing.T) {
+	seasonOne := Organize115ItemResult{
+		FileName:      "Show.S01E01.WEB-DL.2160p.H265-GROUP.mkv",
+		SourceSeason:  1,
+		SourceEpisode: 1,
+	}
+	seasonTwo := Organize115ItemResult{
+		FileName:      "Show.S02E01.WEB-DL.2160p.H265-GROUP.mkv",
+		SourceSeason:  2,
+		SourceEpisode: 1,
+	}
+
+	seasonOneKey, _ := organizeEpisodeVersionTrack(seasonOne)
+	seasonTwoKey, _ := organizeEpisodeVersionTrack(seasonTwo)
+	if seasonOneKey == seasonTwoKey {
+		t.Fatalf("different seasons share version track key %q", seasonOneKey)
+	}
+}
