@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"film-fusion/app/config"
 	"film-fusion/app/service"
 )
 
@@ -46,6 +49,108 @@ func TestFilenameProcessorNormalizesSpacedHyphenBeforeRecognition(t *testing.T) 
 	want := "Show.S01E01.Episode.Title.mkv"
 	if got != want {
 		t.Fatalf("processor.apply()=%q want %q", got, want)
+	}
+}
+
+func TestEnhanceEpisodeRecognizeInputWithTMDBEnglish(t *testing.T) {
+	tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/tv/123" {
+			t.Fatalf("unexpected TMDB path=%s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("language"); got != "en-US" {
+			t.Fatalf("TMDB language=%q want en-US", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"The English Show","original_name":"原始剧名"}`))
+	}))
+	defer tmdbServer.Close()
+
+	var moviePilotInput string
+	moviePilotServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize_file":
+			moviePilotInput = r.URL.Query().Get("path")
+			_, _ = w.Write([]byte(`{
+				"success": true,
+				"data": {
+					"media_info": {"media_type":"tv","title":"中文剧名","tmdb_id":"123"},
+					"meta_info": {"season_episode":"S01E02","resource_pix":"2160p","resource_type":"WEB-DL","video_encode":"H.265"}
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer moviePilotServer.Close()
+
+	h := &OrganizeHandler{
+		tmdbSvc: service.NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+			Enabled:        true,
+			BaseURL:        tmdbServer.URL,
+			APIKey:         "test-key",
+			TimeoutSeconds: 1,
+		}}, nil),
+		moviePilotSvc: service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
+			API:      moviePilotServer.URL,
+			Username: "user",
+			Password: "pass",
+		}}, nil),
+	}
+
+	recognizeName := normalizeFilenameForRecognition("S01E02 - 2160p.WEB-DL High Quality.AAC.H.265.mkv")
+	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
+		service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"},
+		"",
+		recognizeName,
+		"中文剧名/Season 01/"+recognizeName,
+	)
+	want := "The English Show.S01E02.2160p.WEB-DL High Quality.AAC.H.265.mkv"
+	if got != want {
+		t.Fatalf("enhanced input=%q want %q", got, want)
+	}
+	if moviePilotInput != want {
+		t.Fatalf("MoviePilot input=%q want %q", moviePilotInput, want)
+	}
+}
+
+func TestEnhanceEpisodeRecognizeInputRejectsDifferentTMDBResult(t *testing.T) {
+	tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"Ambiguous Show"}`))
+	}))
+	defer tmdbServer.Close()
+
+	moviePilotServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/v1/login/access-token" {
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":{"media_info":{"media_type":"tv","title":"Wrong Show","tmdb_id":"999"}}}`))
+	}))
+	defer moviePilotServer.Close()
+
+	h := &OrganizeHandler{
+		tmdbSvc: service.NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+			Enabled: true, BaseURL: tmdbServer.URL, APIKey: "test-key", TimeoutSeconds: 1,
+		}}, nil),
+		moviePilotSvc: service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
+			API: moviePilotServer.URL, Username: "user", Password: "pass",
+		}}, nil),
+	}
+
+	current := "中文剧名/Season 01/S01E02.2160p.mkv"
+	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
+		service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"},
+		"",
+		"S01E02.2160p.mkv",
+		current,
+	)
+	if got != current {
+		t.Fatalf("mismatched TMDB input=%q want fallback %q", got, current)
 	}
 }
 

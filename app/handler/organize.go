@@ -562,6 +562,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			}
 
 			recognizeName := normalizeFilenameForRecognition(file.Fn)
+			item.RecognizeName = recognizeName
 			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
 
 			info, _, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
@@ -573,7 +574,15 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 				continue
 			}
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeName, ext)
+			recognizeInput := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
+				info,
+				"",
+				recognizeName,
+				recognizeName,
+			)
+			item.RecognizeInput = recognizeInput
+
+			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
 			if transErr != nil {
 				if item.Error == "" {
 					item.Error = transErr.Error()
@@ -1624,6 +1633,14 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				continue
 			}
 
+			recognizeInput = h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
+				info,
+				expectedMediaType,
+				recognizeName,
+				recognizeInput,
+			)
+			item.RecognizeInput = recognizeInput
+
 			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
 			if transErr != nil {
 				if item.Error == "" {
@@ -1755,6 +1772,81 @@ func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName strin
 		lastErr = fmt.Errorf("识别失败")
 	}
 	return service.MoviePilotMediaInfo{}, lastInput, lastErr
+}
+
+// enhanceEpisodeRecognizeInputWithTMDBEnglish handles episode-only release
+// names such as "S01E02 - 2160p.WEB-DL...mkv". The normal recognition pass
+// first establishes the TMDB identity from folder context. We can then prepend
+// TMDB's English title and ask MoviePilot to recognize the enriched filename.
+// The enriched input is only accepted when MoviePilot resolves it back to the
+// same TMDB entry.
+func (h *OrganizeHandler) enhanceEpisodeRecognizeInputWithTMDBEnglish(
+	info service.MoviePilotMediaInfo,
+	expectedMediaType string,
+	recognizeName string,
+	currentInput string,
+) string {
+	if h == nil || h.tmdbSvc == nil || h.moviePilotSvc == nil {
+		return currentInput
+	}
+	if !episodeLeadingFilenameRegexp.MatchString(path.Base(strings.TrimSpace(recognizeName))) {
+		return currentInput
+	}
+
+	mediaType := strings.TrimSpace(info.MediaType)
+	if mediaType == "" {
+		mediaType = strings.TrimSpace(expectedMediaType)
+	}
+	if !isOrganizeTVMedia(mediaType, info.Category) {
+		return currentInput
+	}
+
+	tmdbID := strings.TrimSpace(info.TmdbID)
+	if tmdbID == "" {
+		return currentInput
+	}
+	englishTitle, err := h.tmdbSvc.GetMediaEnglishTitle(context.Background(), tmdbID, mediaType)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Debugf("[organize] 获取 TMDB 英文标题失败 tmdb_id=%s: %v", tmdbID, err)
+		}
+		return currentInput
+	}
+
+	enhancedInput := buildTMDBEnglishEpisodeRecognizeInput(englishTitle, recognizeName)
+	if enhancedInput == "" || enhancedInput == currentInput {
+		return currentInput
+	}
+	enhancedInfo, _, err := h.moviePilotSvc.RecognizeFile(enhancedInput)
+	if err != nil {
+		if h.logger != nil {
+			h.logger.Debugf("[organize] MP2 英文标题增强识别失败 input=%q: %v", enhancedInput, err)
+		}
+		return currentInput
+	}
+	if strings.TrimSpace(enhancedInfo.TmdbID) != tmdbID {
+		if h.logger != nil {
+			h.logger.Debugf(
+				"[organize] MP2 英文标题增强识别 TMDB 不一致 input=%q got=%s want=%s",
+				enhancedInput,
+				strings.TrimSpace(enhancedInfo.TmdbID),
+				tmdbID,
+			)
+		}
+		return currentInput
+	}
+	return enhancedInput
+}
+
+func buildTMDBEnglishEpisodeRecognizeInput(englishTitle, recognizeName string) string {
+	englishTitle = strings.NewReplacer("/", " ", "\\", " ").Replace(strings.TrimSpace(englishTitle))
+	englishTitle = strings.Join(strings.Fields(englishTitle), " ")
+	englishTitle = strings.Trim(englishTitle, " ._-")
+	fileName := strings.TrimLeft(path.Base(strings.TrimSpace(recognizeName)), " ._-")
+	if englishTitle == "" || fileName == "" {
+		return ""
+	}
+	return englishTitle + "." + fileName
 }
 
 func buildRecognizeInputs(fileName, recognizeName string, context Organize115FolderContext) []string {
@@ -3100,6 +3192,7 @@ var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第
 
 var (
 	defaultFilenameFallbackRegexp   = regexp.MustCompile(`.* - (.*)-.*`)
+	episodeLeadingFilenameRegexp    = regexp.MustCompile(`(?i)^s\d{1,2}[\s._-]*e\d{1,3}(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?(?:$|[^0-9])`)
 	multiEpisodeRenameRegexp        = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
 	seasonEpisodeRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
 	versionTrackSeasonEpisodeRegexp = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})[\s._-]*e(\d{1,3})(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?)(?:$|[^0-9])`)

@@ -5,8 +5,69 @@ import (
 	"film-fusion/app/config"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+func TestTMDBServiceGetMediaEnglishTitle(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if got := r.URL.Query().Get("language"); got != "en-US" {
+			t.Fatalf("language=%q want en-US", got)
+		}
+		if got := r.URL.Query().Get("api_key"); got != "test-key" {
+			t.Fatalf("api_key=%q want test-key", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/3/tv/123":
+			_, _ = w.Write([]byte(`{"name":"The English Show","original_name":"原始剧名"}`))
+		case "/3/movie/456":
+			_, _ = w.Write([]byte(`{"title":"The English Movie","original_title":"原始电影名"}`))
+		default:
+			t.Fatalf("unexpected path=%s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	svc := NewTMDBService(&config.Config{
+		TMDB: config.TMDBConfig{
+			Enabled:        true,
+			BaseURL:        server.URL,
+			APIKey:         "test-key",
+			TimeoutSeconds: 1,
+			CacheMinutes:   60,
+		},
+	}, nil)
+
+	title, err := svc.GetMediaEnglishTitle(context.Background(), "123", "series")
+	if err != nil || title != "The English Show" {
+		t.Fatalf("TV title=%q err=%v", title, err)
+	}
+	title, err = svc.GetMediaEnglishTitle(context.Background(), "123", "tv")
+	if err != nil || title != "The English Show" || requests != 1 {
+		t.Fatalf("cached TV title=%q requests=%d err=%v", title, requests, err)
+	}
+	title, err = svc.GetMediaEnglishTitle(context.Background(), "456", "movie")
+	if err != nil || title != "The English Movie" || requests != 2 {
+		t.Fatalf("movie title=%q requests=%d err=%v", title, requests, err)
+	}
+}
+
+func TestParseTMDBEnglishTitleResponseUsesOriginalTitleAsFallback(t *testing.T) {
+	title, err := ParseTMDBEnglishTitleResponse([]byte(`{"name":"","original_name":"Original Show"}`), "tv")
+	if err != nil || title != "Original Show" {
+		t.Fatalf("TV fallback title=%q err=%v", title, err)
+	}
+	title, err = ParseTMDBEnglishTitleResponse([]byte(`{"title":"","original_title":"Original Movie"}`), "movie")
+	if err != nil || title != "Original Movie" {
+		t.Fatalf("movie fallback title=%q err=%v", title, err)
+	}
+	if _, err := ParseTMDBEnglishTitleResponse([]byte(`{}`), "tv"); err == nil || !strings.Contains(err.Error(), "英文标题") {
+		t.Fatalf("missing title error=%v", err)
+	}
+}
 
 func TestTMDBServiceGetTVSeasonEpisodeCount(t *testing.T) {
 	var requests int
