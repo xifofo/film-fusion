@@ -263,6 +263,79 @@ func TestRSSRefreshProcessesMultipleSourcesIndependently(t *testing.T) {
 	}
 }
 
+func TestRSSDashboardSeparatesMatchedItemsAndReportsRetention(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:rss-monitor-dashboard?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.RSSMonitorSetting{}, &model.RSSNotificationRule{}, &model.RSSMonitorItem{}); err != nil {
+		t.Fatal(err)
+	}
+
+	monitor := NewRSSMonitorService(&config.Config{}, nil, &recordingRSSSender{}, nil)
+	monitor.db = db
+	ruleID := uint(88)
+	items := []model.RSSMonitorItem{
+		{Fingerprint: "dashboard-1", Title: "old unmatched", NotificationStatus: model.RSSNotificationIgnored},
+		{Fingerprint: "dashboard-2", Title: "old matched", RuleID: &ruleID, RuleName: "Test", NotificationStatus: model.RSSNotificationSent},
+		{Fingerprint: "dashboard-3", Title: "new unmatched", NotificationStatus: model.RSSNotificationIgnored},
+		{Fingerprint: "dashboard-4", Title: "new matched", RuleID: &ruleID, RuleName: "Test", NotificationStatus: model.RSSNotificationFailed},
+	}
+	for index := range items {
+		items[index].DiscoveredAt = time.Now().Add(time.Duration(index) * time.Minute)
+		if err := db.Create(&items[index]).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dashboard, err := monitor.Dashboard(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dashboard.RecentItems) != 2 || dashboard.RecentItems[0].Title != "new matched" || dashboard.RecentItems[1].Title != "new unmatched" {
+		t.Fatalf("unexpected recent items: %+v", dashboard.RecentItems)
+	}
+	if len(dashboard.RecentMatchedItems) != 2 || dashboard.RecentMatchedItems[0].Title != "new matched" || dashboard.RecentMatchedItems[1].Title != "old matched" {
+		t.Fatalf("unexpected matched items: %+v", dashboard.RecentMatchedItems)
+	}
+	if dashboard.RetentionLimit != rssRecentItemRetentionLimit {
+		t.Fatalf("retention limit=%d, want %d", dashboard.RetentionLimit, rssRecentItemRetentionLimit)
+	}
+}
+
+func TestPruneOldRSSItemsKeepsNewest(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:rss-monitor-prune?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.RSSMonitorItem{}); err != nil {
+		t.Fatal(err)
+	}
+
+	monitor := NewRSSMonitorService(&config.Config{}, nil, &recordingRSSSender{}, nil)
+	monitor.db = db
+	for index := 1; index <= 5; index++ {
+		item := model.RSSMonitorItem{
+			Fingerprint:        fmt.Sprintf("prune-%d", index),
+			Title:              fmt.Sprintf("item-%d", index),
+			NotificationStatus: model.RSSNotificationIgnored,
+			DiscoveredAt:       time.Now(),
+		}
+		if err := db.Create(&item).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	monitor.pruneOldItems(3)
+	var remaining []model.RSSMonitorItem
+	if err := db.Order("id ASC").Find(&remaining).Error; err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 3 || remaining[0].Title != "item-3" || remaining[2].Title != "item-5" {
+		t.Fatalf("unexpected remaining items: %+v", remaining)
+	}
+}
+
 type retryRSSRecognizer struct {
 	calls []string
 }

@@ -27,12 +27,13 @@ import (
 )
 
 const (
-	defaultRSSIntervalMinutes = 2
-	maxRSSBodyBytes           = 8 << 20
-	maxTelegramCaptionRunes   = 1024
-	maxTelegramMessageRunes   = 4096
-	legacyRSSMessageTemplate  = "[RSS 上新] {{rule_name}}\n{{title}}\n分类: {{category}}\n大小: {{size}}\n发布时间: {{pub_date}}\n{{link}}"
-	defaultRSSMessageTemplate = "{{media_title}} ({{media_year}}) {{season_episode}} 新资源上线\n评分：{{rating}}，类型：{{media_type}}，类别：{{media_category}}\n质量：{{quality}}，共{{file_count}}个文件，大小：{{size}}\n{{link}}"
+	defaultRSSIntervalMinutes   = 2
+	rssRecentItemRetentionLimit = 5000
+	maxRSSBodyBytes             = 8 << 20
+	maxTelegramCaptionRunes     = 1024
+	maxTelegramMessageRunes     = 4096
+	legacyRSSMessageTemplate    = "[RSS 上新] {{rule_name}}\n{{title}}\n分类: {{category}}\n大小: {{size}}\n发布时间: {{pub_date}}\n{{link}}"
+	defaultRSSMessageTemplate   = "{{media_title}} ({{media_year}}) {{season_episode}} 新资源上线\n评分：{{rating}}，类型：{{media_type}}，类别：{{media_category}}\n质量：{{quality}}，共{{file_count}}个文件，大小：{{size}}\n{{link}}"
 )
 
 var (
@@ -91,14 +92,16 @@ type RSSRefreshResult struct {
 
 type RSSMonitorDashboard struct {
 	// Settings is kept for backwards compatibility with single-source clients.
-	Settings      *model.RSSMonitorSetting    `json:"settings,omitempty"`
-	Sources       []model.RSSMonitorSetting   `json:"sources"`
-	Rules         []model.RSSNotificationRule `json:"rules"`
-	RecentItems   []model.RSSMonitorItem      `json:"recent_items"`
-	Running       bool                        `json:"running"`
-	TelegramReady bool                        `json:"telegram_ready"`
-	TotalSeen     int64                       `json:"total_seen"`
-	TotalNotified int64                       `json:"total_notified"`
+	Settings           *model.RSSMonitorSetting    `json:"settings,omitempty"`
+	Sources            []model.RSSMonitorSetting   `json:"sources"`
+	Rules              []model.RSSNotificationRule `json:"rules"`
+	RecentItems        []model.RSSMonitorItem      `json:"recent_items"`
+	RecentMatchedItems []model.RSSMonitorItem      `json:"recent_matched_items"`
+	RetentionLimit     int                         `json:"retention_limit"`
+	Running            bool                        `json:"running"`
+	TelegramReady      bool                        `json:"telegram_ready"`
+	TotalSeen          int64                       `json:"total_seen"`
+	TotalNotified      int64                       `json:"total_notified"`
 }
 
 type RSSMessageSender interface {
@@ -293,18 +296,24 @@ func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
 	if err := s.db.Order("id DESC").Limit(limit).Find(&items).Error; err != nil {
 		return RSSMonitorDashboard{}, err
 	}
+	var matchedItems []model.RSSMonitorItem
+	if err := s.db.Where("rule_id IS NOT NULL").Order("id DESC").Limit(limit).Find(&matchedItems).Error; err != nil {
+		return RSSMonitorDashboard{}, err
+	}
 	var totalSeen, totalNotified int64
 	s.db.Model(&model.RSSMonitorItem{}).Count(&totalSeen)
 	s.db.Model(&model.RSSMonitorItem{}).Where("notification_status = ?", model.RSSNotificationSent).Count(&totalNotified)
 	telegramReady := s.cfg != nil && s.cfg.Telegram.Enabled && strings.TrimSpace(s.cfg.Telegram.BotToken) != "" && strings.TrimSpace(s.cfg.Telegram.ChatID) != ""
 	dashboard := RSSMonitorDashboard{
-		Sources:       sources,
-		Rules:         rules,
-		RecentItems:   items,
-		Running:       s.running.Load(),
-		TelegramReady: telegramReady,
-		TotalSeen:     totalSeen,
-		TotalNotified: totalNotified,
+		Sources:            sources,
+		Rules:              rules,
+		RecentItems:        items,
+		RecentMatchedItems: matchedItems,
+		RetentionLimit:     rssRecentItemRetentionLimit,
+		Running:            s.running.Load(),
+		TelegramReady:      telegramReady,
+		TotalSeen:          totalSeen,
+		TotalNotified:      totalNotified,
 	}
 	if len(sources) > 0 {
 		dashboard.Settings = &sources[0]
@@ -600,7 +609,7 @@ func (s *RSSMonitorService) refresh(ctx context.Context, dueOnly bool) (RSSRefre
 		result.SourceFeedName = result.SourceResults[0].SourceFeedName
 		result.Error = result.SourceResults[0].Error
 	}
-	s.pruneOldItems(5000)
+	s.pruneOldItems(rssRecentItemRetentionLimit)
 	return result, nil
 }
 
