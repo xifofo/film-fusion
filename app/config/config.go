@@ -29,7 +29,7 @@ type WebhookConfig struct {
 }
 
 type CloudDrive2WebhookConfig struct {
-	Enabled bool   `mapstructure:"enabled" json:"enabled"`
+	Enabled bool   `mapstructure:"enabled" json:"enabled"` // 是否启用 Bearer Token 鉴权；关闭时仍接收 Webhook
 	Token   string `mapstructure:"token" json:"token"`
 }
 
@@ -575,7 +575,7 @@ func validateConfig(config *Config) error {
 // ValidateWebhook 验证 webhook 鉴权配置。32 字符下限用于避免误填短口令。
 func ValidateWebhook(settings WebhookConfig) error {
 	if settings.CloudDrive2.Enabled && len(strings.TrimSpace(settings.CloudDrive2.Token)) < 32 {
-		return fmt.Errorf("CloudDrive2 Webhook Token 启用时至少需要 32 个字符")
+		return fmt.Errorf("CloudDrive2 Webhook 鉴权启用时 Token 至少需要 32 个字符")
 	}
 	return nil
 }

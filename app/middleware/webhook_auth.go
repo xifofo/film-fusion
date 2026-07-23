@@ -10,13 +10,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// CloudDrive2WebhookAuth 验证 CloudDrive2 发来的独立 Bearer Token。
+// CloudDrive2WebhookAuth 在启用鉴权时验证 CloudDrive2 发来的独立 Bearer Token。
 // 中间件按请求读取共享配置指针，因此系统设置保存后可立即生效。
 func CloudDrive2WebhookAuth(cfg *config.Config) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		settings := cfg.Webhook.CloudDrive2
 		if !settings.Enabled {
-			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"message": "CloudDrive2 webhook is disabled"})
+			c.Next()
 			return
 		}
 

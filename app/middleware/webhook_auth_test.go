@@ -43,13 +43,12 @@ func TestCloudDrive2WebhookAuth(t *testing.T) {
 		})
 	}
 
-	// 配置指针热更新后无需重建路由。
+	// 配置指针热更新后无需重建路由；关闭鉴权时仍应正常接收请求。
 	cfg.Webhook.CloudDrive2.Enabled = false
 	req := httptest.NewRequest(http.MethodPost, "/hook", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
 	res := httptest.NewRecorder()
 	router.ServeHTTP(res, req)
-	if res.Code != http.StatusServiceUnavailable {
-		t.Fatalf("disabled status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("authentication disabled status = %d, want %d", res.Code, http.StatusNoContent)
 	}
 }

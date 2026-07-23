@@ -181,9 +181,9 @@ Webhook 与 Web 界面同端口（默认 `9000`），地址形如 `http://服务
   - 入库补充媒体信息：勾选「新媒体已添加」
   - 观看记录采集：勾选「播放停止 / 标记已播放」等事件
 - **CloudDrive2**：
-  1. 在 FilmFusion「系统设置 → Webhook」生成并保存独立 Token，开启 CloudDrive2 Webhook。
+  1. FilmFusion 会始终接收 CloudDrive2 Webhook；建议在「系统设置 → Webhook」生成独立 Token，并开启 Bearer Token 鉴权。
   2. 地址填写 `http://服务器IP:9000/webhook/clouddrive2/file_notify`，并将 CloudDrive2 的 `enabled` 设为 `true`。
-  3. 在 CloudDrive2 的 `[global_params.default_headers]` 中配置 `authorization = "Bearer <Token>"`。
+  3. 若 FilmFusion 开启了鉴权，请在 CloudDrive2 的 `[global_params.default_headers]` 中配置 `authorization = "Bearer <Token>"`。
   4. 不要复用后台密码；公网或不可信网络应通过 HTTPS 反向代理或 VPN 访问。
 - **MoviePilot2**：添加 Webhook 插件（`POST`），地址 `http://服务器IP:9000/webhook/movie-pilot/v2`
 
