@@ -58,6 +58,14 @@ type JWTConfig struct {
 	Issuer     string `mapstructure:"issuer" json:"issuer"`           // 签发者
 }
 
+const minJWTSecretBytes = 32
+
+var insecureJWTSecrets = map[string]struct{}{
+	"film-fusion-secret-key":               {},
+	"your-jwt-secret-key":                  {},
+	"your-secret-key-change-in-production": {},
+}
+
 // TelegramConfig 控制 Telegram Bot 告警投递及各类安全事件开关。
 type TelegramConfig struct {
 	Enabled                bool   `mapstructure:"enabled" json:"enabled"`
@@ -383,8 +391,11 @@ func setDefaults() {
 	viper.SetDefault("log.max_age", 28)
 	viper.SetDefault("log.compress", true)
 
-	// JWT默认配置
-	viper.SetDefault("jwt.secret", "your-secret-key-change-in-production")
+	// JWT 密钥没有可用默认值。环境变量优先于 config.yaml，适合容器密钥注入。
+	viper.SetDefault("jwt.secret", "")
+	if err := viper.BindEnv("jwt.secret", "FILM_FUSION_JWT_SECRET"); err != nil {
+		panic(fmt.Sprintf("绑定 JWT 密钥环境变量失败: %v", err))
+	}
 	viper.SetDefault("jwt.expire_time", 24) // 24小时
 	viper.SetDefault("jwt.issuer", "film-fusion")
 
@@ -543,8 +554,8 @@ func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
 		return fmt.Errorf("服务器端口未设置")
 	}
-	if config.JWT.Secret == "" {
-		return fmt.Errorf("JWT密钥未设置")
+	if err := ValidateJWTSecret(config.JWT.Secret); err != nil {
+		return err
 	}
 	if err := ValidateLoginSecurity("FilmFusion", config.Server.Security); err != nil {
 		return err
@@ -565,6 +576,22 @@ func validateConfig(config *Config) error {
 func ValidateWebhook(settings WebhookConfig) error {
 	if settings.CloudDrive2.Enabled && len(strings.TrimSpace(settings.CloudDrive2.Token)) < 32 {
 		return fmt.Errorf("CloudDrive2 Webhook Token 启用时至少需要 32 个字符")
+	}
+	return nil
+}
+
+// ValidateJWTSecret rejects missing, publicly known, and undersized HMAC keys.
+// HS256 requires at least 256 bits of key material, represented here as 32 bytes.
+func ValidateJWTSecret(secret string) error {
+	trimmed := strings.TrimSpace(secret)
+	if trimmed == "" {
+		return fmt.Errorf("JWT 密钥未设置；请配置 jwt.secret 或 FILM_FUSION_JWT_SECRET")
+	}
+	if _, known := insecureJWTSecrets[trimmed]; known {
+		return fmt.Errorf("JWT 密钥使用了公开示例值；请更换为随机生成的独立密钥")
+	}
+	if len([]byte(trimmed)) < minJWTSecretBytes {
+		return fmt.Errorf("JWT 密钥过短：至少需要 %d 字节的随机密钥", minJWTSecretBytes)
 	}
 	return nil
 }

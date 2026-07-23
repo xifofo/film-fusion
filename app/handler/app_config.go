@@ -149,8 +149,8 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")
 		return
 	}
-	if strings.TrimSpace(in.JWT.Secret) == "" {
-		h.error(c, http.StatusBadRequest, 400, "JWT 密钥不能为空")
+	if err := config.ValidateJWTSecret(in.JWT.Secret); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 	if err := config.ValidateEmbySecurity(in.Emby.Security); err != nil {

@@ -49,17 +49,19 @@ curl -O https://raw.githubusercontent.com/xifofo/film-fusion/main/docker-compose
 curl -o data/config.yaml https://raw.githubusercontent.com/xifofo/film-fusion/main/data/config.example.yaml
 ```
 
-2. 编辑 `data/config.yaml`，**至少修改以下项**：
+2. 用 `openssl rand -base64 48` 为该实例生成独立 JWT 密钥，然后编辑 `data/config.yaml`，**至少修改以下项**：
 
 ```yaml
 server:
   password: "你的管理员密码"          # 初始登录密码
 jwt:
-  secret: "一段足够长的随机密钥"       # JWT 签名密钥，务必修改
+  secret: ""                         # 粘贴刚生成的输出，至少 32 字节
 emby:
   url: "http://你的Emby:8096"        # Emby 服务器地址
   api_key: "你的 Emby API Key"        # Emby → 设置 → 高级 → API 密钥
 ```
+
+也可将 `jwt.secret` 留空，并通过 `FILM_FUSION_JWT_SECRET` 注入密钥；环境变量的优先级更高。
 
 3. `docker-compose.yml` 示例（已内置，可按需调整挂载）：
 

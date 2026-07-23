@@ -99,6 +99,7 @@ log:
   compress: true
 
 jwt:
-  secret: "film-fusion-secret-key"
+  # 使用 `openssl rand -base64 48` 生成；也可留空并设置 FILM_FUSION_JWT_SECRET。
+  secret: ""
   expire_time: 240       # hours
   issuer: "film-fusion"

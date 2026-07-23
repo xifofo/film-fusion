@@ -47,11 +47,11 @@ func (j *JWTService) GenerateToken(userID uint, username string) (string, error)
 // ValidateToken 验证JWT令牌
 func (j *JWTService) ValidateToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if token.Method != jwt.SigningMethodHS256 {
 			return nil, errors.New("unexpected signing method")
 		}
 		return []byte(j.config.JWT.Secret), nil
-	})
+	}, jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}), jwt.WithIssuer(j.config.JWT.Issuer))
 
 	if err != nil {
 		return nil, err

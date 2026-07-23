@@ -48,6 +48,15 @@ docker-compose up -d
 ## ⚙️ 配置说明
 
 ### 基础配置
+
+先为每个部署实例单独生成密钥：
+
+```bash
+openssl rand -base64 48
+```
+
+再把输出完整粘贴到配置中：
+
 ```yaml
 server:
   port: 9000                        # Web界面端口
@@ -56,9 +65,11 @@ server:
   download_115_concurrency: 2       # 115网盘下载并发数
 
 jwt:
-  secret: "your-jwt-secret-key"     # JWT签名密钥（必须修改）
+  secret: ""                         # 粘贴刚生成的输出，至少 32 字节
   expire_time: 240                  # Token过期时间（小时）
 ```
+
+也可以不把密钥写入 YAML，改为在部署环境中设置 `FILM_FUSION_JWT_SECRET`。该环境变量优先于 `jwt.secret`。
 
 ### Emby 集成配置
 ```yaml
