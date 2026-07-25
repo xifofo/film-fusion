@@ -548,6 +548,7 @@ func (s *Server) setupRoutes() {
 		{
 			embyMissing.GET("", embyMissingHandler.List)
 			embyMissing.POST("/scan", embyMissingHandler.Scan)
+			embyMissing.POST("/series/:series_id/scan", embyMissingHandler.RescanSeries)
 			embyMissing.POST("/resolve-cloud-path", embyMissingHandler.ResolveCloudPath)
 			embyMissing.GET("/external-links", embyMissingHandler.ExternalLinks)
 			embyMissing.GET("/libraries", embyMissingHandler.ListLibraries)

@@ -93,6 +93,16 @@ type ScanResult struct {
 	MissingCount int
 }
 
+// SeriesScanResult 单剧重扫结果。
+type SeriesScanResult struct {
+	SeriesID     string `json:"series_id"`
+	MissingCount int    `json:"missing_count"`
+	Resolved     bool   `json:"resolved"`
+}
+
+// ErrEmbyMissingScanInProgress 表示已有全量或单剧缺集扫描正在运行。
+var ErrEmbyMissingScanInProgress = errors.New("扫描正在进行中")
+
 // MissingEpisodeView 缺集明细(展示用)
 type MissingEpisodeView struct {
 	SeasonNumber  int    `json:"season_number"`
@@ -440,6 +450,11 @@ func (s *EmbyMissingService) fetchSeriesMissing(sr missingSeriesRef, opts ScanOp
 			if it.ParentIndexNumber != nil {
 				season = *it.ParentIndexNumber
 			}
+			// S00 是特别篇，不纳入缺集快照与统计。
+			// 即使 Emby 在 IncludeSpecials=false 时仍返回该数据，也在服务端统一兜底过滤。
+			if season == 0 {
+				continue
+			}
 			episode := 0
 			if it.IndexNumber != nil {
 				episode = *it.IndexNumber
@@ -470,11 +485,12 @@ func (s *EmbyMissingService) fetchSeriesMissing(sr missingSeriesRef, opts ScanOp
 // snapshotCounts 统计当前缺集快照的去重剧数与缺集总数。
 func (s *EmbyMissingService) snapshotCounts() (int, int, error) {
 	var missingCount int64
-	if err := s.db.Model(&model.EmbyMissingEpisode{}).Count(&missingCount).Error; err != nil {
+	counted := s.db.Model(&model.EmbyMissingEpisode{}).Where("season_number <> ?", 0)
+	if err := counted.Count(&missingCount).Error; err != nil {
 		return 0, 0, err
 	}
 	var seriesCount int64
-	if err := s.db.Model(&model.EmbyMissingEpisode{}).Distinct("series_id").Count(&seriesCount).Error; err != nil {
+	if err := counted.Distinct("series_id").Count(&seriesCount).Error; err != nil {
 		return 0, 0, err
 	}
 	return int(seriesCount), int(missingCount), nil
@@ -533,7 +549,7 @@ func (s *EmbyMissingService) Trigger(opts ScanOptions) error {
 	s.scanMu.Lock()
 	if s.scanning {
 		s.scanMu.Unlock()
-		return fmt.Errorf("扫描正在进行中")
+		return ErrEmbyMissingScanInProgress
 	}
 	s.scanning = true
 	s.scanMu.Unlock()
@@ -565,6 +581,94 @@ func (s *EmbyMissingService) Trigger(opts ScanOptions) error {
 		s.finishScan(true, res, nil)
 	}()
 	return nil
+}
+
+// RescanSeries 强制重新检查一部已在缺集快照中的剧，并只替换该剧的快照。
+// 它不受 RescanIntervalDays 影响；Emby 查询失败时保留原快照。
+func (s *EmbyMissingService) RescanSeries(ctx context.Context, seriesID string, opts ScanOptions) (*SeriesScanResult, error) {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return nil, fmt.Errorf("series_id 不能为空")
+	}
+
+	s.scanMu.Lock()
+	if s.scanning {
+		s.scanMu.Unlock()
+		return nil, ErrEmbyMissingScanInProgress
+	}
+	s.scanning = true
+	s.scanMu.Unlock()
+	defer func() {
+		s.scanMu.Lock()
+		s.scanning = false
+		s.scanMu.Unlock()
+	}()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	var existing model.EmbyMissingEpisode
+	if err := s.db.Where("series_id = ?", seriesID).First(&existing).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("该剧已不在缺集列表中")
+		}
+		return nil, err
+	}
+
+	var blacklistCount int64
+	if err := s.db.Model(&model.EmbyMissingBlacklist{}).
+		Where("series_id = ?", seriesID).
+		Count(&blacklistCount).Error; err != nil {
+		return nil, err
+	}
+	if blacklistCount > 0 {
+		return nil, fmt.Errorf("该剧已加入缺集检查黑名单")
+	}
+
+	ref := missingSeriesRef{
+		seriesID:    existing.SeriesID,
+		seriesName:  existing.SeriesName,
+		libraryID:   existing.LibraryID,
+		libraryName: existing.LibraryName,
+	}
+	rows, err := s.fetchSeriesMissing(ref, opts)
+	if err != nil {
+		return nil, fmt.Errorf("重新扫描剧集 %s 失败: %w", existing.SeriesName, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	scanRec := model.EmbyMissingSeriesScan{
+		SeriesID:      existing.SeriesID,
+		LibraryID:     existing.LibraryID,
+		OptionsKey:    buildMissingOptionsKey(opts),
+		LastCheckedAt: now,
+	}
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingEpisode{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingSeriesScan{}).Error; err != nil {
+			return err
+		}
+		if len(rows) > 0 {
+			if err := tx.CreateInBatches(rows, 200).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(&scanRec).Error
+	}); err != nil {
+		return nil, err
+	}
+
+	return &SeriesScanResult{
+		SeriesID:     seriesID,
+		MissingCount: len(rows),
+		Resolved:     len(rows) == 0,
+	}, nil
 }
 
 // IsScanning 当前是否在扫描
@@ -683,7 +787,10 @@ func (s *EmbyMissingService) UpdateSetting(in model.EmbyMissingSetting) (*model.
 // ListMissing 返回按剧集分组的缺集 + 设置状态。
 func (s *EmbyMissingService) ListMissing() (*MissingListResult, error) {
 	var eps []model.EmbyMissingEpisode
-	if err := s.db.Order("series_name asc, season_number asc, episode_number asc").Find(&eps).Error; err != nil {
+	if err := s.db.
+		Where("season_number <> ?", 0).
+		Order("series_name asc, season_number asc, episode_number asc").
+		Find(&eps).Error; err != nil {
 		return nil, err
 	}
 	groupMap := map[string]*MissingSeriesGroup{}
@@ -716,6 +823,9 @@ func (s *EmbyMissingService) ListMissing() (*MissingListResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	// 列表页统计以当前过滤后的快照为准，避免历史 S00 行仍影响展示。
+	st.LastSeriesCount = len(groups)
+	st.LastMissingCount = len(eps)
 	prog := s.getProgress()
 	return &MissingListResult{Setting: st, Groups: groups, Progress: &prog}, nil
 }
@@ -748,10 +858,10 @@ type ResolveSeriesResult struct {
 
 // ResolveSeriesCloudPath 取 Emby 剧集路径，反推云端源目录（供前端确认/手动修正），并返回全部可选映射。
 //
-// Emby 多以容器形式部署，其上报的路径前缀与 FilmFusion 写 STRM 的本地路径前缀往往不一致，
-// 直接拿 Emby 路径前缀匹配 LocalPath 会失败。定位真实本地目录按以下优先级尝试：
-//  1. 若该映射配置了 EmbyPathPrefix：把 Emby 路径前缀替换为 LocalPath，确定性地定位本地剧集目录（最可靠）；
-//  2. 否则用 Emby 路径的「后缀」在各映射 LocalPath 下试探真实存在的本地剧集目录（绕开错误前缀）；
+// Emby 多以容器形式部署，其上报的路径前缀与云端实际路径、本地挂载路径往往不一致。
+// 反推按以下优先级尝试：
+//  1. 若映射配置了 EmbyPathPrefix：去掉该前缀，余下路径直接作为云端目录（最可靠，不依赖本地挂载）；
+//  2. 否则用 Emby 路径的「后缀」在各映射 LocalPath 下试探真实存在的本地剧集目录；
 //  3. 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 LocalPath。
 //
 // 定位到本地目录后，读取目录内首个 .strm 文件内容（= ContentPrefix + 云端路径），剥离 ContentPrefix
@@ -793,7 +903,7 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 		result.Options = append(result.Options, opt)
 	}
 
-	// 优先：显式 Emby 路径前缀映射（确定性，把 Emby 前缀替换为 LocalPath 定位本地目录）
+	// 优先：显式 Emby 路径前缀映射（确定性，去前缀后直接得到云端目录）
 	if s.resolveByEmbyPrefix(embyPathLinux, paths, result) {
 		return result, nil
 	}
@@ -809,8 +919,8 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 	return result, nil
 }
 
-// resolveByEmbyPrefix 用各映射配置的 EmbyPathPrefix 把 Emby 上报路径前缀替换为 LocalPath，
-// 确定性地定位真实本地剧集目录（取匹配前缀最长者）。命中且本地目录存在时返回 true。
+// resolveByEmbyPrefix 去掉 EmbyPathPrefix 后直接得到云端目录（取匹配前缀最长者）。
+// 该结果不依赖 LocalPath 或本地目录是否存在；本地可访问时仅补充诊断信息。
 func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []model.CloudPath, result *ResolveSeriesResult) bool {
 	if embyPathLinux == "" {
 		return false
@@ -819,13 +929,13 @@ func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []m
 	var (
 		bestPath  *model.CloudPath
 		bestLocal string
-		bestRel   string // 相对 LocalPath 的子路径(带前导 /)，命中后作为云端目录兜底
+		bestRel   string // 去掉 EmbyPathPrefix 后的云端目录（带前导 /）
 		bestLen   = -1
 	)
 	for i := range paths {
 		p := &paths[i]
 		prefix := strings.TrimRight(pathhelper.ConvertToLinuxPath(strings.TrimSpace(p.EmbyPathPrefix)), "/")
-		if prefix == "" || strings.TrimSpace(p.LocalPath) == "" {
+		if prefix == "" {
 			continue
 		}
 
@@ -842,9 +952,12 @@ func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []m
 		if len(prefix) <= bestLen {
 			continue
 		}
-		localDir := p.LocalPath
-		if rel != "" {
-			localDir = pathhelper.SafeFilePathJoin(p.LocalPath, rel)
+		localDir := ""
+		if strings.TrimSpace(p.LocalPath) != "" {
+			localDir = p.LocalPath
+			if rel != "" {
+				localDir = pathhelper.SafeFilePathJoin(p.LocalPath, rel)
+			}
 		}
 		bestLen = len(prefix)
 		bestPath = p
@@ -860,15 +973,21 @@ func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []m
 		return false
 	}
 
-	// 校验替换后的本地目录是否真实存在；不存在则视为未命中，交给后续启发式继续尝试
-	if info, err := os.Stat(bestLocal); err != nil || !info.IsDir() {
-		s.log.Warnf("[emby-missing] Emby 前缀映射定位的本地目录不存在: %s (cloud_path_id=%d)", bestLocal, bestPath.ID)
-		return false
+	result.CloudPathID = bestPath.ID
+	result.CloudDir = bestRel
+	result.Matched = true
+
+	// 本地目录只用于展示诊断信息，不影响前缀直推结果。
+	if bestLocal != "" {
+		if info, err := os.Stat(bestLocal); err == nil && info.IsDir() {
+			s.readLocalStrmDiagnostics(bestLocal, result)
+		}
 	}
 
-	s.fillResultFromLocalDir(bestLocal, bestRel, bestPath, result)
-	s.log.Infof("[emby-missing] 反推云端目录(Emby前缀映射): emby=%s -> local=%s -> cloud=%s (cloud_path_id=%d)",
-		embyPathLinux, bestLocal, result.CloudDir, bestPath.ID)
+	if s.log != nil {
+		s.log.Infof("[emby-missing] 反推云端目录(Emby前缀直推): emby=%s -> cloud=%s (cloud_path_id=%d)",
+			embyPathLinux, result.CloudDir, bestPath.ID)
+	}
 	return true
 }
 
@@ -924,19 +1043,8 @@ func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []mo
 // 的子路径，带前导 /)作为云端目录兜底。
 func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, p *model.CloudPath, result *ResolveSeriesResult) {
 	result.CloudPathID = p.ID
-	result.LocalDir = localDir
 
-	strmFile := findFirstStrm(localDir)
-	var strmContent string
-	if strmFile != "" {
-		result.StrmFile = strmFile
-		if data, readErr := os.ReadFile(strmFile); readErr == nil {
-			strmContent = strings.TrimSpace(string(data))
-			result.StrmContent = strmContent
-		} else {
-			s.log.Warnf("[emby-missing] 读取 strm 失败: %s err=%v", strmFile, readErr)
-		}
-	}
+	strmFile, strmContent := s.readLocalStrmDiagnostics(localDir, result)
 
 	// 目录内有 strm 内容，剥离 ContentPrefix 反推云端目录（权威来源，不受挂载差异影响）
 	if strmContent != "" {
@@ -945,13 +1053,37 @@ func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, 
 			result.CloudDir = cloudDir
 			return
 		}
-		s.log.Warnf("[emby-missing] strm 内容剥离 ContentPrefix 失败: content=%s content_prefix=%s",
-			strmContent, p.ContentPrefix)
+		if s.log != nil {
+			s.log.Warnf("[emby-missing] strm 内容剥离 ContentPrefix 失败: content=%s content_prefix=%s",
+				strmContent, p.ContentPrefix)
+		}
 	}
 
 	// 无 strm / 读取失败 / 剥离失败：本地目录相对 LocalPath 的路径即云端目录（兜底）
 	result.Matched = true
 	result.CloudDir = relSuffix
+}
+
+// readLocalStrmDiagnostics 补充本地目录、首个 STRM 文件及其内容，仅用于诊断展示。
+func (s *EmbyMissingService) readLocalStrmDiagnostics(localDir string, result *ResolveSeriesResult) (string, string) {
+	result.LocalDir = localDir
+	strmFile := findFirstStrm(localDir)
+	if strmFile == "" {
+		return "", ""
+	}
+
+	result.StrmFile = strmFile
+	data, err := os.ReadFile(strmFile)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warnf("[emby-missing] 读取 strm 失败: %s err=%v", strmFile, err)
+		}
+		return strmFile, ""
+	}
+
+	strmContent := strings.TrimSpace(string(data))
+	result.StrmContent = strmContent
+	return strmFile, strmContent
 }
 
 // deriveCloudDirFromStrm 由 strm 内容剥离 ContentPrefix 得到云端文件路径，

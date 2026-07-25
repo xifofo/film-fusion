@@ -255,6 +255,7 @@ type OrganizePreviewTaskListItem struct {
 	TmdbRefs             []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
 	MultiEpisodeCount    int                      `json:"multi_episode_count,omitempty"`
 	MultiEpisodeExamples []string                 `json:"multi_episode_examples,omitempty"`
+	AllEpisodesExist     bool                     `json:"all_episodes_exist,omitempty"`
 }
 
 type MediaLookupSearchRequest struct {
@@ -775,6 +776,7 @@ func buildOrganizePreviewTaskListItems(tasks []model.OrganizePreviewTask) []Orga
 			TmdbRefs:             extractOrganizePreviewTmdbRefs(task),
 			MultiEpisodeCount:    multiEpisodeCount,
 			MultiEpisodeExamples: multiEpisodeExamples,
+			AllEpisodesExist:     extractOrganizePreviewAllEpisodesExist(task),
 		})
 	}
 	return items
@@ -944,6 +946,51 @@ func extractOrganizePreviewMultiEpisodes(task model.OrganizePreviewTask) (int, [
 		examples = append(examples, example)
 	}
 	return count, examples
+}
+
+func extractOrganizePreviewAllEpisodesExist(task model.OrganizePreviewTask) bool {
+	if task.Status != model.OrganizePreviewStatusCompleted {
+		return false
+	}
+
+	raw := strings.TrimSpace(task.ResultJSON)
+	if raw == "" {
+		return false
+	}
+
+	var result struct {
+		MediaType string `json:"media_type"`
+		Category  string `json:"category"`
+		Items     []struct {
+			MediaType     string `json:"media_type"`
+			Category      string `json:"category"`
+			LocalExists   bool   `json:"local_exists"`
+			SourceEpisode int    `json:"source_episode"`
+			TargetEpisode int    `json:"target_episode"`
+			Error         string `json:"error"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Items) == 0 {
+		return false
+	}
+
+	fallbackMediaType := canonicalOrganizePreviewTmdbMediaType(result.MediaType, result.Category)
+	if fallbackMediaType == "" {
+		fallbackMediaType = canonicalOrganizePreviewTmdbMediaType(task.MediaType, task.Category)
+	}
+	for _, item := range result.Items {
+		mediaType := canonicalOrganizePreviewTmdbMediaType(item.MediaType, item.Category)
+		if mediaType == "" {
+			mediaType = fallbackMediaType
+		}
+		if mediaType != "tv" ||
+			(item.SourceEpisode <= 0 && item.TargetEpisode <= 0) ||
+			strings.TrimSpace(item.Error) != "" ||
+			!item.LocalExists {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalOrganizePreviewTmdbMediaType(mediaType, category string) string {

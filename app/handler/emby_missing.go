@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -82,6 +83,35 @@ func (h *EmbyMissingHandler) Scan(c *gin.Context) {
 		return
 	}
 	h.success(c, nil, "扫描已开始")
+}
+
+// RescanSeries POST /api/emby-missing/series/:series_id/scan
+// 忽略增量扫描间隔，只重新检查并替换指定剧集的缺集快照。
+func (h *EmbyMissingHandler) RescanSeries(c *gin.Context) {
+	seriesID := strings.TrimSpace(c.Param("series_id"))
+	if seriesID == "" {
+		h.error(c, http.StatusBadRequest, 400, "series_id 不能为空")
+		return
+	}
+
+	setting, err := h.svc.GetSetting()
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "读取设置失败: "+err.Error())
+		return
+	}
+	result, err := h.svc.RescanSeries(c.Request.Context(), seriesID, service.ScanOptions{
+		IncludeSpecials: setting.IncludeSpecials,
+		IncludeUnaired:  setting.IncludeUnaired,
+	})
+	if err != nil {
+		if errors.Is(err, service.ErrEmbyMissingScanInProgress) {
+			h.error(c, http.StatusConflict, 409, err.Error())
+			return
+		}
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, result, "单剧扫描完成")
 }
 
 type resolveCloudPathPayload struct {

@@ -149,9 +149,12 @@ func TestPopulateOrganizePreviewTmdbEpisodeCounts(t *testing.T) {
 func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testing.T) {
 	result := Organize115CookieResult{
 		Items: []Organize115ItemResult{{
-			TmdbID:    "400",
-			MediaType: "movie",
-			RenameTo:  "Show.S01E01-02.1080p.mkv",
+			TmdbID:        "400",
+			MediaType:     "tv",
+			RenameTo:      "Show.S01E01-02.1080p.mkv",
+			SourceSeason:  1,
+			SourceEpisode: 1,
+			LocalExists:   true,
 		}},
 	}
 	raw, err := json.Marshal(result)
@@ -161,6 +164,7 @@ func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testin
 
 	items := buildOrganizePreviewTaskListItems([]model.OrganizePreviewTask{{
 		ID:         9,
+		Status:     model.OrganizePreviewStatusCompleted,
 		ResultJSON: string(raw),
 	}})
 	payload, err := json.Marshal(items)
@@ -174,8 +178,67 @@ func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testin
 	if !strings.Contains(encoded, `"multi_episode_count":1`) || !strings.Contains(encoded, `"multi_episode_examples":["S01E01-02"]`) {
 		t.Fatalf("list payload missing multi-episode summary: %s", encoded)
 	}
+	if !strings.Contains(encoded, `"all_episodes_exist":true`) {
+		t.Fatalf("list payload missing all-episodes-exist summary: %s", encoded)
+	}
 	if strings.Contains(encoded, "result_json") {
 		t.Fatalf("list payload leaked result_json: %s", encoded)
+	}
+}
+
+func TestExtractOrganizePreviewAllEpisodesExist(t *testing.T) {
+	completedTask := func(items []Organize115ItemResult) model.OrganizePreviewTask {
+		raw, err := json.Marshal(Organize115CookieResult{
+			MediaType: "tv",
+			Items:     items,
+		})
+		if err != nil {
+			t.Fatalf("marshal result: %v", err)
+		}
+		return model.OrganizePreviewTask{
+			Status:     model.OrganizePreviewStatusCompleted,
+			ResultJSON: string(raw),
+		}
+	}
+
+	allExisting := completedTask([]Organize115ItemResult{
+		{MediaType: "tv", SourceSeason: 1, SourceEpisode: 1, LocalExists: true},
+		{MediaType: "tv", SourceSeason: 1, SourceEpisode: 2, LocalExists: true},
+	})
+	if !extractOrganizePreviewAllEpisodesExist(allExisting) {
+		t.Fatal("all existing episodes should be marked as a complete existing season")
+	}
+
+	testCases := map[string]model.OrganizePreviewTask{
+		"one episode missing": completedTask([]Organize115ItemResult{
+			{MediaType: "tv", SourceEpisode: 1, LocalExists: true},
+			{MediaType: "tv", SourceEpisode: 2, LocalExists: false},
+		}),
+		"unrecognized episode": completedTask([]Organize115ItemResult{
+			{MediaType: "tv", LocalExists: true},
+		}),
+		"item error": completedTask([]Organize115ItemResult{
+			{MediaType: "tv", SourceEpisode: 1, LocalExists: true, Error: "识别失败"},
+		}),
+		"movie": completedTask([]Organize115ItemResult{
+			{MediaType: "movie", LocalExists: true},
+		}),
+		"empty result": completedTask(nil),
+		"failed task": {
+			Status:     model.OrganizePreviewStatusFailed,
+			ResultJSON: allExisting.ResultJSON,
+		},
+		"invalid json": {
+			Status:     model.OrganizePreviewStatusCompleted,
+			ResultJSON: "{",
+		},
+	}
+	for name, task := range testCases {
+		t.Run(name, func(t *testing.T) {
+			if extractOrganizePreviewAllEpisodesExist(task) {
+				t.Fatalf("%s should not be marked as a complete existing season", name)
+			}
+		})
 	}
 }
 
