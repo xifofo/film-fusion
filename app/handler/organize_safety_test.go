@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"film-fusion/app/config"
+	"film-fusion/app/model"
 	"film-fusion/app/service"
 )
 
@@ -49,6 +50,19 @@ func TestFilenameProcessorNormalizesSpacedHyphenBeforeRecognition(t *testing.T) 
 	want := "Show.S01E01.Episode.Title.mkv"
 	if got != want {
 		t.Fatalf("processor.apply()=%q want %q", got, want)
+	}
+}
+
+func TestDedupeConsecutiveTransferTagsOnlyRemovesRepeatedBitDepth(t *testing.T) {
+	got := dedupeConsecutiveTransferTags("A Hard Day.2014.BluRay.1080p.x265 10bit.10bit.mkv")
+	want := "A Hard Day.2014.BluRay.1080p.x265 10bit.mkv"
+	if got != want {
+		t.Fatalf("deduped transfer name=%q want %q", got, want)
+	}
+
+	unchanged := "Movie.2014.2014.10bit.HDR.10bit.mkv"
+	if got := dedupeConsecutiveTransferTags(unchanged); got != unchanged {
+		t.Fatalf("non-consecutive or non-technical tokens changed: got=%q want=%q", got, unchanged)
 	}
 }
 
@@ -292,6 +306,153 @@ func TestSummarizeOrganizeFactsExternalSubtitles(t *testing.T) {
 	summary := summarizeOrganizeFacts(items)
 	if summary.ExternalSubtitleCount != 1 {
 		t.Fatalf("external subtitle count=%d want 1", summary.ExternalSubtitleCount)
+	}
+}
+
+func TestOrganizeVersionScoringExcludesSubtitlesAndDoesNotTreatDTSHDAsTS(t *testing.T) {
+	groups := []Organize115CookieGroup{{
+		Items: []Organize115ItemResult{
+			{
+				FileID:    "x265-video",
+				FileName:  "A.Hard.Day.2014.BluRay.1080p.x265.10bit.mkv",
+				FileSize:  4 * 1024 * 1024 * 1024,
+				MediaType: "movie",
+				TmdbID:    "269494",
+			},
+			{
+				FileID:    "remux-video",
+				FileName:  "A.Hard.Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.mkv",
+				FileSize:  50 * 1024 * 1024 * 1024,
+				MediaType: "movie",
+				TmdbID:    "269494",
+			},
+			{
+				FileID:             "remux-subtitle",
+				FileName:           "A.Hard.Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.ass",
+				FileSize:           1024 * 1024,
+				IsSubtitle:         true,
+				MatchedVideoFileID: "remux-video",
+				MediaType:          "movie",
+				TmdbID:             "269494",
+			},
+		},
+	}}
+
+	items := annotateOrganizeItems(groups, organizeAnnotateOptions{bestVersionEnabled: true})
+	byID := make(map[string]Organize115ItemResult, len(items))
+	for _, item := range items {
+		byID[item.FileID] = item
+	}
+
+	remux := byID["remux-video"]
+	if !remux.BestVersion {
+		t.Fatalf("remux item=%+v, want best version", remux)
+	}
+	for _, reason := range remux.VersionReasons {
+		if strings.Contains(reason, "低质片源") {
+			t.Fatalf("DTS-HD was treated as telesync: reasons=%v", remux.VersionReasons)
+		}
+	}
+	subtitle := byID["remux-subtitle"]
+	if subtitle.BestVersion || subtitle.AltVersion || subtitle.VersionKey != "" || subtitle.VersionScore != 0 {
+		t.Fatalf("subtitle participated in version scoring: %+v", subtitle)
+	}
+
+	versionGroups := buildOrganizeVersionGroups(items)
+	if len(versionGroups) != 2 {
+		t.Fatalf("len(versionGroups)=%d want 2 groups=%+v", len(versionGroups), versionGroups)
+	}
+	totalVersionFiles := 0
+	for _, group := range versionGroups {
+		totalVersionFiles += group.FileCount
+		for _, fileID := range group.FileIDs {
+			if fileID == "remux-subtitle" {
+				t.Fatalf("subtitle included in version group: %+v", group)
+			}
+		}
+	}
+	if totalVersionFiles != 2 {
+		t.Fatalf("version file count=%d want 2 groups=%+v", totalVersionFiles, versionGroups)
+	}
+	if !versionGroups[0].Recommended || !strings.Contains(versionGroups[0].Label, "Remux") {
+		t.Fatalf("recommended group=%+v, want Remux", versionGroups[0])
+	}
+
+	_, tsReasons := scoreMediaVersion(Organize115ItemResult{
+		FileName:  "Movie.2024.1080p.TS-GROUP.mkv",
+		MediaType: "movie",
+		TmdbID:    "1",
+	})
+	foundLowQuality := false
+	for _, reason := range tsReasons {
+		foundLowQuality = foundLowQuality || strings.Contains(reason, "低质片源")
+	}
+	if !foundLowQuality {
+		t.Fatalf("real TS release was not marked low quality: reasons=%v", tsReasons)
+	}
+}
+
+func TestAttachOrganizeSubtitlesMatchesOnlyItsVideoVersion(t *testing.T) {
+	items := []Organize115ItemResult{
+		{
+			FileID:    "x265-video",
+			FileName:  "走到尽头 (2014) - A.Hard.Day.2014.BluRay.1080p.x265.10bit-MiniHD.mkv",
+			FileSize:  4 * 1024 * 1024 * 1024,
+			MediaType: "movie",
+			Category:  "日韩电影",
+			TmdbID:    "269494",
+			TargetPath: "/影视中心/日韩电影/走到尽头 (2014) {tmdb-269494}/" +
+				"A Hard Day.2014.BluRay.1080p.x265.10bit.mkv",
+		},
+		{
+			FileID:    "remux-video",
+			FileName:  "走到尽头 (2014) - A.Hard.Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.mkv",
+			FileSize:  50 * 1024 * 1024 * 1024,
+			MediaType: "movie",
+			Category:  "日韩电影",
+			TmdbID:    "269494",
+			TargetPath: "/影视中心/日韩电影/走到尽头 (2014) {tmdb-269494}/" +
+				"A Hard Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.mkv",
+		},
+	}
+	subtitles := []service.Web115File{{
+		FileID:   "remux-subtitle",
+		Name:     "走到尽头 (2014) - A.Hard.Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.zh-CN.forced.ass",
+		PickCode: "subtitle-pickcode",
+		IsFile:   true,
+		Size:     1024 * 1024,
+	}}
+
+	attachOrganizeSubtitles(subtitles, &items)
+
+	if len(items) != 3 {
+		t.Fatalf("len(items)=%d want 3 items=%+v", len(items), items)
+	}
+	if len(items[0].SubtitleFiles) != 0 {
+		t.Fatalf("x265 subtitles=%v want none", items[0].SubtitleFiles)
+	}
+	if len(items[1].SubtitleFiles) != 1 || items[1].SubtitleFiles[0] != subtitles[0].Name {
+		t.Fatalf("remux subtitles=%v want %q", items[1].SubtitleFiles, subtitles[0].Name)
+	}
+
+	attachment := items[2]
+	if !attachment.IsSubtitle || attachment.MatchedVideoFileID != "remux-video" {
+		t.Fatalf("attachment match=%+v", attachment)
+	}
+	wantTarget := "/影视中心/日韩电影/走到尽头 (2014) {tmdb-269494}/" +
+		"A Hard Day.2014.1080p.BluRay.Remux.AVC.DTS-HD.MA5.1.zh-CN.forced.ass"
+	if attachment.TargetPath != wantTarget {
+		t.Fatalf("subtitle target=%q want %q", attachment.TargetPath, wantTarget)
+	}
+	if attachment.PickCode != "subtitle-pickcode" {
+		t.Fatalf("subtitle pickcode=%q", attachment.PickCode)
+	}
+	handler := &OrganizeHandler{}
+	if err := handler.generateStrmFiles(model.CloudDirectory{SavePath: "/tmp/film-fusion-test"}, &items, true); err != nil {
+		t.Fatalf("generateStrmFiles() error=%v", err)
+	}
+	if items[2].StrmPath != "" {
+		t.Fatalf("subtitle strm path=%q want empty", items[2].StrmPath)
 	}
 }
 

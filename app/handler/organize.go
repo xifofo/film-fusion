@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
@@ -141,44 +142,46 @@ type organizeFactSummary struct {
 }
 
 type Organize115ItemResult struct {
-	FileID         string   `json:"file_id"`
-	FileName       string   `json:"file_name"`
-	FileSize       int64    `json:"file_size,omitempty"`
-	RecognizeName  string   `json:"recognize_name,omitempty"`
-	RecognizeInput string   `json:"recognize_input,omitempty"`
-	PickCode       string   `json:"pickcode"`
-	MediaType      string   `json:"media_type"`
-	Category       string   `json:"category"`
-	TmdbID         string   `json:"tmdb_id,omitempty"`
-	Title          string   `json:"title"`
-	Year           string   `json:"year"`
-	TitleYear      string   `json:"title_year,omitempty"`
-	TransferName   string   `json:"transfer_name"`
-	TargetPath     string   `json:"target_path"`
-	TargetDir      string   `json:"target_dir,omitempty"`
-	TargetDirID    string   `json:"target_dir_id,omitempty"`
-	NeedCreate     bool     `json:"need_create,omitempty"`
-	MissingDirs    []string `json:"missing_dirs,omitempty"`
-	RenameTo       string   `json:"rename_to,omitempty"`
-	StrmPath       string   `json:"strm_path,omitempty"`
-	StrmContent    string   `json:"strm_content,omitempty"`
-	SubtitleQueued bool     `json:"subtitle_queued,omitempty"`
-	SubtitleError  string   `json:"subtitle_error,omitempty"`
-	LocalDir       string   `json:"local_dir,omitempty"`
-	LocalExists    bool     `json:"local_exists,omitempty"`
-	SubtitleFiles  []string `json:"external_subtitle_files,omitempty"`
-	VersionScore   int      `json:"version_score,omitempty"`
-	VersionReasons []string `json:"version_reasons,omitempty"`
-	VersionKey     string   `json:"version_key,omitempty"`
-	VersionLabel   string   `json:"version_label,omitempty"`
-	BestVersion    bool     `json:"best_version,omitempty"`
-	AltVersion     bool     `json:"alternate_version,omitempty"`
-	SourceSeason   int      `json:"source_season,omitempty"`
-	SourceEpisode  int      `json:"source_episode,omitempty"`
-	TargetSeason   int      `json:"target_season,omitempty"`
-	TargetEpisode  int      `json:"target_episode,omitempty"`
-	EpisodeMatched *bool    `json:"episode_matched,omitempty"`
-	Error          string   `json:"error,omitempty"`
+	FileID             string   `json:"file_id"`
+	FileName           string   `json:"file_name"`
+	FileSize           int64    `json:"file_size,omitempty"`
+	IsSubtitle         bool     `json:"is_subtitle,omitempty"`
+	MatchedVideoFileID string   `json:"matched_video_file_id,omitempty"`
+	RecognizeName      string   `json:"recognize_name,omitempty"`
+	RecognizeInput     string   `json:"recognize_input,omitempty"`
+	PickCode           string   `json:"pickcode"`
+	MediaType          string   `json:"media_type"`
+	Category           string   `json:"category"`
+	TmdbID             string   `json:"tmdb_id,omitempty"`
+	Title              string   `json:"title"`
+	Year               string   `json:"year"`
+	TitleYear          string   `json:"title_year,omitempty"`
+	TransferName       string   `json:"transfer_name"`
+	TargetPath         string   `json:"target_path"`
+	TargetDir          string   `json:"target_dir,omitempty"`
+	TargetDirID        string   `json:"target_dir_id,omitempty"`
+	NeedCreate         bool     `json:"need_create,omitempty"`
+	MissingDirs        []string `json:"missing_dirs,omitempty"`
+	RenameTo           string   `json:"rename_to,omitempty"`
+	StrmPath           string   `json:"strm_path,omitempty"`
+	StrmContent        string   `json:"strm_content,omitempty"`
+	SubtitleQueued     bool     `json:"subtitle_queued,omitempty"`
+	SubtitleError      string   `json:"subtitle_error,omitempty"`
+	LocalDir           string   `json:"local_dir,omitempty"`
+	LocalExists        bool     `json:"local_exists,omitempty"`
+	SubtitleFiles      []string `json:"external_subtitle_files,omitempty"`
+	VersionScore       int      `json:"version_score,omitempty"`
+	VersionReasons     []string `json:"version_reasons,omitempty"`
+	VersionKey         string   `json:"version_key,omitempty"`
+	VersionLabel       string   `json:"version_label,omitempty"`
+	BestVersion        bool     `json:"best_version,omitempty"`
+	AltVersion         bool     `json:"alternate_version,omitempty"`
+	SourceSeason       int      `json:"source_season,omitempty"`
+	SourceEpisode      int      `json:"source_episode,omitempty"`
+	TargetSeason       int      `json:"target_season,omitempty"`
+	TargetEpisode      int      `json:"target_episode,omitempty"`
+	EpisodeMatched     *bool    `json:"episode_matched,omitempty"`
+	Error              string   `json:"error,omitempty"`
 }
 
 type OrganizeVersionGroup struct {
@@ -248,6 +251,7 @@ type organizePreviewTmdbItem struct {
 	Year         string `json:"year"`
 	SourceSeason int    `json:"source_season"`
 	TargetSeason int    `json:"target_season"`
+	IsSubtitle   bool   `json:"is_subtitle"`
 }
 
 type OrganizePreviewTaskListItem struct {
@@ -584,6 +588,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			item.RecognizeInput = recognizeInput
 
 			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
+			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
 					item.Error = transErr.Error()
@@ -838,6 +843,9 @@ func extractOrganizePreviewTmdbRefsFromResult(result Organize115CookieResult, fa
 	}
 	items := make([]organizePreviewTmdbItem, 0, len(result.Items))
 	for _, item := range result.Items {
+		if item.IsSubtitle {
+			continue
+		}
 		items = append(items, organizePreviewTmdbItem{
 			TmdbID:       item.TmdbID,
 			MediaType:    item.MediaType,
@@ -856,6 +864,9 @@ func buildOrganizePreviewTmdbRefs(items []organizePreviewTmdbItem, resultMediaTy
 	refIndexes := make(map[string]int)
 	seenSeasons := make(map[string]map[int]struct{})
 	for _, item := range items {
+		if item.IsSubtitle {
+			continue
+		}
 		tmdbID := strings.TrimSpace(item.TmdbID)
 		if tmdbID == "" {
 			continue
@@ -913,7 +924,8 @@ func extractOrganizePreviewMultiEpisodes(task model.OrganizePreviewTask) (int, [
 
 	var result struct {
 		Items []struct {
-			RenameTo string `json:"rename_to"`
+			RenameTo   string `json:"rename_to"`
+			IsSubtitle bool   `json:"is_subtitle"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil {
@@ -924,6 +936,9 @@ func extractOrganizePreviewMultiEpisodes(task model.OrganizePreviewTask) (int, [
 	examples := make([]string, 0, 5)
 	seenExamples := make(map[string]struct{})
 	for _, item := range result.Items {
+		if item.IsSubtitle {
+			continue
+		}
 		matches := multiEpisodeRenameRegexp.FindStringSubmatch(strings.TrimSpace(item.RenameTo))
 		if len(matches) < 6 {
 			continue
@@ -968,6 +983,7 @@ func extractOrganizePreviewAllEpisodesExist(task model.OrganizePreviewTask) bool
 			SourceEpisode int    `json:"source_episode"`
 			TargetEpisode int    `json:"target_episode"`
 			Error         string `json:"error"`
+			IsSubtitle    bool   `json:"is_subtitle"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal([]byte(raw), &result); err != nil || len(result.Items) == 0 {
@@ -979,6 +995,9 @@ func extractOrganizePreviewAllEpisodesExist(task model.OrganizePreviewTask) bool
 		fallbackMediaType = canonicalOrganizePreviewTmdbMediaType(task.MediaType, task.Category)
 	}
 	for _, item := range result.Items {
+		if item.IsSubtitle {
+			continue
+		}
 		mediaType := canonicalOrganizePreviewTmdbMediaType(item.MediaType, item.Category)
 		if mediaType == "" {
 			mediaType = fallbackMediaType
@@ -1600,8 +1619,8 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	categoryOverride := strings.TrimSpace(args.category)
 
 	results := make([]Organize115ItemResult, 0)
-	subtitleFiles := make([]string, 0)
-	subtitleFileSet := make(map[string]struct{})
+	subtitleSources := make([]service.Web115File, 0)
+	subtitleSourceSet := make(map[string]struct{})
 	totalFiles := 0
 	limit := 1150
 	offset := 0
@@ -1620,13 +1639,19 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				continue
 			}
 			if isSubtitleFile(file.Name) {
-				name := strings.TrimSpace(file.Name)
-				if name != "" {
-					if _, ok := subtitleFileSet[name]; !ok {
-						subtitleFileSet[name] = struct{}{}
-						subtitleFiles = append(subtitleFiles, name)
+				if shouldCollectOrganizeSubtitle(file.Name, excludeExts) {
+					key := strings.TrimSpace(file.FileID)
+					if key == "" {
+						key = strings.ToLower(strings.TrimSpace(file.Name))
+					}
+					if key != "" {
+						if _, ok := subtitleSourceSet[key]; !ok {
+							subtitleSourceSet[key] = struct{}{}
+							subtitleSources = append(subtitleSources, file)
+						}
 					}
 				}
+				continue
 			}
 			if len(fileIDs) > 0 {
 				if _, ok := fileIDs[strings.TrimSpace(file.FileID)]; !ok {
@@ -1689,6 +1714,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			item.RecognizeInput = recognizeInput
 
 			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
+			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
 					item.Error = transErr.Error()
@@ -1751,12 +1777,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		offset += limit
 	}
 
-	if len(subtitleFiles) > 0 {
-		sort.Strings(subtitleFiles)
-		for i := range results {
-			results[i].SubtitleFiles = append([]string{}, subtitleFiles...)
-		}
-	}
+	attachOrganizeSubtitles(subtitleSources, &results)
 
 	group.Total = totalFiles
 
@@ -2017,7 +2038,7 @@ func annotateOrganizeItems(groups []Organize115CookieGroup, opts organizeAnnotat
 
 func annotateVersionProfiles(items []*Organize115ItemResult) {
 	for _, item := range items {
-		if item == nil || strings.TrimSpace(item.TmdbID) == "" {
+		if item == nil || isOrganizeSubtitleItem(*item) || strings.TrimSpace(item.TmdbID) == "" {
 			continue
 		}
 		item.VersionScore, item.VersionReasons = scoreMediaVersion(*item)
@@ -2033,7 +2054,7 @@ type versionCandidate struct {
 func annotateBestVersions(items []*Organize115ItemResult) {
 	groups := make(map[string][]versionCandidate)
 	for idx, item := range items {
-		if item == nil || strings.TrimSpace(item.TmdbID) == "" {
+		if item == nil || isOrganizeSubtitleItem(*item) || strings.TrimSpace(item.TmdbID) == "" {
 			continue
 		}
 		key := versionGroupKey(*item)
@@ -2182,6 +2203,9 @@ func buildOrganizeVersionGroups(items []Organize115ItemResult) []OrganizeVersion
 	order := make([]string, 0)
 	labelCounts := make(map[string]int)
 	for _, item := range items {
+		if isOrganizeSubtitleItem(item) {
+			continue
+		}
 		key := strings.TrimSpace(item.VersionKey)
 		if key == "" || strings.TrimSpace(item.FileID) == "" {
 			continue
@@ -2288,6 +2312,9 @@ func versionGroupKey(item Organize115ItemResult) string {
 }
 
 func scoreMediaVersion(item Organize115ItemResult) (int, []string) {
+	if isOrganizeSubtitleItem(item) {
+		return 0, nil
+	}
 	text := strings.ToLower(strings.Join([]string{
 		item.FileName,
 		item.RecognizeName,
@@ -2366,7 +2393,7 @@ func scoreMediaVersion(item Organize115ItemResult) (int, []string) {
 	if containsAny(text, "proper", "repack") {
 		add(10, "修正版")
 	}
-	if containsAny(text, " cam ", ".cam.", "-cam-", "ts-", ".ts.", " telesync", "tc-", ".tc.", "hdcam") {
+	if lowQualityReleaseRegexp.MatchString(text) {
 		add(-500, "低质片源")
 	}
 
@@ -2395,6 +2422,9 @@ func containsAny(value string, needles ...string) bool {
 func summarizeOrganizeFacts(items []Organize115ItemResult) organizeFactSummary {
 	summary := organizeFactSummary{}
 	for _, item := range items {
+		if isOrganizeSubtitleItem(item) {
+			continue
+		}
 		if len(item.SubtitleFiles) > 0 {
 			summary.ExternalSubtitleCount++
 		}
@@ -3185,7 +3215,7 @@ func (h *OrganizeHandler) generateStrmFiles(dir model.CloudDirectory, items *[]O
 		if strings.TrimSpace(name) == "" {
 			name = item.FileName
 		}
-		if isSubtitleFile(name) {
+		if item.IsSubtitle || isSubtitleFile(name) {
 			continue
 		}
 		strmPath, content := buildStrmInfo(savePath, contentPrefix, item.TargetPath, encodeURI)
@@ -3248,6 +3278,9 @@ var (
 	episodeOnlyRegexp               = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
 	chineseEpisodeRegexp            = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
 	seasonOnlyRegexp                = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
+	lowQualityReleaseRegexp         = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:cam|hdcam|telesync|ts|tc)(?:$|[^a-z0-9])`)
+	subtitleQualifierSuffixRegexp   = regexp.MustCompile(`(?i)(?:[._ -]+(?:zh(?:[-_](?:cn|tw|hans|hant))?|chs|cht|chi|zho|cn|tw|sc|tc|en|eng|ja|jpn|ko|kor|forced|default|sdh|cc|简体|繁体|简中|繁中|双语|中字))+$`)
+	transferNameTokenRegexp         = regexp.MustCompile(`[[:alnum:]]+`)
 )
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。
@@ -3401,7 +3434,7 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 		if strings.TrimSpace(name) == "" {
 			name = item.FileName
 		}
-		if !isSubtitleFile(name) {
+		if !item.IsSubtitle && !isSubtitleFile(name) {
 			continue
 		}
 		if strings.TrimSpace(item.PickCode) == "" {
@@ -3420,6 +3453,293 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 	}
 
 	return nil
+}
+
+func attachOrganizeSubtitles(subtitles []service.Web115File, items *[]Organize115ItemResult) {
+	if len(subtitles) == 0 || items == nil || len(*items) == 0 {
+		return
+	}
+
+	sort.SliceStable(subtitles, func(i, j int) bool {
+		return strings.ToLower(subtitles[i].Name) < strings.ToLower(subtitles[j].Name)
+	})
+
+	usedTargetPaths := make(map[string]struct{}, len(*items)+len(subtitles))
+	for _, item := range *items {
+		if targetPath := strings.TrimSpace(item.TargetPath); targetPath != "" {
+			usedTargetPaths[strings.ToLower(targetPath)] = struct{}{}
+		}
+	}
+
+	for _, subtitle := range subtitles {
+		videoIndex := matchOrganizeSubtitleVideoIndex(subtitle.Name, *items)
+		if videoIndex < 0 {
+			continue
+		}
+
+		video := &(*items)[videoIndex]
+		subtitleName := strings.TrimSpace(subtitle.Name)
+		video.SubtitleFiles = appendUniqueString(video.SubtitleFiles, subtitleName)
+
+		targetPath := buildOrganizeSubtitleTargetPath(*video, subtitleName)
+		if targetPath == "" {
+			continue
+		}
+		targetPath = ensureUniqueOrganizeTargetPath(targetPath, usedTargetPaths)
+
+		attachment := Organize115ItemResult{
+			FileID:             subtitle.FileID,
+			FileName:           subtitleName,
+			FileSize:           subtitle.Size,
+			IsSubtitle:         true,
+			MatchedVideoFileID: video.FileID,
+			RecognizeName:      subtitleName,
+			PickCode:           subtitle.PickCode,
+			MediaType:          video.MediaType,
+			Category:           video.Category,
+			TmdbID:             video.TmdbID,
+			Title:              video.Title,
+			Year:               video.Year,
+			TitleYear:          video.TitleYear,
+			TransferName:       path.Base(targetPath),
+			TargetPath:         targetPath,
+			TargetDir:          path.Dir(targetPath),
+			RenameTo:           path.Base(targetPath),
+			SourceSeason:       video.SourceSeason,
+			SourceEpisode:      video.SourceEpisode,
+			TargetSeason:       video.TargetSeason,
+			TargetEpisode:      video.TargetEpisode,
+			EpisodeMatched:     video.EpisodeMatched,
+		}
+		*items = append(*items, attachment)
+	}
+
+	for i := range *items {
+		if len((*items)[i].SubtitleFiles) > 1 {
+			sort.Strings((*items)[i].SubtitleFiles)
+		}
+	}
+}
+
+func matchOrganizeSubtitleVideoIndex(subtitleName string, items []Organize115ItemResult) int {
+	subtitleKey := normalizeOrganizeReleaseStem(subtitleMatchStem(subtitleName))
+	if subtitleKey == "" {
+		return -1
+	}
+
+	exact := make([]int, 0, 1)
+	for index, item := range items {
+		if isOrganizeSubtitleItem(item) ||
+			strings.TrimSpace(item.FileID) == "" ||
+			strings.TrimSpace(item.TargetPath) == "" ||
+			strings.TrimSpace(item.Error) != "" {
+			continue
+		}
+		videoKey := normalizeOrganizeReleaseStem(organizeFileStem(item.FileName))
+		if videoKey == "" {
+			continue
+		}
+		if videoKey == subtitleKey {
+			exact = append(exact, index)
+		}
+	}
+
+	if len(exact) > 0 {
+		best := exact[0]
+		for _, index := range exact[1:] {
+			if items[index].FileSize > items[best].FileSize {
+				best = index
+			}
+		}
+		return best
+	}
+	return -1
+}
+
+func buildOrganizeSubtitleTargetPath(video Organize115ItemResult, subtitleName string) string {
+	videoTargetPath := strings.TrimSpace(video.TargetPath)
+	if videoTargetPath == "" {
+		return ""
+	}
+	videoTargetExt := filepath.Ext(videoTargetPath)
+	videoTargetStem := strings.TrimSuffix(videoTargetPath, videoTargetExt)
+
+	subtitleStem, subtitleExt := splitOrganizeSubtitleName(subtitleName)
+	if subtitleExt == "" {
+		return ""
+	}
+
+	qualifierStem, qualifier := stripOrganizeSubtitleQualifier(subtitleStem)
+	videoSourceStem := organizeFileStem(video.FileName)
+	if videoSourceStem != "" &&
+		len(subtitleStem) >= len(videoSourceStem) &&
+		strings.EqualFold(subtitleStem[:len(videoSourceStem)], videoSourceStem) {
+		qualifier = subtitleStem[len(videoSourceStem):]
+	} else if normalizeOrganizeReleaseStem(qualifierStem) !=
+		normalizeOrganizeReleaseStem(videoSourceStem) {
+		qualifier = ""
+	}
+	qualifier = normalizeOrganizeSubtitleQualifier(qualifier)
+
+	return videoTargetStem + qualifier + subtitleExt
+}
+
+func splitOrganizeSubtitleName(name string) (string, string) {
+	base := path.Base(strings.TrimSpace(name))
+	if base == "" {
+		return "", ""
+	}
+	outerExt := filepath.Ext(base)
+	if outerExt == "" {
+		return base, ""
+	}
+	if isCompressionExt(outerExt) {
+		withoutCompression := strings.TrimSuffix(base, outerExt)
+		subtitleExt := filepath.Ext(withoutCompression)
+		if isSubtitleExt(subtitleExt) {
+			return strings.TrimSuffix(withoutCompression, subtitleExt), subtitleExt + outerExt
+		}
+	}
+	if isSubtitleExt(outerExt) {
+		return strings.TrimSuffix(base, outerExt), outerExt
+	}
+	return strings.TrimSuffix(base, outerExt), outerExt
+}
+
+func subtitleMatchStem(name string) string {
+	stem, _ := splitOrganizeSubtitleName(name)
+	stem, _ = stripOrganizeSubtitleQualifier(stem)
+	return stem
+}
+
+func stripOrganizeSubtitleQualifier(stem string) (string, string) {
+	match := subtitleQualifierSuffixRegexp.FindStringIndex(stem)
+	if len(match) != 2 || match[0] <= 0 {
+		return stem, ""
+	}
+	return strings.TrimRight(stem[:match[0]], " ._-"), stem[match[0]:]
+}
+
+func normalizeOrganizeSubtitleQualifier(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.NewReplacer("/", ".", "\\", ".", " ", ".").Replace(value)
+	value = strings.Trim(value, ".")
+	if value == "" {
+		return ""
+	}
+	return "." + value
+}
+
+func organizeFileStem(name string) string {
+	base := path.Base(strings.TrimSpace(name))
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+func normalizeOrganizeReleaseStem(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, strings.TrimSpace(value))
+}
+
+func dedupeConsecutiveTransferTags(name string) string {
+	matches := transferNameTokenRegexp.FindAllStringIndex(name, -1)
+	if len(matches) < 2 {
+		return name
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(name))
+	lastEnd := 0
+	previousToken := ""
+	for _, match := range matches {
+		token := name[match[0]:match[1]]
+		separator := name[lastEnd:match[0]]
+		if isDeduplicatedTransferTag(token) && strings.EqualFold(token, previousToken) {
+			lastEnd = match[1]
+			continue
+		}
+		builder.WriteString(separator)
+		builder.WriteString(token)
+		previousToken = token
+		lastEnd = match[1]
+	}
+	builder.WriteString(name[lastEnd:])
+	return builder.String()
+}
+
+func isDeduplicatedTransferTag(value string) bool {
+	switch strings.ToLower(value) {
+	case "8bit", "10bit", "12bit":
+		return true
+	default:
+		return false
+	}
+}
+
+func ensureUniqueOrganizeTargetPath(targetPath string, used map[string]struct{}) string {
+	key := strings.ToLower(targetPath)
+	if _, exists := used[key]; !exists {
+		used[key] = struct{}{}
+		return targetPath
+	}
+
+	targetDir := path.Dir(targetPath)
+	stem, ext := splitOrganizeSubtitleName(path.Base(targetPath))
+	if ext == "" {
+		stem = path.Base(targetPath)
+	}
+	for index := 2; ; index++ {
+		candidateName := fmt.Sprintf("%s.%d%s", stem, index, ext)
+		candidate := candidateName
+		if targetDir != "." {
+			candidate = path.Join(targetDir, candidateName)
+		}
+		key = strings.ToLower(candidate)
+		if _, exists := used[key]; exists {
+			continue
+		}
+		used[key] = struct{}{}
+		return candidate
+	}
+}
+
+func appendUniqueString(values []string, value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func shouldCollectOrganizeSubtitle(name string, excludeExts []string) bool {
+	if !isSubtitleFile(name) {
+		return false
+	}
+	if len(excludeExts) == 0 {
+		return true
+	}
+	_, extensionChain := splitOrganizeSubtitleName(name)
+	for _, ext := range strings.Split(strings.TrimPrefix(strings.ToLower(extensionChain), "."), ".") {
+		if containsString(excludeExts, ext) {
+			return false
+		}
+	}
+	return true
+}
+
+func isOrganizeSubtitleItem(item Organize115ItemResult) bool {
+	if item.IsSubtitle {
+		return true
+	}
+	return isSubtitleFile(item.FileName) || isSubtitleFile(item.RenameTo)
 }
 
 func isSubtitleFile(name string) bool {
@@ -3468,6 +3788,9 @@ func (h *OrganizeHandler) cachePickcodeCaches(dir model.CloudDirectory, items []
 	contentPrefix := strings.TrimSpace(dir.ContentPrefix)
 	created := 0
 	for _, item := range items {
+		if isOrganizeSubtitleItem(item) {
+			continue
+		}
 		targetPath := strings.TrimSpace(item.TargetPath)
 		if targetPath == "" || strings.TrimSpace(item.PickCode) == "" {
 			continue
