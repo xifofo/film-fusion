@@ -294,6 +294,61 @@ func (q *OrganizePreviewQueue) Requeue(userID uint, id uint) (model.OrganizePrev
 	return q.Get(userID, id)
 }
 
+func (q *OrganizePreviewQueue) ClaimForFolderUpdate(userID uint, id uint) (model.OrganizePreviewTask, error) {
+	task, err := q.Get(userID, id)
+	if err != nil {
+		return task, err
+	}
+	if task.Status == model.OrganizePreviewStatusProcessing {
+		return task, errors.New("任务正在处理中，不能修改目录名")
+	}
+	res := q.db.Model(&model.OrganizePreviewTask{}).
+		Where("id = ? AND user_id = ? AND status <> ?", id, userID, model.OrganizePreviewStatusProcessing).
+		Update("status", model.OrganizePreviewStatusProcessing)
+	if res.Error != nil {
+		return task, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return task, errors.New("任务已开始处理，请稍后再试")
+	}
+	return task, nil
+}
+
+func (q *OrganizePreviewQueue) RestoreStatusAfterFolderUpdate(userID uint, id uint, status model.OrganizePreviewTaskStatus) error {
+	if q == nil || q.db == nil {
+		return errors.New("预整理队列未初始化")
+	}
+	return q.db.Model(&model.OrganizePreviewTask{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, model.OrganizePreviewStatusProcessing).
+		Update("status", status).Error
+}
+
+func (q *OrganizePreviewQueue) UpdateFolderAndRequeue(userID uint, id uint, folderName, folderPath string) (model.OrganizePreviewTask, error) {
+	var task model.OrganizePreviewTask
+	res := q.db.Model(&model.OrganizePreviewTask{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, model.OrganizePreviewStatusProcessing).
+		Updates(map[string]any{
+			"folder_name":             strings.TrimSpace(folderName),
+			"folder_path":             strings.TrimSpace(folderPath),
+			"status":                  model.OrganizePreviewStatusPending,
+			"total":                   0,
+			"external_subtitle_count": 0,
+			"best_version_count":      0,
+			"alternate_version_count": 0,
+			"result_json":             "",
+			"error":                   "",
+			"started_at":              nil,
+			"completed_at":            nil,
+		})
+	if res.Error != nil {
+		return task, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return task, errors.New("任务状态已变化，不能重新加入队列")
+	}
+	return q.Get(userID, id)
+}
+
 func (q *OrganizePreviewQueue) Delete(userID uint, id uint) error {
 	if q == nil || q.db == nil {
 		return errors.New("预整理队列未初始化")

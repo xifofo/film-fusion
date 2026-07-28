@@ -230,6 +230,10 @@ type OrganizePreviewTaskCreateRequest struct {
 	FilenameRegexReplacement string                         `json:"filename_regex_replacement"`
 }
 
+type OrganizePreviewTaskAssignTMDBRequest struct {
+	TmdbID string `json:"tmdb_id" binding:"required"`
+}
+
 type OrganizePreviewTmdbRef struct {
 	TmdbID    string                      `json:"tmdb_id"`
 	MediaType string                      `json:"media_type,omitempty"`
@@ -1109,6 +1113,95 @@ func (h *OrganizeHandler) RequeuePreviewTask(c *gin.Context) {
 		return
 	}
 	h.success(c, task, "已重新加入预整理队列")
+}
+
+func (h *OrganizeHandler) AssignPreviewTaskTMDB(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "任务 ID 无效")
+		return
+	}
+
+	var req OrganizePreviewTaskAssignTMDBRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "参数错误")
+		return
+	}
+	tmdbID := strings.TrimSpace(req.TmdbID)
+	if !previewTaskTMDBIDRegexp.MatchString(tmdbID) {
+		h.error(c, http.StatusBadRequest, 400, "TMDB ID 只能填写正整数")
+		return
+	}
+
+	userID := userIDVal.(uint)
+	task, err := h.previewQueue.ClaimForFolderUpdate(userID, uint(id))
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			h.error(c, http.StatusNotFound, 404, "预整理任务不存在")
+			return
+		}
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	folderUpdateClaimed := true
+	defer func() {
+		if folderUpdateClaimed {
+			if restoreErr := h.previewQueue.RestoreStatusAfterFolderUpdate(userID, uint(id), task.Status); restoreErr != nil && h.logger != nil {
+				h.logger.Errorf("恢复预整理任务状态失败: task_id=%d err=%v", id, restoreErr)
+			}
+		}
+	}()
+
+	folderID := strings.TrimSpace(task.FolderID)
+	folderName := strings.TrimSpace(task.FolderName)
+	if folderID == "" || folderID == "0" || folderName == "" {
+		h.error(c, http.StatusBadRequest, 400, "预整理任务的源文件夹信息不完整")
+		return
+	}
+	newFolderName := buildPreviewTaskTMDBFolderName(folderName, tmdbID)
+	newFolderPath := replacePreviewTaskFolderPath(task.FolderPath, folderName, newFolderName)
+
+	if newFolderName != folderName {
+		var storage model.CloudStorage
+		if err := database.DB.Where("id = ? AND user_id = ?", task.CloudStorageID, userID).First(&storage).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				h.error(c, http.StatusBadRequest, 400, "源存储配置不存在")
+				return
+			}
+			h.error(c, http.StatusInternalServerError, 500, "读取源存储配置失败")
+			return
+		}
+		if strings.TrimSpace(storage.Cookie) == "" {
+			h.error(c, http.StatusBadRequest, 400, "源存储 Cookie 缺失，不能重命名")
+			return
+		}
+		client, err := h.web115Svc.NewClient(storage.Cookie)
+		if err != nil {
+			h.error(c, http.StatusBadRequest, 400, err.Error())
+			return
+		}
+		if err := h.web115Svc.BatchRename(client, map[string]string{folderID: newFolderName}); err != nil {
+			h.error(c, http.StatusBadRequest, 400, "重命名源文件夹失败: "+err.Error())
+			return
+		}
+	}
+
+	task, err = h.previewQueue.UpdateFolderAndRequeue(userID, uint(id), newFolderName, newFolderPath)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "源文件夹已重命名，但重新加入队列失败: "+err.Error())
+		return
+	}
+	folderUpdateClaimed = false
+	h.success(c, task, "已指定 TMDB ID，并重新加入预整理队列")
 }
 
 func (h *OrganizeHandler) DeletePreviewTask(c *gin.Context) {
@@ -3268,6 +3361,8 @@ var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
 var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第\s*(\d+)\s*季)$`)
 
 var (
+	previewTaskTMDBIDRegexp         = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+	previewTaskTMDBMarkerRegexp     = regexp.MustCompile(`(?i)\s*\{tmdb(?:id)?-[0-9]+\}`)
 	defaultFilenameFallbackRegexp   = regexp.MustCompile(`.* - (.*)-.*`)
 	episodeLeadingFilenameRegexp    = regexp.MustCompile(`(?i)^s\d{1,2}[\s._-]*e\d{1,3}(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?(?:$|[^0-9])`)
 	multiEpisodeRenameRegexp        = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
@@ -3282,6 +3377,32 @@ var (
 	subtitleQualifierSuffixRegexp   = regexp.MustCompile(`(?i)(?:[._ -]+(?:zh(?:[-_](?:cn|tw|hans|hant))?|chs|cht|chi|zho|cn|tw|sc|tc|en|eng|ja|jpn|ko|kor|forced|default|sdh|cc|简体|繁体|简中|繁中|双语|中字))+$`)
 	transferNameTokenRegexp         = regexp.MustCompile(`[[:alnum:]]+`)
 )
+
+func buildPreviewTaskTMDBFolderName(folderName, tmdbID string) string {
+	baseName := strings.TrimSpace(previewTaskTMDBMarkerRegexp.ReplaceAllString(strings.TrimSpace(folderName), ""))
+	marker := "{tmdb-" + strings.TrimSpace(tmdbID) + "}"
+	if baseName == "" {
+		return marker
+	}
+	return baseName + " " + marker
+}
+
+func replacePreviewTaskFolderPath(folderPath, oldFolderName, newFolderName string) string {
+	folderPath = strings.TrimSpace(folderPath)
+	oldFolderName = strings.TrimSpace(oldFolderName)
+	newFolderName = strings.TrimSpace(newFolderName)
+	if folderPath == "" || folderPath == oldFolderName {
+		return newFolderName
+	}
+	suffix := " / " + oldFolderName
+	if oldFolderName != "" && strings.HasSuffix(folderPath, suffix) {
+		return strings.TrimSuffix(folderPath, suffix) + " / " + newFolderName
+	}
+	if index := strings.LastIndex(folderPath, " / "); index >= 0 {
+		return folderPath[:index] + " / " + newFolderName
+	}
+	return newFolderName
+}
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。
 func extractTmdbIDFromName(name string) string {

@@ -186,6 +186,65 @@ func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testin
 	}
 }
 
+func TestBuildPreviewTaskTMDBFolderName(t *testing.T) {
+	testCases := map[string]struct {
+		folderName string
+		tmdbID     string
+		want       string
+	}{
+		"append marker": {
+			folderName: "示例电影 (2024)",
+			tmdbID:     "12345",
+			want:       "示例电影 (2024) {tmdb-12345}",
+		},
+		"replace tmdb marker": {
+			folderName: "示例电影 (2024) {tmdb-100}",
+			tmdbID:     "200",
+			want:       "示例电影 (2024) {tmdb-200}",
+		},
+		"replace legacy tmdbid marker": {
+			folderName: "示例电影 (2024) {tmdbid-100}",
+			tmdbID:     "200",
+			want:       "示例电影 (2024) {tmdb-200}",
+		},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			if got := buildPreviewTaskTMDBFolderName(testCase.folderName, testCase.tmdbID); got != testCase.want {
+				t.Fatalf("buildPreviewTaskTMDBFolderName()=%q want=%q", got, testCase.want)
+			}
+		})
+	}
+}
+
+func TestReplacePreviewTaskFolderPath(t *testing.T) {
+	const oldName = "示例电影 (2024)"
+	const newName = "示例电影 (2024) {tmdb-12345}"
+	testCases := map[string]struct {
+		folderPath string
+		want       string
+	}{
+		"nested path": {
+			folderPath: "下载 / 电影 / " + oldName,
+			want:       "下载 / 电影 / " + newName,
+		},
+		"single folder": {
+			folderPath: oldName,
+			want:       newName,
+		},
+		"missing path": {
+			want: newName,
+		},
+	}
+	for name, testCase := range testCases {
+		t.Run(name, func(t *testing.T) {
+			if got := replacePreviewTaskFolderPath(testCase.folderPath, oldName, newName); got != testCase.want {
+				t.Fatalf("replacePreviewTaskFolderPath()=%q want=%q", got, testCase.want)
+			}
+		})
+	}
+}
+
 func TestExtractOrganizePreviewAllEpisodesExist(t *testing.T) {
 	completedTask := func(items []Organize115ItemResult) model.OrganizePreviewTask {
 		raw, err := json.Marshal(Organize115CookieResult{
