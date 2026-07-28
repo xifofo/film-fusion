@@ -23,6 +23,28 @@ func newOrganizePreviewQueueTestDB(t *testing.T) *gorm.DB {
 	return db
 }
 
+func TestClampOrganizePreviewTaskLimit(t *testing.T) {
+	tests := []struct {
+		name  string
+		value int
+		want  int
+	}{
+		{name: "negative uses default", value: -1, want: 100},
+		{name: "zero uses default", value: 0, want: 100},
+		{name: "minimum", value: 1, want: 1},
+		{name: "custom", value: 250, want: 250},
+		{name: "maximum", value: 1000, want: 1000},
+		{name: "above maximum", value: 1001, want: 1000},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ClampOrganizePreviewTaskLimit(test.value); got != test.want {
+				t.Fatalf("ClampOrganizePreviewTaskLimit(%d)=%d want=%d", test.value, got, test.want)
+			}
+		})
+	}
+}
+
 func TestUpdateFolderAndRequeueResetsPreviewResult(t *testing.T) {
 	db := newOrganizePreviewQueueTestDB(t)
 	completedAt := time.Now()
@@ -92,5 +114,97 @@ func TestClaimForFolderUpdateRejectsProcessingTask(t *testing.T) {
 	queue := &OrganizePreviewQueue{db: db}
 	if _, err := queue.ClaimForFolderUpdate(task.UserID, task.ID); err == nil {
 		t.Fatal("processing task should not be claimed for folder update")
+	}
+}
+
+func TestOrganizePreviewQueuePublishesScopedEvents(t *testing.T) {
+	db := newOrganizePreviewQueueTestDB(t)
+	queue := &OrganizePreviewQueue{db: db}
+	events, unsubscribe, err := queue.Subscribe(7, 8)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer unsubscribe()
+	otherEvents, unsubscribeOther, err := queue.Subscribe(7, 99)
+	if err != nil {
+		t.Fatalf("subscribe other directory: %v", err)
+	}
+	defer unsubscribeOther()
+
+	tasks, err := queue.Enqueue([]OrganizePreviewTaskInput{{
+		UserID:           7,
+		CloudDirectoryID: 8,
+		CloudStorageID:   9,
+		FolderID:         "folder-event",
+		FolderName:       "事件目录",
+	}})
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("enqueued tasks=%d want=1", len(tasks))
+	}
+
+	select {
+	case event := <-events:
+		if event.Type != "queued" || event.TaskID != tasks[0].ID || event.CloudDirectoryID != 8 {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for queue event")
+	}
+	select {
+	case event := <-otherEvents:
+		if event.Type != "queue_changed" || event.TaskID != 0 || event.CloudDirectoryID != 0 {
+			t.Fatalf("unexpected anonymized queue event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for anonymized queue event")
+	}
+}
+
+func TestOrganizePreviewQueuePendingPositionsFollowWorkerOrder(t *testing.T) {
+	db := newOrganizePreviewQueueTestDB(t)
+	now := time.Now()
+	tasks := []model.OrganizePreviewTask{
+		{
+			UserID:           7,
+			CloudDirectoryID: 8,
+			CloudStorageID:   9,
+			FolderID:         "folder-later",
+			Status:           model.OrganizePreviewStatusPending,
+			CreatedAt:        now,
+		},
+		{
+			UserID:           7,
+			CloudDirectoryID: 8,
+			CloudStorageID:   9,
+			FolderID:         "folder-first",
+			Status:           model.OrganizePreviewStatusPending,
+			CreatedAt:        now.Add(-time.Minute),
+		},
+		{
+			UserID:           7,
+			CloudDirectoryID: 8,
+			CloudStorageID:   9,
+			FolderID:         "folder-completed",
+			Status:           model.OrganizePreviewStatusCompleted,
+			CreatedAt:        now.Add(-time.Hour),
+		},
+	}
+	if err := db.Create(&tasks).Error; err != nil {
+		t.Fatalf("create tasks: %v", err)
+	}
+
+	queue := &OrganizePreviewQueue{db: db}
+	positions, err := queue.PendingPositions()
+	if err != nil {
+		t.Fatalf("pending positions: %v", err)
+	}
+	if positions[tasks[1].ID] != 1 || positions[tasks[0].ID] != 2 {
+		t.Fatalf("unexpected positions: %+v", positions)
+	}
+	if _, ok := positions[tasks[2].ID]; ok {
+		t.Fatalf("completed task should not have a queue position: %+v", positions)
 	}
 }

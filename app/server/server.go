@@ -445,6 +445,7 @@ func (s *Server) setupRoutes() {
 				previewTasks.POST("", organizeHandler.CreatePreviewTasks)
 				previewTasks.GET("", organizeHandler.ListPreviewTasks)
 				previewTasks.DELETE("", organizeHandler.ClearPreviewTasks)
+				previewTasks.GET("/events", organizeHandler.StreamPreviewTaskEvents)
 				previewTasks.GET("/:id", organizeHandler.GetPreviewTask)
 				previewTasks.POST("/:id/requeue", organizeHandler.RequeuePreviewTask)
 				previewTasks.POST("/:id/assign-tmdb", organizeHandler.AssignPreviewTaskTMDB)

@@ -222,6 +222,7 @@ type OrganizePreviewTaskCreateRequest struct {
 	Folders                  []OrganizePreviewFolderRequest `json:"folders" binding:"required"`
 	IntervalSeconds          int                            `json:"interval_seconds"`
 	RecursiveDepth           *int                           `json:"recursive_depth"`
+	TaskLimit                int                            `json:"task_limit"`
 	MediaType                string                         `json:"media_type"`
 	Category                 string                         `json:"category"`
 	BestVersionEnabled       *bool                          `json:"best_version_enabled"`
@@ -264,6 +265,7 @@ type OrganizePreviewTaskListItem struct {
 	MultiEpisodeCount    int                      `json:"multi_episode_count,omitempty"`
 	MultiEpisodeExamples []string                 `json:"multi_episode_examples,omitempty"`
 	AllEpisodesExist     bool                     `json:"all_episodes_exist,omitempty"`
+	QueuePosition        int                      `json:"queue_position,omitempty"`
 }
 
 type MediaLookupSearchRequest struct {
@@ -719,10 +721,15 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 		recursiveDepth = *req.RecursiveDepth
 	}
 	recursiveDepth = service.ClampOrganizePreviewMaxDepth(recursiveDepth)
+	taskLimit := service.ClampOrganizePreviewTaskLimit(req.TaskLimit)
 
 	inputs := make([]service.OrganizePreviewTaskInput, 0, len(req.Folders))
 	seen := make(map[string]struct{}, len(req.Folders))
 	for _, folder := range req.Folders {
+		remaining := taskLimit - len(inputs)
+		if remaining <= 0 {
+			break
+		}
 		folderID := strings.TrimSpace(folder.FolderID)
 		if folderID == "" {
 			continue
@@ -737,6 +744,7 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 			parentFolderPath:         folder.FolderPath,
 			childDepth:               1,
 			maxDepth:                 recursiveDepth,
+			maxTasks:                 remaining,
 			intervalSeconds:          req.IntervalSeconds,
 			mediaType:                mediaType,
 			category:                 category,
@@ -769,10 +777,12 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 	}
 
 	h.success(c, gin.H{
-		"list":      tasks,
-		"total":     len(tasks),
-		"interval":  service.ClampOrganizePreviewIntervalSeconds(req.IntervalSeconds),
-		"max_depth": recursiveDepth,
+		"list":          tasks,
+		"total":         len(tasks),
+		"interval":      service.ClampOrganizePreviewIntervalSeconds(req.IntervalSeconds),
+		"max_depth":     recursiveDepth,
+		"task_limit":    taskLimit,
+		"limit_reached": len(inputs) >= taskLimit,
 	}, "已加入预整理队列")
 }
 
@@ -1051,10 +1061,83 @@ func (h *OrganizeHandler) ListPreviewTasks(c *gin.Context) {
 		h.error(c, http.StatusInternalServerError, 500, "获取预整理队列失败")
 		return
 	}
+	positions, err := h.previewQueue.PendingPositions()
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "获取预整理排队位置失败")
+		return
+	}
+	items := buildOrganizePreviewTaskListItems(tasks)
+	for index := range items {
+		items[index].QueuePosition = positions[items[index].ID]
+	}
 	h.success(c, gin.H{
-		"list":  buildOrganizePreviewTaskListItems(tasks),
+		"list":  items,
 		"total": len(tasks),
 	}, "获取预整理队列成功")
+}
+
+func (h *OrganizeHandler) StreamPreviewTaskEvents(c *gin.Context) {
+	userIDVal, exists := c.Get("user_id")
+	if !exists {
+		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
+		return
+	}
+	if h.previewQueue == nil {
+		h.error(c, http.StatusInternalServerError, 500, "预整理队列未初始化")
+		return
+	}
+
+	cloudDirectoryID := uint(0)
+	if raw := strings.TrimSpace(c.Query("cloud_directory_id")); raw != "" {
+		id, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			h.error(c, http.StatusBadRequest, 400, "目录配置 ID 无效")
+			return
+		}
+		cloudDirectoryID = uint(id)
+	}
+	events, unsubscribe, err := h.previewQueue.Subscribe(userIDVal.(uint), cloudDirectoryID)
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, err.Error())
+		return
+	}
+	defer unsubscribe()
+
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		h.error(c, http.StatusInternalServerError, 500, "当前服务不支持实时事件")
+		return
+	}
+	c.Header("Content-Type", "text/event-stream")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	_, _ = fmt.Fprint(c.Writer, "retry: 3000\nevent: ready\ndata: {}\n\n")
+	flusher.Flush()
+
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case event := <-events:
+			payload, marshalErr := json.Marshal(event)
+			if marshalErr != nil {
+				continue
+			}
+			if _, writeErr := fmt.Fprintf(c.Writer, "event: queue\ndata: %s\n\n", payload); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, writeErr := fmt.Fprint(c.Writer, ": heartbeat\n\n"); writeErr != nil {
+				return
+			}
+			flusher.Flush()
+		case <-c.Request.Context().Done():
+			return
+		}
+	}
 }
 
 func (h *OrganizeHandler) GetPreviewTask(c *gin.Context) {
@@ -1388,15 +1471,17 @@ func (h *OrganizeHandler) buildPreviewChildTasks(task model.OrganizePreviewTask)
 	}
 
 	return h.buildPreviewChildTaskInputs(buildPreviewChildTaskArgs{
-		userID:                   task.UserID,
-		cloudDirectoryID:         task.CloudDirectoryID,
-		cloudStorageID:           task.CloudStorageID,
-		webClient:                webClient,
-		parentFolderID:           task.FolderID,
-		parentFolderName:         task.FolderName,
-		parentFolderPath:         task.FolderPath,
-		childDepth:               task.Depth + 1,
-		maxDepth:                 task.MaxDepth,
+		userID:           task.UserID,
+		cloudDirectoryID: task.CloudDirectoryID,
+		cloudStorageID:   task.CloudStorageID,
+		webClient:        webClient,
+		parentFolderID:   task.FolderID,
+		parentFolderName: task.FolderName,
+		parentFolderPath: task.FolderPath,
+		childDepth:       task.Depth + 1,
+		maxDepth:         task.MaxDepth,
+		// task_limit 只限制创建请求生成的第一层任务，后台递归展开不再截断。
+		maxTasks:                 -1,
 		intervalSeconds:          task.IntervalSeconds,
 		mediaType:                task.MediaType,
 		category:                 task.Category,
@@ -1417,6 +1502,7 @@ type buildPreviewChildTaskArgs struct {
 	parentFolderPath         string
 	childDepth               int
 	maxDepth                 int
+	maxTasks                 int // 0 表示不生成，正数表示上限，负数表示不限。
 	intervalSeconds          int
 	mediaType                string
 	category                 string
@@ -1427,10 +1513,22 @@ type buildPreviewChildTaskArgs struct {
 }
 
 func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTaskArgs) ([]service.OrganizePreviewTaskInput, error) {
+	if args.maxTasks == 0 {
+		return nil, nil
+	}
 	children := make([]service.OrganizePreviewTaskInput, 0)
 	offset := 0
 	limit := 1150
 	for {
+		if args.maxTasks > 0 {
+			remaining := args.maxTasks - len(children)
+			if remaining <= 0 {
+				break
+			}
+			if remaining < limit {
+				limit = remaining
+			}
+		}
 		listResp, err := h.web115Svc.GetDirectoriesWithClient(args.webClient, args.parentFolderID, offset, limit)
 		if err != nil {
 			return nil, fmt.Errorf("获取子目录失败: %w", err)
@@ -1472,6 +1570,9 @@ func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTask
 				FilenameRegexPattern:     args.filenameRegexPattern,
 				FilenameRegexReplacement: args.filenameRegexReplacement,
 			})
+			if args.maxTasks > 0 && len(children) >= args.maxTasks {
+				break
+			}
 		}
 		pageLen := len(listResp.Items)
 		if pageLen == 0 {

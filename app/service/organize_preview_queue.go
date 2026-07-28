@@ -19,6 +19,9 @@ const (
 	defaultOrganizePreviewMaxDepth        = 1
 	minOrganizePreviewMaxDepth            = 1
 	maxOrganizePreviewMaxDepth            = 5
+	defaultOrganizePreviewTaskLimit       = 100
+	minOrganizePreviewTaskLimit           = 1
+	maxOrganizePreviewTaskLimit           = 1000
 )
 
 type OrganizePreviewTaskInput struct {
@@ -51,6 +54,19 @@ type OrganizePreviewProcessResult struct {
 
 type OrganizePreviewProcessor func(task model.OrganizePreviewTask) (OrganizePreviewProcessResult, error)
 
+type OrganizePreviewQueueEvent struct {
+	Type             string    `json:"type"`
+	TaskID           uint      `json:"task_id,omitempty"`
+	CloudDirectoryID uint      `json:"cloud_directory_id"`
+	OccurredAt       time.Time `json:"occurred_at"`
+}
+
+type organizePreviewQueueSubscriber struct {
+	userID           uint
+	cloudDirectoryID uint
+	events           chan OrganizePreviewQueueEvent
+}
+
 type OrganizePreviewQueue struct {
 	db                 *gorm.DB
 	log                *logger.Logger
@@ -60,14 +76,77 @@ type OrganizePreviewQueue struct {
 	mu                 sync.Mutex
 	running            bool
 	lastFolderAccessAt time.Time
+	subscriberMu       sync.RWMutex
+	subscribers        map[uint64]organizePreviewQueueSubscriber
+	nextSubscriberID   uint64
 }
 
 func NewOrganizePreviewQueue(log *logger.Logger, processor OrganizePreviewProcessor) *OrganizePreviewQueue {
 	return &OrganizePreviewQueue{
-		db:        database.GetDB(),
-		log:       log,
-		processor: processor,
-		stopCh:    make(chan struct{}),
+		db:          database.GetDB(),
+		log:         log,
+		processor:   processor,
+		stopCh:      make(chan struct{}),
+		subscribers: make(map[uint64]organizePreviewQueueSubscriber),
+	}
+}
+
+func (q *OrganizePreviewQueue) Subscribe(userID, cloudDirectoryID uint) (<-chan OrganizePreviewQueueEvent, func(), error) {
+	if q == nil || q.db == nil {
+		return nil, nil, errors.New("预整理队列未初始化")
+	}
+	q.subscriberMu.Lock()
+	if q.subscribers == nil {
+		q.subscribers = make(map[uint64]organizePreviewQueueSubscriber)
+	}
+	q.nextSubscriberID++
+	subscriberID := q.nextSubscriberID
+	events := make(chan OrganizePreviewQueueEvent, 8)
+	q.subscribers[subscriberID] = organizePreviewQueueSubscriber{
+		userID:           userID,
+		cloudDirectoryID: cloudDirectoryID,
+		events:           events,
+	}
+	q.subscriberMu.Unlock()
+
+	var once sync.Once
+	unsubscribe := func() {
+		once.Do(func() {
+			q.subscriberMu.Lock()
+			delete(q.subscribers, subscriberID)
+			q.subscriberMu.Unlock()
+		})
+	}
+	return events, unsubscribe, nil
+}
+
+func (q *OrganizePreviewQueue) publishTaskEvent(task model.OrganizePreviewTask, eventType string) {
+	if q == nil {
+		return
+	}
+	event := OrganizePreviewQueueEvent{
+		Type:             strings.TrimSpace(eventType),
+		TaskID:           task.ID,
+		CloudDirectoryID: task.CloudDirectoryID,
+		OccurredAt:       time.Now(),
+	}
+	q.subscriberMu.RLock()
+	defer q.subscriberMu.RUnlock()
+	for _, subscriber := range q.subscribers {
+		subscriberEvent := event
+		if subscriber.userID != task.UserID ||
+			(subscriber.cloudDirectoryID > 0 && subscriber.cloudDirectoryID != task.CloudDirectoryID) {
+			// Worker 是全局串行队列；其他用户或目录的任务变化也可能改变当前任务的真实排队位次。
+			// 仅广播不含任务标识的刷新信号，避免泄露其他队列的任务信息。
+			subscriberEvent = OrganizePreviewQueueEvent{
+				Type:       "queue_changed",
+				OccurredAt: event.OccurredAt,
+			}
+		}
+		select {
+		case subscriber.events <- subscriberEvent:
+		default:
+		}
 	}
 }
 
@@ -90,6 +169,19 @@ func ClampOrganizePreviewMaxDepth(value int) int {
 	}
 	if value > maxOrganizePreviewMaxDepth {
 		return maxOrganizePreviewMaxDepth
+	}
+	return value
+}
+
+func ClampOrganizePreviewTaskLimit(value int) int {
+	if value <= 0 {
+		return defaultOrganizePreviewTaskLimit
+	}
+	if value < minOrganizePreviewTaskLimit {
+		return minOrganizePreviewTaskLimit
+	}
+	if value > maxOrganizePreviewTaskLimit {
+		return maxOrganizePreviewTaskLimit
 	}
 	return value
 }
@@ -162,6 +254,7 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 	if q == nil || q.db == nil {
 		return nil, errors.New("预整理队列未初始化")
 	}
+
 	out := make([]model.OrganizePreviewTask, 0, len(inputs))
 	for _, input := range inputs {
 		folderID := strings.TrimSpace(input.FolderID)
@@ -209,6 +302,7 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 				}
 			}
 			out = append(out, task)
+			q.publishTaskEvent(task, "queued")
 			continue
 		}
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -238,6 +332,7 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 			return nil, err
 		}
 		out = append(out, task)
+		q.publishTaskEvent(task, "queued")
 	}
 	return out, nil
 }
@@ -256,9 +351,33 @@ func (q *OrganizePreviewQueue) List(userID uint, cloudDirectoryID uint, status s
 	var tasks []model.OrganizePreviewTask
 	err := query.
 		Order("CASE status WHEN 'processing' THEN 0 WHEN 'pending' THEN 1 WHEN 'completed' THEN 2 ELSE 3 END").
+		Order("CASE WHEN status = 'pending' THEN created_at END ASC").
+		Order("CASE WHEN status = 'pending' THEN id END ASC").
 		Order("updated_at DESC").
 		Find(&tasks).Error
 	return tasks, err
+}
+
+func (q *OrganizePreviewQueue) PendingPositions() (map[uint]int, error) {
+	if q == nil || q.db == nil {
+		return nil, errors.New("预整理队列未初始化")
+	}
+	var rows []struct {
+		ID uint
+	}
+	if err := q.db.Model(&model.OrganizePreviewTask{}).
+		Select("id").
+		Where("status = ?", model.OrganizePreviewStatusPending).
+		Order("created_at ASC").
+		Order("id ASC").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	positions := make(map[uint]int, len(rows))
+	for index, row := range rows {
+		positions[row.ID] = index + 1
+	}
+	return positions, nil
 }
 
 func (q *OrganizePreviewQueue) Get(userID uint, id uint) (model.OrganizePreviewTask, error) {
@@ -291,7 +410,11 @@ func (q *OrganizePreviewQueue) Requeue(userID uint, id uint) (model.OrganizePrev
 	}).Error; err != nil {
 		return task, err
 	}
-	return q.Get(userID, id)
+	task, err = q.Get(userID, id)
+	if err == nil {
+		q.publishTaskEvent(task, "queued")
+	}
+	return task, err
 }
 
 func (q *OrganizePreviewQueue) ClaimForFolderUpdate(userID uint, id uint) (model.OrganizePreviewTask, error) {
@@ -311,6 +434,9 @@ func (q *OrganizePreviewQueue) ClaimForFolderUpdate(userID uint, id uint) (model
 	if res.RowsAffected == 0 {
 		return task, errors.New("任务已开始处理，请稍后再试")
 	}
+	processingTask := task
+	processingTask.Status = model.OrganizePreviewStatusProcessing
+	q.publishTaskEvent(processingTask, "processing")
 	return task, nil
 }
 
@@ -318,9 +444,16 @@ func (q *OrganizePreviewQueue) RestoreStatusAfterFolderUpdate(userID uint, id ui
 	if q == nil || q.db == nil {
 		return errors.New("预整理队列未初始化")
 	}
-	return q.db.Model(&model.OrganizePreviewTask{}).
+	if err := q.db.Model(&model.OrganizePreviewTask{}).
 		Where("id = ? AND user_id = ? AND status = ?", id, userID, model.OrganizePreviewStatusProcessing).
-		Update("status", status).Error
+		Update("status", status).Error; err != nil {
+		return err
+	}
+	task, err := q.Get(userID, id)
+	if err == nil {
+		q.publishTaskEvent(task, string(status))
+	}
+	return err
 }
 
 func (q *OrganizePreviewQueue) UpdateFolderAndRequeue(userID uint, id uint, folderName, folderPath string) (model.OrganizePreviewTask, error) {
@@ -346,14 +479,26 @@ func (q *OrganizePreviewQueue) UpdateFolderAndRequeue(userID uint, id uint, fold
 	if res.RowsAffected == 0 {
 		return task, errors.New("任务状态已变化，不能重新加入队列")
 	}
-	return q.Get(userID, id)
+	task, err := q.Get(userID, id)
+	if err == nil {
+		q.publishTaskEvent(task, "queued")
+	}
+	return task, err
 }
 
 func (q *OrganizePreviewQueue) Delete(userID uint, id uint) error {
 	if q == nil || q.db == nil {
 		return errors.New("预整理队列未初始化")
 	}
-	return q.db.Where("id = ? AND user_id = ?", id, userID).Delete(&model.OrganizePreviewTask{}).Error
+	task, err := q.Get(userID, id)
+	if err != nil {
+		return err
+	}
+	if err := q.db.Where("id = ? AND user_id = ?", id, userID).Delete(&model.OrganizePreviewTask{}).Error; err != nil {
+		return err
+	}
+	q.publishTaskEvent(task, "deleted")
+	return nil
 }
 
 func (q *OrganizePreviewQueue) Clear(userID uint, cloudDirectoryID uint, status string) (int64, error) {
@@ -381,9 +526,16 @@ func (q *OrganizePreviewQueue) Clear(userID uint, cloudDirectoryID uint, status 
 		return 0, errors.New("任务状态无效")
 	}
 
+	var clearedTasks []model.OrganizePreviewTask
+	if err := query.Find(&clearedTasks).Error; err != nil {
+		return 0, err
+	}
 	res := query.Delete(&model.OrganizePreviewTask{})
 	if res.Error != nil {
 		return 0, res.Error
+	}
+	for _, task := range clearedTasks {
+		q.publishTaskEvent(task, "deleted")
 	}
 	return res.RowsAffected, nil
 }
@@ -412,6 +564,7 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	var task model.OrganizePreviewTask
 	if err := q.db.Where("status = ?", model.OrganizePreviewStatusPending).
 		Order("created_at ASC").
+		Order("id ASC").
 		First(&task).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) && q.log != nil {
 			q.log.Errorf("读取预整理任务失败: %v", err)
@@ -447,6 +600,10 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	}
 
 	q.lastFolderAccessAt = time.Now()
+	processingTask := task
+	processingTask.Status = model.OrganizePreviewStatusProcessing
+	processingTask.StartedAt = &now
+	q.publishTaskEvent(processingTask, "processing")
 	if q.log != nil {
 		q.log.Infof("开始预整理目录: task_id=%d folder_id=%s folder_path=%s", task.ID, task.FolderID, task.FolderPath)
 	}
@@ -470,8 +627,16 @@ func (q *OrganizePreviewQueue) processNext() bool {
 	}
 	if updateErr := q.db.Model(&model.OrganizePreviewTask{}).
 		Where("id = ?", task.ID).
-		Updates(updates).Error; updateErr != nil && q.log != nil {
-		q.log.Errorf("更新预整理任务结果失败: task_id=%d err=%v", task.ID, updateErr)
+		Updates(updates).Error; updateErr != nil {
+		if q.log != nil {
+			q.log.Errorf("更新预整理任务结果失败: task_id=%d err=%v", task.ID, updateErr)
+		}
+	} else {
+		if err != nil {
+			q.publishTaskEvent(task, "failed")
+		} else {
+			q.publishTaskEvent(task, "completed")
+		}
 	}
 	if err == nil && len(result.Children) > 0 {
 		if _, enqueueErr := q.Enqueue(result.Children); enqueueErr != nil && q.log != nil {
