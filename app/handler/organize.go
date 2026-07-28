@@ -1866,7 +1866,11 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				FileSize: file.Size,
 				PickCode: file.PickCode,
 			}
-			recognizeName := filenameProcessor.apply(file.Name)
+			recognizeSourceName := file.Name
+			if expectedMediaType == "movie" {
+				recognizeSourceName = stripDuplicateMovieTitleYearPrefix(recognizeSourceName)
+			}
+			recognizeName := filenameProcessor.apply(recognizeSourceName)
 			item.RecognizeName = recognizeName
 
 			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
@@ -1907,7 +1911,24 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			)
 			item.RecognizeInput = recognizeInput
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
+			transferInput := recognizeInput
+			targetOriginalName := file.Name
+			effectiveCategory := info.Category
+			if categoryOverride != "" {
+				effectiveCategory = categoryOverride
+			}
+			if shouldStripDuplicateMovieTitleYearPrefix(expectedMediaType, info.MediaType, effectiveCategory) {
+				movieSourceName := stripDuplicateMovieTitleYearPrefix(file.Name)
+				if movieSourceName != file.Name {
+					targetOriginalName = movieSourceName
+					if movieRecognizeName := filenameProcessor.apply(movieSourceName); movieRecognizeName != "" {
+						item.RecognizeName = movieRecognizeName
+						transferInput = buildMovieTransferInput(movieRecognizeName, info)
+					}
+				}
+			}
+
+			transferName, _, transErr := h.moviePilotSvc.TransferName(transferInput, ext)
 			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
@@ -1944,7 +1965,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			if !dir.ClassifyByCategory {
 				categoryForPath = ""
 			}
-			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, file.Name)
+			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, targetOriginalName)
 			item.TargetDir = path.Dir(item.TargetPath)
 			item.RenameTo = path.Base(item.TargetPath)
 			item.SourceSeason, item.SourceEpisode = inferSourceSeasonEpisode(file.Name, recognizeName, recognizeInput, args.context, info)
@@ -2964,6 +2985,78 @@ func isOrganizeMovieMedia(mediaType, category string) bool {
 	return category == "movie" || category == "movies" || category == "film"
 }
 
+func shouldStripDuplicateMovieTitleYearPrefix(expectedMediaType, recognizedMediaType, category string) bool {
+	switch strings.ToLower(strings.TrimSpace(expectedMediaType)) {
+	case "tv":
+		return false
+	case "movie":
+		return true
+	default:
+		return isOrganizeMovieMedia(recognizedMediaType, category)
+	}
+}
+
+func stripDuplicateMovieTitleYearPrefix(name string) string {
+	name = strings.TrimSpace(name)
+	matches := duplicateMovieTitleYearPrefixRegexp.FindStringSubmatch(name)
+	if len(matches) < 2 {
+		return name
+	}
+	suffix := strings.TrimSpace(matches[1])
+	if suffix == "" || !movieReleaseYearRegexp.MatchString(suffix) {
+		return name
+	}
+	return suffix
+}
+
+func buildMovieTransferInput(name string, info service.MoviePilotMediaInfo) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	ext := filepath.Ext(name)
+	stem := strings.TrimSpace(strings.TrimSuffix(name, ext))
+	year := strings.TrimSpace(info.Year)
+	if year != "" {
+		stem = wrapMovieReleaseYear(stem, year)
+		yearMarker := "(" + year + ")"
+		if yearIndex := strings.Index(stem, yearMarker); yearIndex >= 0 {
+			head := strings.TrimSpace(stem[:yearIndex+len(yearMarker)])
+			tail := strings.TrimSpace(stem[yearIndex+len(yearMarker):])
+			if tail != "" {
+				tail = strings.Join(strings.Fields(tail), ".")
+				tail = movieAudioChannelRegexp.ReplaceAllString(tail, "$1.$2.$3")
+				stem = head + "." + strings.TrimLeft(tail, ".")
+			}
+		}
+	}
+	if tmdbID := strings.TrimSpace(info.TmdbID); tmdbID != "" &&
+		!previewTaskTMDBMarkerRegexp.MatchString(stem) {
+		stem = strings.TrimRight(stem, " .") + ".{tmdb-" + tmdbID + "}"
+	}
+	return stem + ext
+}
+
+func wrapMovieReleaseYear(stem, year string) string {
+	stem = strings.TrimSpace(stem)
+	year = strings.TrimSpace(year)
+	if stem == "" || year == "" ||
+		strings.Contains(stem, "("+year+")") ||
+		strings.Contains(stem, "（"+year+"）") {
+		return stem
+	}
+	yearRegexp := regexp.MustCompile(`(^|[^0-9])(` + regexp.QuoteMeta(year) + `)([^0-9]|$)`)
+	matches := yearRegexp.FindStringSubmatchIndex(stem)
+	if len(matches) < 8 {
+		return stem
+	}
+	yearStart, yearEnd := matches[4], matches[5]
+	if yearStart < 0 || yearEnd < yearStart {
+		return stem
+	}
+	return stem[:yearStart] + "(" + stem[yearStart:yearEnd] + ")" + stem[yearEnd:]
+}
+
 func (h *OrganizeHandler) resolveAndPrepareDirectories(storage *model.CloudStorage, webClient *driver.Pan115Client, items *[]Organize115ItemResult, dryRun bool) ([]Organize115DirDebug, error) {
 	if items == nil || len(*items) == 0 {
 		return nil, nil
@@ -3462,21 +3555,24 @@ var tmdbFolderIDRegexp = regexp.MustCompile(`\{tmdb-(\d+)\}`)
 var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第\s*(\d+)\s*季)$`)
 
 var (
-	previewTaskTMDBIDRegexp         = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
-	previewTaskTMDBMarkerRegexp     = regexp.MustCompile(`(?i)\s*\{tmdb(?:id)?-[0-9]+\}`)
-	defaultFilenameFallbackRegexp   = regexp.MustCompile(`.* - (.*)-.*`)
-	episodeLeadingFilenameRegexp    = regexp.MustCompile(`(?i)^s\d{1,2}[\s._-]*e\d{1,3}(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?(?:$|[^0-9])`)
-	multiEpisodeRenameRegexp        = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
-	seasonEpisodeRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
-	versionTrackSeasonEpisodeRegexp = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})[\s._-]*e(\d{1,3})(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?)(?:$|[^0-9])`)
-	seasonEpisodeXRegexp            = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
-	chineseSeasonEpisodeRegexp      = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
-	episodeOnlyRegexp               = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
-	chineseEpisodeRegexp            = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
-	seasonOnlyRegexp                = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
-	lowQualityReleaseRegexp         = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:cam|hdcam|telesync|ts|tc)(?:$|[^a-z0-9])`)
-	subtitleQualifierSuffixRegexp   = regexp.MustCompile(`(?i)(?:[._ -]+(?:zh(?:[-_](?:cn|tw|hans|hant))?|chs|cht|chi|zho|cn|tw|sc|tc|en|eng|ja|jpn|ko|kor|forced|default|sdh|cc|简体|繁体|简中|繁中|双语|中字))+$`)
-	transferNameTokenRegexp         = regexp.MustCompile(`[[:alnum:]]+`)
+	previewTaskTMDBIDRegexp             = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+	previewTaskTMDBMarkerRegexp         = regexp.MustCompile(`(?i)\s*\{tmdb(?:id)?-[0-9]+\}`)
+	defaultFilenameFallbackRegexp       = regexp.MustCompile(`.* - (.*)-.*`)
+	duplicateMovieTitleYearPrefixRegexp = regexp.MustCompile(`^\s*.+?[\(（]\s*(?:19|20)\d{2}\s*[\)）]\s+[-–—]\s+(.+?)\s*$`)
+	movieReleaseYearRegexp              = regexp.MustCompile(`(?:^|[^0-9])(?:19|20)\d{2}(?:[^0-9]|$)`)
+	movieAudioChannelRegexp             = regexp.MustCompile(`(?i)\b(MA|AAC|DDP|DD|AC3|EAC3)([257])\.([01])\b`)
+	episodeLeadingFilenameRegexp        = regexp.MustCompile(`(?i)^s\d{1,2}[\s._-]*e\d{1,3}(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?(?:$|[^0-9])`)
+	multiEpisodeRenameRegexp            = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})e(\d{1,3})(?:\s*[-~]\s*e?(\d{1,3})|e(\d{1,3})))(?:$|[^a-z0-9])`)
+	seasonEpisodeRegexp                 = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])s(\d{1,2})[\s._-]*e(\d{1,3})(?:[^0-9]|$)`)
+	versionTrackSeasonEpisodeRegexp     = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(s(\d{1,2})[\s._-]*e(\d{1,3})(?:\s*[-~]\s*e?\d{1,3}|e\d{1,3})?)(?:$|[^0-9])`)
+	seasonEpisodeXRegexp                = regexp.MustCompile(`(?i)(?:^|[^0-9])(\d{1,2})x(\d{1,3})(?:[^0-9]|$)`)
+	chineseSeasonEpisodeRegexp          = regexp.MustCompile(`第\s*(\d{1,2})\s*季.*?第\s*(\d{1,3})\s*[集话話]`)
+	episodeOnlyRegexp                   = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:e|ep|episode)[\s._-]*(\d{1,3})(?:[^0-9]|$)`)
+	chineseEpisodeRegexp                = regexp.MustCompile(`第\s*(\d{1,3})\s*[集话話]`)
+	seasonOnlyRegexp                    = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:season[\s._-]*|s)(\d{1,2})(?:[^0-9]|$)|第\s*(\d{1,2})\s*季`)
+	lowQualityReleaseRegexp             = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(?:cam|hdcam|telesync|ts|tc)(?:$|[^a-z0-9])`)
+	subtitleQualifierSuffixRegexp       = regexp.MustCompile(`(?i)(?:[._ -]+(?:zh(?:[-_](?:cn|tw|hans|hant))?|chs|cht|chi|zho|cn|tw|sc|tc|en|eng|ja|jpn|ko|kor|forced|default|sdh|cc|简体|繁体|简中|繁中|双语|中字))+$`)
+	transferNameTokenRegexp             = regexp.MustCompile(`[[:alnum:]]+`)
 )
 
 func buildPreviewTaskTMDBFolderName(folderName, tmdbID string) string {

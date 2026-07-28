@@ -53,6 +53,53 @@ func TestFilenameProcessorNormalizesSpacedHyphenBeforeRecognition(t *testing.T) 
 	}
 }
 
+func TestStripDuplicateMovieTitleYearPrefix(t *testing.T) {
+	input := "黑衣人3 (2012) - Men.in.Black.III.2012.BluRay.2160p.Atmos.TrueHD7.1.x265.10bit-DreamHD.mkv"
+	want := "Men.in.Black.III.2012.BluRay.2160p.Atmos.TrueHD7.1.x265.10bit-DreamHD.mkv"
+	if got := stripDuplicateMovieTitleYearPrefix(input); got != want {
+		t.Fatalf("stripped movie name=%q want=%q", got, want)
+	}
+
+	withoutRepeatedYear := "黑衣人3 (2012) - BluRay.2160p.mkv"
+	if got := stripDuplicateMovieTitleYearPrefix(withoutRepeatedYear); got != withoutRepeatedYear {
+		t.Fatalf("name without a second year should stay unchanged: got=%q", got)
+	}
+}
+
+func TestDuplicateMovieTitleYearPrefixOnlyAppliesToMovies(t *testing.T) {
+	if !shouldStripDuplicateMovieTitleYearPrefix("movie", "", "") {
+		t.Fatal("explicit movie mode should strip the duplicate prefix")
+	}
+	if shouldStripDuplicateMovieTitleYearPrefix("tv", "movie", "欧美电影") {
+		t.Fatal("explicit TV mode must not strip the duplicate prefix")
+	}
+	if !shouldStripDuplicateMovieTitleYearPrefix("", "movie", "欧美电影") {
+		t.Fatal("auto mode should strip after recognizing a movie")
+	}
+	if shouldStripDuplicateMovieTitleYearPrefix("", "tv", "欧美剧集") {
+		t.Fatal("auto mode must not strip a recognized TV item")
+	}
+}
+
+func TestBuildMovieTransferInputAddsRecognitionAnchors(t *testing.T) {
+	info := service.MoviePilotMediaInfo{
+		MediaType: "movie",
+		Year:      "2023",
+		TmdbID:    "614479",
+	}
+	input := "Insidious The Red Door 2023 BluRay REMUX 1080p AVC DTS-HD MA5.1-DreamHD.mkv"
+	want := "Insidious The Red Door (2023).BluRay.REMUX.1080p.AVC.DTS-HD.MA.5.1-DreamHD.{tmdb-614479}.mkv"
+	if got := buildMovieTransferInput(input, info); got != want {
+		t.Fatalf("movie transfer input=%q want=%q", got, want)
+	}
+
+	anchored := "Insidious： The Red Door (2023) 1080p.Bluray.REMUX.AVC.DTS-HD.MA.5.1.{tmdb-614479}.mkv"
+	anchoredWant := "Insidious： The Red Door (2023).1080p.Bluray.REMUX.AVC.DTS-HD.MA.5.1.{tmdb-614479}.mkv"
+	if got := buildMovieTransferInput(anchored, info); got != anchoredWant {
+		t.Fatalf("anchored movie transfer input=%q want=%q", got, anchoredWant)
+	}
+}
+
 func TestDedupeConsecutiveTransferTagsOnlyRemovesRepeatedBitDepth(t *testing.T) {
 	got := dedupeConsecutiveTransferTags("A Hard Day.2014.BluRay.1080p.x265 10bit.10bit.mkv")
 	want := "A Hard Day.2014.BluRay.1080p.x265 10bit.mkv"
