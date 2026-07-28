@@ -152,6 +152,40 @@ func TestValidateMoviePilotSuccessAllowsUnwrappedResponses(t *testing.T) {
 	}
 }
 
+func TestBuildMoviePilotTargetPathPreservesSourceExtension(t *testing.T) {
+	info := MoviePilotMediaInfo{
+		TitleYear: "潜伏 (2011)",
+		TmdbID:    "49018",
+	}
+	tests := []struct {
+		name         string
+		transferName string
+		originalName string
+		want         string
+	}{
+		{
+			name:         "quality token is not a file extension",
+			transferName: "Insidious.2011.BluRay HDR DoVi.2160p.x265 10bit.TrueHD 7.1.10bit",
+			originalName: "Insidious.2011.BluRay.2160p.mkv",
+			want:         "/欧美电影/潜伏 (2011) {tmdb-49018}/Insidious.2011.BluRay HDR DoVi.2160p.x265 10bit.TrueHD 7.1.10bit.mkv",
+		},
+		{
+			name:         "existing source extension is not duplicated",
+			transferName: "Insidious.2011.2160p.MKV",
+			originalName: "Insidious.2011.BluRay.2160p.mkv",
+			want:         "/欧美电影/潜伏 (2011) {tmdb-49018}/Insidious.2011.2160p.MKV",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := BuildMoviePilotTargetPath("欧美电影", info, test.transferName, test.originalName)
+			if got != test.want {
+				t.Fatalf("BuildMoviePilotTargetPath()=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func newTestMoviePilotService(api string) *MoviePilotService {
 	return NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
 		API: api, Username: "user", Password: "pass",

@@ -390,8 +390,13 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 	fileName := strings.TrimSpace(transferName)
 	if fileName == "" {
 		fileName = originalName
-	} else if path.Ext(fileName) == "" && path.Ext(originalName) != "" {
-		fileName = fileName + path.Ext(originalName)
+	} else {
+		originalExt := path.Ext(strings.TrimSpace(originalName))
+		if originalExt != "" && !strings.EqualFold(path.Ext(fileName), originalExt) {
+			// MoviePilot 可能返回以 .10bit、.x265 等发布标签结尾的名称。
+			// path.Ext 会把这些标签误认为扩展名；整理只重命名、不转码，因此始终保留源文件真实后缀。
+			fileName = strings.TrimRight(fileName, " ") + originalExt
+		}
 	}
 
 	basePath := path.Join("/", folderName)

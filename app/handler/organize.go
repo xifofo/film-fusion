@@ -1944,7 +1944,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			if !dir.ClassifyByCategory {
 				categoryForPath = ""
 			}
-			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, recognizeName)
+			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, file.Name)
 			item.TargetDir = path.Dir(item.TargetPath)
 			item.RenameTo = path.Base(item.TargetPath)
 			item.SourceSeason, item.SourceEpisode = inferSourceSeasonEpisode(file.Name, recognizeName, recognizeInput, args.context, info)
