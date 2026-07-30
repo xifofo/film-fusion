@@ -49,19 +49,17 @@ curl -O https://raw.githubusercontent.com/xifofo/film-fusion/main/docker-compose
 curl -o data/config.yaml https://raw.githubusercontent.com/xifofo/film-fusion/main/data/config.example.yaml
 ```
 
-2. 用 `openssl rand -base64 48` 为该实例生成独立 JWT 密钥，然后编辑 `data/config.yaml`，**至少修改以下项**：
+2. 编辑 `data/config.yaml`，**至少修改以下项**：
 
 ```yaml
 server:
   password: "你的管理员密码"          # 初始登录密码
-jwt:
-  secret: ""                         # 粘贴刚生成的输出，至少 32 字节
 emby:
   url: "http://你的Emby:8096"        # Emby 服务器地址
   api_key: "你的 Emby API Key"        # Emby → 设置 → 高级 → API 密钥
 ```
 
-也可将 `jwt.secret` 留空，并通过 `FILM_FUSION_JWT_SECRET` 注入密钥；环境变量的优先级更高。
+JWT 签名密钥由程序自动生成并保存在 `data/.jwt-secret`，无需手工配置。
 
 3. `docker-compose.yml` 示例（已内置，可按需调整挂载）：
 
@@ -155,7 +153,6 @@ log:
   compress: true
 
 jwt:
-  secret: "请修改为随机长字符串"  # JWT 密钥（务必修改）
   expire_time: 240               # Token 过期时间（小时）
   issuer: "film-fusion"
 ```
@@ -168,7 +165,7 @@ jwt:
 
 进入 Web 界面「**系统设置**」即可在线编辑 `config.yaml`，密钥类字段留空表示不修改。
 
-- **保存即时生效**：Emby 连接（地址 / API Key / 管理员 ID）、新媒体与播放开关、封面参数与定时 cron、MoviePilot、JWT 密钥（会使已登录会话失效）、**日志级别**。
+- **保存即时生效**：Emby 连接（地址 / API Key / 管理员 ID）、新媒体与播放开关、封面参数与定时 cron、MoviePilot、会话有效期与签发者、**日志级别**。
 - **需重启生效**（界面会在对应字段标注「需重启」）：HTTP 端口、Emby 代理端口、Emby 代理启用开关、日志格式 / 输出 / 轮转、115 下载并发数。
 
 ---
@@ -221,7 +218,7 @@ docker compose down                  # 停止并移除容器
 
 ## 🔐 安全建议
 
-1. 首次部署后立即修改默认密码与 JWT 密钥。
+1. 首次部署后立即修改默认密码。
 2. 对外暴露时建议使用反向代理 + HTTPS。
 3. 定期备份 `data` 目录（含数据库与配置）。
 

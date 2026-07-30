@@ -300,8 +300,8 @@ func (s *EmbyWatchService) BackfillUser(embyUserID string) error {
 func (s *EmbyWatchService) runBackfill(embyUserID, userName string) (insertedCount int, scannedCount int, err error) {
 	const pageLimit = 200
 	startIndex := 0
-	skippedCount := 0   // 非 Movie/Episode 跳过数
-	fallbackCount := 0  // 缺少 LastPlayedDate、回退日期数
+	skippedCount := 0  // 非 Movie/Episode 跳过数
+	fallbackCount := 0 // 缺少 LastPlayedDate、回退日期数
 	for page := 0; page < 2000; page++ {
 		items, total, listErr := s.emby.ListPlayedItems(embyUserID, startIndex, pageLimit)
 		if listErr != nil {
@@ -640,16 +640,29 @@ func (s *EmbyWatchService) Gallery(p GalleryParams) (*GalleryResult, error) {
 	return out, nil
 }
 
+const calendarPosterLimit = 4
+
+// CalendarItem 日历格内的代表条目。
+// 电影按影片展示；剧集按剧聚合，避免连续观看多集时重复同一张海报。
+type CalendarItem struct {
+	PosterID string `json:"poster_id"`
+	Title    string `json:"title"`
+	ItemType string `json:"item_type"`
+	Count    int    `json:"count"`
+}
+
 // CalendarDay 日历某天的聚合
 type CalendarDay struct {
-	Date         string `json:"date"`
-	Total        int    `json:"total"`
-	MovieCount   int    `json:"movie_count"`
-	EpisodeCount int    `json:"episode_count"`
+	Date         string         `json:"date"`
+	Total        int            `json:"total"`
+	MovieCount   int            `json:"movie_count"`
+	EpisodeCount int            `json:"episode_count"`
+	Items        []CalendarItem `gorm:"-" json:"items,omitempty"`
 }
 
 // Calendar 返回某年某月逐日的观看聚合（仅有记录的天）。
-func (s *EmbyWatchService) Calendar(embyUserID string, year, month int) ([]CalendarDay, error) {
+// includeItems=true 时附带最多四个代表海报，供观影日历使用。
+func (s *EmbyWatchService) Calendar(embyUserID string, year, month int, includeItems bool) ([]CalendarDay, error) {
 	if strings.TrimSpace(embyUserID) == "" {
 		return nil, fmt.Errorf("emby_user_id 不能为空")
 	}
@@ -670,6 +683,60 @@ func (s *EmbyWatchService) Calendar(embyUserID string, year, month int) ([]Calen
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
+	}
+	if !includeItems {
+		return rows, nil
+	}
+
+	dayIndexes := make(map[string]int, len(rows))
+	itemIndexes := make(map[string]map[string]int, len(rows))
+	for i := range rows {
+		rows[i].Items = make([]CalendarItem, 0, calendarPosterLimit)
+		dayIndexes[rows[i].Date] = i
+		itemIndexes[rows[i].Date] = make(map[string]int)
+	}
+
+	var records []model.EmbyWatchRecord
+	if err := s.db.
+		Where("emby_user_id = ? AND watched_date LIKE ?", embyUserID, prefix).
+		Order("watched_at desc, id desc").
+		Find(&records).Error; err != nil {
+		return nil, err
+	}
+
+	for _, record := range records {
+		dayIndex, ok := dayIndexes[record.WatchedDate]
+		if !ok {
+			continue
+		}
+
+		posterID := record.ItemID
+		title := record.Title
+		groupID := record.ItemID
+		if record.ItemType == "Episode" && strings.TrimSpace(record.SeriesID) != "" {
+			posterID = record.SeriesID
+			groupID = record.SeriesID
+			if strings.TrimSpace(record.SeriesName) != "" {
+				title = record.SeriesName
+			}
+		}
+		groupKey := record.ItemType + ":" + groupID
+
+		if itemIndex, exists := itemIndexes[record.WatchedDate][groupKey]; exists {
+			rows[dayIndex].Items[itemIndex].Count++
+			continue
+		}
+		if len(rows[dayIndex].Items) >= calendarPosterLimit {
+			continue
+		}
+
+		itemIndexes[record.WatchedDate][groupKey] = len(rows[dayIndex].Items)
+		rows[dayIndex].Items = append(rows[dayIndex].Items, CalendarItem{
+			PosterID: posterID,
+			Title:    title,
+			ItemType: record.ItemType,
+			Count:    1,
+		})
 	}
 	return rows, nil
 }

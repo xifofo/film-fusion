@@ -30,8 +30,6 @@ curl -o data/config.yaml https://raw.githubusercontent.com/xifofo/film-fusion/ma
 ```yaml
 server:
   password: "your-secure-password"  # 管理员密码
-jwt:
-  secret: "your-very-long-random-secret-key"  # JWT密钥
 ```
 
 3. **修改挂载路径**
@@ -50,14 +48,6 @@ docker-compose up -d
 
 ### 基础配置
 
-先为每个部署实例单独生成密钥：
-
-```bash
-openssl rand -base64 48
-```
-
-再把输出完整粘贴到配置中：
-
 ```yaml
 server:
   port: 9000                        # Web界面端口
@@ -66,11 +56,10 @@ server:
   download_115_concurrency: 2       # 115网盘下载并发数
 
 jwt:
-  secret: ""                         # 粘贴刚生成的输出，至少 32 字节
   expire_time: 240                  # Token过期时间（小时）
 ```
 
-也可以不把密钥写入 YAML，改为在部署环境中设置 `FILM_FUSION_JWT_SECRET`。该环境变量优先于 `jwt.secret`。
+JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工配置。
 
 ### Emby 集成配置
 ```yaml

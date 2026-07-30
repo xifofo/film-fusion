@@ -202,7 +202,13 @@ func (h *EmbyWatchHandler) Gallery(c *gin.Context) {
 func (h *EmbyWatchHandler) Calendar(c *gin.Context) {
 	year, _ := strconv.Atoi(c.Query("year"))
 	month, _ := strconv.Atoi(c.Query("month"))
-	days, err := h.svc.Calendar(strings.TrimSpace(c.Query("emby_user_id")), year, month)
+	includeItems, _ := strconv.ParseBool(c.Query("include_items"))
+	days, err := h.svc.Calendar(
+		strings.TrimSpace(c.Query("emby_user_id")),
+		year,
+		month,
+		includeItems,
+	)
 	if err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return

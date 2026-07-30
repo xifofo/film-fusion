@@ -52,7 +52,7 @@ type SiteConfig struct {
 }
 
 // WebhookConfig 保存外部 webhook 的独立鉴权配置。
-// webhook 密钥不得复用管理后台密码或 JWT 密钥。
+// webhook 密钥不得复用管理后台密码。
 type WebhookConfig struct {
 	CloudDrive2 CloudDrive2WebhookConfig `mapstructure:"clouddrive2" json:"clouddrive2"`
 }
@@ -82,17 +82,9 @@ type LogConfig struct {
 }
 
 type JWTConfig struct {
-	Secret     string `mapstructure:"secret" json:"secret"`           // JWT 密钥
+	Secret     string `mapstructure:"secret" json:"-"`                // 内部会话签名密钥，不对外暴露
 	ExpireTime int    `mapstructure:"expire_time" json:"expire_time"` // 过期时间（小时）
 	Issuer     string `mapstructure:"issuer" json:"issuer"`           // 签发者
-}
-
-const minJWTSecretBytes = 32
-
-var insecureJWTSecrets = map[string]struct{}{
-	"film-fusion-secret-key":               {},
-	"your-jwt-secret-key":                  {},
-	"your-secret-key-change-in-production": {},
 }
 
 // TelegramConfig 控制 Telegram Bot 告警投递及各类安全事件开关。
@@ -236,6 +228,7 @@ func Load() *Config {
 	applyLoginSecurityDefaults("server.security", &config.Server.Security)
 	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
 	applyTelegramDefaults(&config.Telegram)
+	applyJWTSecret(&config.JWT)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -279,7 +272,6 @@ func Save(c *Config) error {
 	viper.Set("log.max_age", c.Log.MaxAge)
 	viper.Set("log.compress", c.Log.Compress)
 
-	viper.Set("jwt.secret", c.JWT.Secret)
 	viper.Set("jwt.expire_time", c.JWT.ExpireTime)
 	viper.Set("jwt.issuer", c.JWT.Issuer)
 
@@ -448,11 +440,9 @@ func setDefaults() {
 	viper.SetDefault("log.max_age", 28)
 	viper.SetDefault("log.compress", true)
 
-	// JWT 密钥没有可用默认值。环境变量优先于 config.yaml，适合容器密钥注入。
+	// 会话签名密钥由程序在数据目录中自动生成并管理。
+	// 保留该默认项只用于读取旧配置并完成一次性迁移。
 	viper.SetDefault("jwt.secret", "")
-	if err := viper.BindEnv("jwt.secret", "FILM_FUSION_JWT_SECRET"); err != nil {
-		panic(fmt.Sprintf("绑定 JWT 密钥环境变量失败: %v", err))
-	}
 	viper.SetDefault("jwt.expire_time", 24) // 24小时
 	viper.SetDefault("jwt.issuer", "film-fusion")
 
@@ -641,9 +631,6 @@ func validateConfig(config *Config) error {
 	if err := ValidateSite(config.Site); err != nil {
 		return err
 	}
-	if err := ValidateJWTSecret(config.JWT.Secret); err != nil {
-		return err
-	}
 	if err := ValidateLoginSecurity("FilmFusion", config.Server.Security); err != nil {
 		return err
 	}
@@ -721,22 +708,6 @@ func ValidateSite(settings SiteConfig) error {
 func ValidateWebhook(settings WebhookConfig) error {
 	if settings.CloudDrive2.Enabled && len(strings.TrimSpace(settings.CloudDrive2.Token)) < 32 {
 		return fmt.Errorf("CloudDrive2 Webhook 鉴权启用时 Token 至少需要 32 个字符")
-	}
-	return nil
-}
-
-// ValidateJWTSecret rejects missing, publicly known, and undersized HMAC keys.
-// HS256 requires at least 256 bits of key material, represented here as 32 bytes.
-func ValidateJWTSecret(secret string) error {
-	trimmed := strings.TrimSpace(secret)
-	if trimmed == "" {
-		return fmt.Errorf("JWT 密钥未设置；请配置 jwt.secret 或 FILM_FUSION_JWT_SECRET")
-	}
-	if _, known := insecureJWTSecrets[trimmed]; known {
-		return fmt.Errorf("JWT 密钥使用了公开示例值；请更换为随机生成的独立密钥")
-	}
-	if len([]byte(trimmed)) < minJWTSecretBytes {
-		return fmt.Errorf("JWT 密钥过短：至少需要 %d 字节的随机密钥", minJWTSecretBytes)
 	}
 	return nil
 }

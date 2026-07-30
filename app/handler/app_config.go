@@ -16,7 +16,7 @@ import (
 
 // AppConfigHandler 提供 config.yaml 的在线读取/编辑与热重载。
 // 共享同一 *config.Config 指针：保存后就地更新该结构体，使按需读取配置的逻辑立即生效；
-// 同时重建 Emby 客户端、重排封面 cron；端口/JWT/日志等启动期绑定项标注「需重启」。
+// 同时重建 Emby 客户端、重排封面 cron；端口/日志等启动期绑定项标注「需重启」。
 type AppConfigHandler struct {
 	logger        *logger.Logger
 	cfg           *config.Config
@@ -96,7 +96,6 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	secrets := gin.H{
 		"server.password":           h.cfg.Server.Password != "",
 		"webhook.clouddrive2.token": h.cfg.Webhook.CloudDrive2.Token != "",
-		"jwt.secret":                h.cfg.JWT.Secret != "",
 		"emby.api_key":              h.cfg.Emby.APIKey != "",
 		"moviepilot.password":       h.cfg.MoviePilot.Password != "",
 		"tmdb.api_key":              h.cfg.TMDB.APIKey != "",
@@ -108,7 +107,6 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	}
 	v.Server.Password = ""
 	v.Webhook.CloudDrive2.Token = ""
-	v.JWT.Secret = ""
 	v.Emby.APIKey = ""
 	v.MoviePilot.Password = ""
 	v.TMDB.APIKey = ""
@@ -154,9 +152,8 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if strings.TrimSpace(in.Webhook.CloudDrive2.Token) == "" {
 		in.Webhook.CloudDrive2.Token = h.cfg.Webhook.CloudDrive2.Token
 	}
-	if strings.TrimSpace(in.JWT.Secret) == "" {
-		in.JWT.Secret = h.cfg.JWT.Secret
-	}
+	// JWT 签名由服务内部管理，不接受 API 输入。
+	in.JWT.Secret = h.cfg.JWT.Secret
 	if strings.TrimSpace(in.Emby.APIKey) == "" {
 		in.Emby.APIKey = h.cfg.Emby.APIKey
 	}
@@ -268,10 +265,6 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	in.Site.ICPNumber = strings.TrimSpace(in.Site.ICPNumber)
 	in.Site.PoliceNumber = strings.TrimSpace(in.Site.PoliceNumber)
 	if err := config.ValidateSite(in.Site); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
-	}
-	if err := config.ValidateJWTSecret(in.JWT.Secret); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
