@@ -255,7 +255,7 @@ func (s *Server) setupRoutes() {
 
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
-	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService)
+	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	telegramHandler := handler.NewTelegramHandler(s.telegramNotifier)
 	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
@@ -288,11 +288,17 @@ func (s *Server) setupRoutes() {
 	// API路由组
 	api := s.gin.Group("/api")
 
+	// 登录页公开配置与公开背景图片
+	api.GET("/public-config", appConfigHandler.GetPublic)
+	api.GET("/public-assets/login-background/:filename", appConfigHandler.GetLoginBackground)
+	api.GET("/public-assets/login-background-emby/:itemID", appConfigHandler.GetEmbyLoginBackground)
+
 	// 认证相关路由（不需要JWT验证）
 	auth := api.Group("/auth")
 	{
 		auth.POST("/login", authHandler.Login)
 		auth.POST("/refresh", authHandler.RefreshToken)
+		auth.POST("/logout", authHandler.Logout)
 	}
 
 	// Webhook 路由组（不需要JWT验证，供外部服务调用）
@@ -322,6 +328,7 @@ func (s *Server) setupRoutes() {
 		// 应用配置（config.yaml 在线编辑 + 热重载）
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
+		protected.POST("/site-assets/login-background", appConfigHandler.UploadLoginBackground)
 		protected.POST("/telegram/test", telegramHandler.Test)
 
 		rssMonitor := protected.Group("/rss-monitor")

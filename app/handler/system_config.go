@@ -60,6 +60,10 @@ func (h *SystemConfigHandler) GetConfigCategories(c *gin.Context) {
 			Key:         model.Category115Open,
 			Description: "115开放平台配置",
 		},
+		{
+			Key:         model.CategoryAppearance,
+			Description: "站点外观配置",
+		},
 	}
 
 	h.success(c, categories, "获取配置分类成功")

@@ -12,6 +12,7 @@ import (
 
 type Config struct {
 	Server     ServerConfig     `mapstructure:"server" json:"server"`
+	Site       SiteConfig       `mapstructure:"site" json:"site"`
 	Webhook    WebhookConfig    `mapstructure:"webhook" json:"webhook"`
 	Log        LogConfig        `mapstructure:"log" json:"log"`
 	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
@@ -20,6 +21,34 @@ type Config struct {
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
+}
+
+const (
+	DefaultLoginTitle              = "Film Fusion"
+	DefaultLoginSubtitle           = "Film Fusion 是简单的 Emby + 网盘的辅助工具"
+	DefaultLoginFormTitle          = "欢迎回来"
+	DefaultLoginFormSubtitle       = "使用管理员账户进入 Film Fusion 控制台"
+	DefaultFooterText              = "Powered by Kumayi"
+	DefaultLoginBackgroundSource   = "custom"
+	DefaultLoginBackgroundMode     = "latest"
+	DefaultLoginBackgroundInterval = 12
+	DefaultLoginBackgroundLimit    = 10
+)
+
+// SiteConfig 保存可安全展示给未登录用户的站点外观配置。
+type SiteConfig struct {
+	LoginTitle              string `mapstructure:"login_title" json:"login_title"`
+	LoginSubtitle           string `mapstructure:"login_subtitle" json:"login_subtitle"`
+	LoginFormTitle          string `mapstructure:"login_form_title" json:"login_form_title"`
+	LoginFormSubtitle       string `mapstructure:"login_form_subtitle" json:"login_form_subtitle"`
+	LoginBackgroundURL      string `mapstructure:"login_background_url" json:"login_background_url"`
+	LoginBackgroundSource   string `mapstructure:"login_background_source" json:"login_background_source"`
+	LoginBackgroundMode     string `mapstructure:"login_background_mode" json:"login_background_mode"`
+	LoginBackgroundInterval int    `mapstructure:"login_background_interval" json:"login_background_interval"`
+	LoginBackgroundLimit    int    `mapstructure:"login_background_limit" json:"login_background_limit"`
+	FooterText              string `mapstructure:"footer_text" json:"footer_text"`
+	ICPNumber               string `mapstructure:"icp_number" json:"icp_number"`
+	PoliceNumber            string `mapstructure:"police_number" json:"police_number"`
 }
 
 // WebhookConfig 保存外部 webhook 的独立鉴权配置。
@@ -202,6 +231,7 @@ func Load() *Config {
 	if err := viper.Unmarshal(&config); err != nil {
 		log.Fatalf("无法解码配置: %v", err)
 	}
+	applySiteDefaults(&config.Site)
 	applyEmbyImageOptimizationDefaults(&config.Emby.ImageOptimization)
 	applyLoginSecurityDefaults("server.security", &config.Server.Security)
 	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
@@ -224,6 +254,19 @@ func Save(c *Config) error {
 	viper.Set("server.download_115_concurrency", c.Server.Download115Concurrency)
 	viper.Set("server.process_new_media", c.Server.ProcessNewMedia)
 	setLoginSecurity("server.security", c.Server.Security)
+
+	viper.Set("site.login_title", c.Site.LoginTitle)
+	viper.Set("site.login_subtitle", c.Site.LoginSubtitle)
+	viper.Set("site.login_form_title", c.Site.LoginFormTitle)
+	viper.Set("site.login_form_subtitle", c.Site.LoginFormSubtitle)
+	viper.Set("site.login_background_url", c.Site.LoginBackgroundURL)
+	viper.Set("site.login_background_source", c.Site.LoginBackgroundSource)
+	viper.Set("site.login_background_mode", c.Site.LoginBackgroundMode)
+	viper.Set("site.login_background_interval", c.Site.LoginBackgroundInterval)
+	viper.Set("site.login_background_limit", c.Site.LoginBackgroundLimit)
+	viper.Set("site.footer_text", c.Site.FooterText)
+	viper.Set("site.icp_number", c.Site.ICPNumber)
+	viper.Set("site.police_number", c.Site.PoliceNumber)
 
 	viper.Set("webhook.clouddrive2.enabled", c.Webhook.CloudDrive2.Enabled)
 	viper.Set("webhook.clouddrive2.token", c.Webhook.CloudDrive2.Token)
@@ -336,6 +379,20 @@ func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
 	setDefaultLoginSecurity("server.security")
+
+	// 登录页公开展示配置
+	viper.SetDefault("site.login_title", DefaultLoginTitle)
+	viper.SetDefault("site.login_subtitle", DefaultLoginSubtitle)
+	viper.SetDefault("site.login_form_title", DefaultLoginFormTitle)
+	viper.SetDefault("site.login_form_subtitle", DefaultLoginFormSubtitle)
+	viper.SetDefault("site.login_background_url", "")
+	viper.SetDefault("site.login_background_source", DefaultLoginBackgroundSource)
+	viper.SetDefault("site.login_background_mode", DefaultLoginBackgroundMode)
+	viper.SetDefault("site.login_background_interval", DefaultLoginBackgroundInterval)
+	viper.SetDefault("site.login_background_limit", DefaultLoginBackgroundLimit)
+	viper.SetDefault("site.footer_text", DefaultFooterText)
+	viper.SetDefault("site.icp_number", "")
+	viper.SetDefault("site.police_number", "")
 
 	// CloudDrive2 webhook 默认关闭，必须显式设置独立 Token 后开启。
 	viper.SetDefault("webhook.clouddrive2.enabled", false)
@@ -549,10 +606,40 @@ func applyEmbyImageRuleDefaults(prefix string, rule *EmbyImageRuleConfig, defaul
 	}
 }
 
+func applySiteDefaults(settings *SiteConfig) {
+	if strings.TrimSpace(settings.LoginTitle) == "" {
+		settings.LoginTitle = DefaultLoginTitle
+	}
+	if strings.TrimSpace(settings.LoginSubtitle) == "" {
+		settings.LoginSubtitle = DefaultLoginSubtitle
+	}
+	if strings.TrimSpace(settings.LoginFormTitle) == "" {
+		settings.LoginFormTitle = DefaultLoginFormTitle
+	}
+	if strings.TrimSpace(settings.LoginFormSubtitle) == "" {
+		settings.LoginFormSubtitle = DefaultLoginFormSubtitle
+	}
+	if strings.TrimSpace(settings.LoginBackgroundSource) == "" {
+		settings.LoginBackgroundSource = DefaultLoginBackgroundSource
+	}
+	if strings.TrimSpace(settings.LoginBackgroundMode) == "" {
+		settings.LoginBackgroundMode = DefaultLoginBackgroundMode
+	}
+	if settings.LoginBackgroundInterval <= 0 {
+		settings.LoginBackgroundInterval = DefaultLoginBackgroundInterval
+	}
+	if settings.LoginBackgroundLimit <= 0 {
+		settings.LoginBackgroundLimit = DefaultLoginBackgroundLimit
+	}
+}
+
 // validateConfig 验证配置的有效性
 func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
 		return fmt.Errorf("服务器端口未设置")
+	}
+	if err := ValidateSite(config.Site); err != nil {
+		return err
 	}
 	if err := ValidateJWTSecret(config.JWT.Secret); err != nil {
 		return err
@@ -568,6 +655,64 @@ func validateConfig(config *Config) error {
 	}
 	if err := ValidateWebhook(config.Webhook); err != nil {
 		return err
+	}
+	return nil
+}
+
+func ValidateSite(settings SiteConfig) error {
+	if strings.TrimSpace(settings.LoginTitle) == "" {
+		return fmt.Errorf("登录页内容标题不能为空")
+	}
+	if strings.TrimSpace(settings.LoginSubtitle) == "" {
+		return fmt.Errorf("登录页内容副标题不能为空")
+	}
+	if strings.TrimSpace(settings.LoginFormTitle) == "" {
+		return fmt.Errorf("登录表单主标题不能为空")
+	}
+	if strings.TrimSpace(settings.LoginFormSubtitle) == "" {
+		return fmt.Errorf("登录表单说明不能为空")
+	}
+	backgroundURL := strings.TrimSpace(settings.LoginBackgroundURL)
+	if backgroundURL != "" {
+		parsed, err := url.ParseRequestURI(backgroundURL)
+		if err != nil {
+			return fmt.Errorf("登录页背景图片 URL 无效")
+		}
+		if parsed.IsAbs() && parsed.Scheme != "http" && parsed.Scheme != "https" {
+			return fmt.Errorf("登录页背景图片 URL 仅支持 HTTP 或 HTTPS")
+		}
+	}
+	backgroundSource := strings.ToLower(strings.TrimSpace(settings.LoginBackgroundSource))
+	if backgroundSource == "" {
+		backgroundSource = DefaultLoginBackgroundSource
+	}
+	switch backgroundSource {
+	case "custom", "emby", "tmdb":
+	default:
+		return fmt.Errorf("登录页背景来源仅支持 custom、emby 或 tmdb")
+	}
+	backgroundMode := strings.ToLower(strings.TrimSpace(settings.LoginBackgroundMode))
+	if backgroundMode == "" {
+		backgroundMode = DefaultLoginBackgroundMode
+	}
+	switch backgroundMode {
+	case "latest", "popular":
+	default:
+		return fmt.Errorf("登录页背景内容仅支持 latest 或 popular")
+	}
+	backgroundInterval := settings.LoginBackgroundInterval
+	if backgroundInterval == 0 {
+		backgroundInterval = DefaultLoginBackgroundInterval
+	}
+	if backgroundInterval < 5 || backgroundInterval > 300 {
+		return fmt.Errorf("登录页背景轮播间隔需在 5 到 300 秒之间")
+	}
+	backgroundLimit := settings.LoginBackgroundLimit
+	if backgroundLimit == 0 {
+		backgroundLimit = DefaultLoginBackgroundLimit
+	}
+	if backgroundLimit < 1 || backgroundLimit > 20 {
+		return fmt.Errorf("登录页背景数量需在 1 到 20 张之间")
 	}
 	return nil
 }

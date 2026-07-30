@@ -144,6 +144,13 @@ func (h *AuthHandler) RefreshToken(c *gin.Context) {
 	}, "刷新成功")
 }
 
+// Logout 用户退出登录。
+// FilmFusion 使用无状态 JWT，服务端不保存会话；客户端收到成功响应后删除本地令牌。
+// 接口保持幂等，不要求令牌仍然有效，确保过期会话也能正常退出。
+func (h *AuthHandler) Logout(c *gin.Context) {
+	h.success(c, nil, "退出登录成功")
+}
+
 // Me 获取当前用户信息
 func (h *AuthHandler) Me(c *gin.Context) {
 	userID, exists := c.Get("user_id")

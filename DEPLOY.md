@@ -33,9 +33,9 @@
 
 | 容器路径 | 用途 |
 | -------- | ---- |
-| `/app/data` | 配置文件 `config.yaml`、SQLite 数据库、日志、字体等持久化数据 |
+| `/app/data` | 配置文件 `config.yaml`、SQLite 数据库、日志、字体及登录页背景等持久化数据 |
 
-> 数据全部位于 `/app/data`，只需挂载这一个目录即可持久化。
+> 数据全部位于 `/app/data`，只需挂载这一个目录即可持久化。后台上传的登录页背景保存在 `/app/data/uploads/login-backgrounds/`。
 
 ---
 

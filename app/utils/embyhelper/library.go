@@ -95,6 +95,59 @@ type listLookupItemsResp struct {
 	TotalRecordCount int              `json:"TotalRecordCount"`
 }
 
+// ListLoginBackgroundItems 读取可用于登录页轮播的 Movie / Series 背景图。
+// latest 按入库时间排序；popular 按当前 Emby 用户的播放次数排序。
+func (e *EmbyClient) ListLoginBackgroundItems(mode string, limit int) ([]EmbyItem, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 20 {
+		limit = 20
+	}
+
+	sortBy := "DateCreated,SortName"
+	if strings.EqualFold(strings.TrimSpace(mode), "popular") {
+		sortBy = "PlayCount,CommunityRating,SortName"
+	}
+
+	req := e.client.R().
+		SetQueryParam("Recursive", "true").
+		SetQueryParam("IncludeItemTypes", "Movie,Series").
+		SetQueryParam("SortBy", sortBy).
+		SetQueryParam("SortOrder", "Descending").
+		SetQueryParam("Limit", strconv.Itoa(limit*2)).
+		SetQueryParam("Fields", "DateCreated,ImageTags,BackdropImageTags,UserData").
+		SetQueryParam("ImageTypes", "Backdrop").
+		SetQueryParam("ImageTypeLimit", "1").
+		SetQueryParam("EnableImageTypes", "Backdrop")
+
+	endpoint := "/Items"
+	if uid := strings.TrimSpace(e.config.Emby.AdminUserID); uid != "" {
+		endpoint = "/Users/" + uid + "/Items"
+	}
+
+	var resp listItemsResp
+	r, err := req.SetResult(&resp).Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("请求 Emby 登录页背景失败: %w", err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("Emby 登录页背景 HTTP %d: %s", r.StatusCode(), truncate(r.String(), 256))
+	}
+
+	items := make([]EmbyItem, 0, limit)
+	for _, item := range resp.Items {
+		if item.ID == "" || len(item.BackdropTags) == 0 {
+			continue
+		}
+		items = append(items, item)
+		if len(items) >= limit {
+			break
+		}
+	}
+	return items, nil
+}
+
 // ListLibraries 列出所有媒体库（CollectionFolder）
 // Emby /Library/MediaFolders 返回当前 api_key 可见的所有库
 func (e *EmbyClient) ListLibraries() ([]EmbyLibrary, error) {

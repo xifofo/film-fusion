@@ -5,26 +5,44 @@ import (
 	"strings"
 
 	"film-fusion/app/config"
+	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/service"
 	"film-fusion/app/utils/embyhelper"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // AppConfigHandler 提供 config.yaml 的在线读取/编辑与热重载。
 // 共享同一 *config.Config 指针：保存后就地更新该结构体，使按需读取配置的逻辑立即生效；
 // 同时重建 Emby 客户端、重排封面 cron；端口/JWT/日志等启动期绑定项标注「需重启」。
 type AppConfigHandler struct {
-	logger   *logger.Logger
-	cfg      *config.Config
-	emby     *embyhelper.EmbyClient
-	coverSvc *service.EmbyCoverService
+	logger        *logger.Logger
+	cfg           *config.Config
+	emby          *embyhelper.EmbyClient
+	coverSvc      *service.EmbyCoverService
+	tmdbSvc       *service.TMDBService
+	siteAssetsDir string
+	db            *gorm.DB
+	backgrounds   *loginBackgroundCache
 }
 
 // NewAppConfigHandler 构造
-func NewAppConfigHandler(log *logger.Logger, cfg *config.Config, emby *embyhelper.EmbyClient, coverSvc *service.EmbyCoverService) *AppConfigHandler {
-	return &AppConfigHandler{logger: log, cfg: cfg, emby: emby, coverSvc: coverSvc}
+func NewAppConfigHandler(log *logger.Logger, cfg *config.Config, emby *embyhelper.EmbyClient, coverSvc *service.EmbyCoverService, tmdbServices ...*service.TMDBService) *AppConfigHandler {
+	handler := &AppConfigHandler{
+		logger:        log,
+		cfg:           cfg,
+		emby:          emby,
+		coverSvc:      coverSvc,
+		siteAssetsDir: defaultSiteAssetsDir,
+		db:            database.GetDB(),
+		backgrounds:   &loginBackgroundCache{},
+	}
+	if len(tmdbServices) > 0 {
+		handler.tmdbSvc = tmdbServices[0]
+	}
+	return handler
 }
 
 func (h *AppConfigHandler) success(c *gin.Context, data any, message string) {
@@ -35,9 +53,46 @@ func (h *AppConfigHandler) error(c *gin.Context, statusCode int, errorCode int, 
 	c.JSON(statusCode, ApiResponse{Code: errorCode, Message: message, Data: nil})
 }
 
+// GetPublic GET /api/public-config 仅返回登录前可安全展示的站点配置。
+func (h *AppConfigHandler) GetPublic(c *gin.Context) {
+	site := h.currentSiteConfig()
+	title := strings.TrimSpace(site.LoginTitle)
+	if title == "" {
+		title = config.DefaultLoginTitle
+	}
+	subtitle := strings.TrimSpace(site.LoginSubtitle)
+	if subtitle == "" {
+		subtitle = config.DefaultLoginSubtitle
+	}
+	formTitle := strings.TrimSpace(site.LoginFormTitle)
+	if formTitle == "" {
+		formTitle = config.DefaultLoginFormTitle
+	}
+	formSubtitle := strings.TrimSpace(site.LoginFormSubtitle)
+	if formSubtitle == "" {
+		formSubtitle = config.DefaultLoginFormSubtitle
+	}
+	backgrounds := h.resolveLoginBackgrounds(c.Request.Context(), site)
+	h.success(c, gin.H{
+		"login_title":               title,
+		"login_subtitle":            subtitle,
+		"login_form_title":          formTitle,
+		"login_form_subtitle":       formSubtitle,
+		"login_background_url":      strings.TrimSpace(site.LoginBackgroundURL),
+		"login_background_source":   normalizeLoginBackgroundSource(site.LoginBackgroundSource),
+		"login_background_mode":     normalizeLoginBackgroundMode(site.LoginBackgroundMode),
+		"login_background_interval": normalizeLoginBackgroundInterval(site.LoginBackgroundInterval),
+		"login_backgrounds":         backgrounds,
+		"footer_text":               strings.TrimSpace(site.FooterText),
+		"icp_number":                strings.TrimSpace(site.ICPNumber),
+		"police_number":             strings.TrimSpace(site.PoliceNumber),
+	}, "获取公开配置成功")
+}
+
 // Get GET /api/app-config 返回当前配置（密钥脱敏，仅返回是否已设置）。
 func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
+	v.Site = h.currentSiteConfig()
 	secrets := gin.H{
 		"server.password":           h.cfg.Server.Password != "",
 		"webhook.clouddrive2.token": h.cfg.Webhook.CloudDrive2.Token != "",
@@ -149,6 +204,73 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")
 		return
 	}
+	// 兼容未携带 site 字段的旧版前端。
+	currentSite := h.currentSiteConfig()
+	if siteConfigIsEmpty(in.Site) {
+		in.Site = currentSite
+	}
+	if strings.TrimSpace(in.Site.LoginTitle) == "" {
+		in.Site.LoginTitle = currentSite.LoginTitle
+		if strings.TrimSpace(in.Site.LoginTitle) == "" {
+			in.Site.LoginTitle = config.DefaultLoginTitle
+		}
+	}
+	if strings.TrimSpace(in.Site.LoginSubtitle) == "" {
+		in.Site.LoginSubtitle = currentSite.LoginSubtitle
+		if strings.TrimSpace(in.Site.LoginSubtitle) == "" {
+			in.Site.LoginSubtitle = config.DefaultLoginSubtitle
+		}
+	}
+	if strings.TrimSpace(in.Site.LoginFormTitle) == "" {
+		in.Site.LoginFormTitle = currentSite.LoginFormTitle
+		if strings.TrimSpace(in.Site.LoginFormTitle) == "" {
+			in.Site.LoginFormTitle = config.DefaultLoginFormTitle
+		}
+	}
+	if strings.TrimSpace(in.Site.LoginFormSubtitle) == "" {
+		in.Site.LoginFormSubtitle = currentSite.LoginFormSubtitle
+		if strings.TrimSpace(in.Site.LoginFormSubtitle) == "" {
+			in.Site.LoginFormSubtitle = config.DefaultLoginFormSubtitle
+		}
+	}
+	in.Site.LoginTitle = strings.TrimSpace(in.Site.LoginTitle)
+	in.Site.LoginSubtitle = strings.TrimSpace(in.Site.LoginSubtitle)
+	in.Site.LoginFormTitle = strings.TrimSpace(in.Site.LoginFormTitle)
+	in.Site.LoginFormSubtitle = strings.TrimSpace(in.Site.LoginFormSubtitle)
+	in.Site.LoginBackgroundURL = strings.TrimSpace(in.Site.LoginBackgroundURL)
+	if strings.TrimSpace(in.Site.LoginBackgroundSource) == "" {
+		in.Site.LoginBackgroundSource = currentSite.LoginBackgroundSource
+	}
+	if strings.TrimSpace(in.Site.LoginBackgroundSource) == "" {
+		in.Site.LoginBackgroundSource = config.DefaultLoginBackgroundSource
+	}
+	if strings.TrimSpace(in.Site.LoginBackgroundMode) == "" {
+		in.Site.LoginBackgroundMode = currentSite.LoginBackgroundMode
+	}
+	if strings.TrimSpace(in.Site.LoginBackgroundMode) == "" {
+		in.Site.LoginBackgroundMode = config.DefaultLoginBackgroundMode
+	}
+	if in.Site.LoginBackgroundInterval <= 0 {
+		in.Site.LoginBackgroundInterval = currentSite.LoginBackgroundInterval
+	}
+	if in.Site.LoginBackgroundInterval <= 0 {
+		in.Site.LoginBackgroundInterval = config.DefaultLoginBackgroundInterval
+	}
+	if in.Site.LoginBackgroundLimit <= 0 {
+		in.Site.LoginBackgroundLimit = currentSite.LoginBackgroundLimit
+	}
+	if in.Site.LoginBackgroundLimit <= 0 {
+		in.Site.LoginBackgroundLimit = config.DefaultLoginBackgroundLimit
+	}
+	in.Site.LoginBackgroundSource = strings.ToLower(strings.TrimSpace(in.Site.LoginBackgroundSource))
+	in.Site.LoginBackgroundMode = strings.ToLower(strings.TrimSpace(in.Site.LoginBackgroundMode))
+	in.Site.FooterText = strings.TrimSpace(in.Site.FooterText)
+	in.Site.ICPNumber = strings.TrimSpace(in.Site.ICPNumber)
+	in.Site.PoliceNumber = strings.TrimSpace(in.Site.PoliceNumber)
+	if err := config.ValidateSite(in.Site); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 	if err := config.ValidateJWTSecret(in.JWT.Secret); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
@@ -194,9 +316,9 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		restart = append(restart, "115 下载并发数")
 	}
 
-	// 写回 config.yaml
-	if err := config.Save(&in); err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "写入配置文件失败: "+err.Error())
+	// 外观配置写入 system_configs，同时镜像到 config.yaml 作为兼容备份。
+	if err := h.saveConfigAndSiteSettings(&in); err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "写入配置失败: "+err.Error())
 		return
 	}
 	// 就地更新共享配置，使按需读取 cfg 的逻辑立即生效

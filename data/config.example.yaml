@@ -13,6 +13,21 @@ server:
     block_minutes: 30
     trusted_proxy_cidrs: []
 
+# 登录页公开展示配置，保存后刷新页面即可生效。
+site:
+  login_title: "Film Fusion"
+  login_subtitle: "Film Fusion 是简单的 Emby + 网盘的辅助工具"
+  login_form_title: "欢迎回来"
+  login_form_subtitle: "使用管理员账户进入 Film Fusion 控制台"
+  login_background_url: ""     # 留空使用内置渐变背景，也可填写 HTTPS 图片地址
+  login_background_source: "custom" # custom / emby / tmdb；动态来源不可用时回退到上面的图片
+  login_background_mode: "latest"   # latest / popular
+  login_background_interval: 12     # 多图轮播间隔（秒，5-300）
+  login_background_limit: 10        # 动态背景数量（1-20）
+  footer_text: "Powered by Kumayi"
+  icp_number: ""               # 例如：京ICP备12345678号
+  police_number: ""            # 例如：京公网安备 11000002000001号
+
 # CloudDrive2 webhook 默认关闭。请生成独立随机 Token 后再开启；不要复用后台密码。
 webhook:
   clouddrive2:

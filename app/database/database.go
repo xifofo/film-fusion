@@ -36,7 +36,16 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 	log.Infof("数据库连接成功: %s", dbPath)
 
 	// 自动迁移表结构
-	AutoMigrate()
+	if err := AutoMigrate(); err != nil {
+		log.Errorf("迁移数据库失败: %v", err)
+		return err
+	}
+
+	// 首次升级时将 YAML 中的登录页外观迁移到数据库；后续以数据库值优先。
+	if err := InitSiteSettings(cfg.Site); err != nil {
+		log.Errorf("初始化登录页外观配置失败: %v", err)
+		return err
+	}
 
 	// 初始化管理员账户
 	if err := InitAdminUser(cfg, log); err != nil {

@@ -29,9 +29,10 @@ func (SystemConfig) TableName() string {
 
 // ConfigCategory 配置分类常量
 const (
-	CategorySystem   = "system"   // 系统配置
-	CategorySecurity = "security" // 安全配置
-	Category115Open  = "115_open" // 115开放平台配置
+	CategorySystem     = "system"     // 系统配置
+	CategorySecurity   = "security"   // 安全配置
+	Category115Open    = "115_open"   // 115开放平台配置
+	CategoryAppearance = "appearance" // 站点外观配置
 )
 
 // ConfigType 配置类型常量
@@ -41,4 +42,20 @@ const (
 	TypeBool   = "bool"
 	TypeJSON   = "json"
 	TypeFloat  = "float"
+)
+
+// 登录页外观配置键。值保存在 system_configs，config.yaml 仅作为首次迁移来源和兼容备份。
+const (
+	ConfigKeySiteLoginTitle         = "site.login_title"
+	ConfigKeySiteLoginSubtitle      = "site.login_subtitle"
+	ConfigKeySiteLoginFormTitle     = "site.login_form_title"
+	ConfigKeySiteLoginFormSubtitle  = "site.login_form_subtitle"
+	ConfigKeySiteLoginBackgroundURL = "site.login_background_url"
+	ConfigKeySiteBackgroundSource   = "site.login_background_source"
+	ConfigKeySiteBackgroundMode     = "site.login_background_mode"
+	ConfigKeySiteBackgroundInterval = "site.login_background_interval"
+	ConfigKeySiteBackgroundLimit    = "site.login_background_limit"
+	ConfigKeySiteFooterText         = "site.footer_text"
+	ConfigKeySiteICPNumber          = "site.icp_number"
+	ConfigKeySitePoliceNumber       = "site.police_number"
 )

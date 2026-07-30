@@ -9,6 +9,7 @@
 - ☁️ **115网盘集成** - 支持 115网盘文件下载和直链播放
 - 🔗 **CloudDrive2 集成** - 支持 CloudDrive2 Webhook 通知
 - 🌐 **Web 管理界面** - 直观的 Web 界面进行配置和管理
+- 🖼️ **登录页定制** - 支持上传并持久化登录页背景、配置品牌及备案信息
 - 🔐 **JWT 认证** - 安全的用户认证系统
 - 🔄 **Webhook 支持** - 支持 CloudDrive2 和 MoviePilot2 的 Webhook 通知
 
