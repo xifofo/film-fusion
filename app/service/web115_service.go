@@ -1,12 +1,14 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"film-fusion/app/logger"
 
+	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 )
 
@@ -177,6 +179,50 @@ func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, ci
 		Items: items,
 		Total: int64(result.Count),
 		Raw:   []byte(resp.String()),
+	}, nil
+}
+
+// GetDirectoriesWithOpenAPI 使用目标账号 AccessToken 查询子目录，
+// 作为 Cookie WebAPI 被风控或临时不可用时的回退。
+func (s *Web115Service) GetDirectoriesWithOpenAPI(ctx context.Context, accessToken, cid string, offset, limit int) (Web115ListResult, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return Web115ListResult{}, fmt.Errorf("115 OpenAPI AccessToken 为空")
+	}
+	if limit <= 0 || limit > int(driver.MaxDirPageLimit) {
+		limit = int(driver.MaxDirPageLimit)
+	}
+
+	client := sdk115.New()
+	client.SetAccessToken(accessToken)
+	result, err := client.GetFiles(ctx, &sdk115.GetFilesReq{
+		CID:     strings.TrimSpace(cid),
+		Limit:   int64(limit),
+		Offset:  int64(offset),
+		Stdir:   1,
+		ShowDir: true,
+	})
+	if err != nil {
+		return Web115ListResult{}, err
+	}
+
+	items := make([]Web115File, 0, len(result.Data))
+	for _, file := range result.Data {
+		if file.Fc != "0" {
+			continue
+		}
+		items = append(items, Web115File{
+			FileID:   strings.TrimSpace(file.Fid),
+			Name:     file.Fn,
+			PickCode: file.Pc,
+			SHA1:     file.Sha1,
+			IsFile:   false,
+			Size:     file.FS,
+		})
+	}
+	return Web115ListResult{
+		Items: items,
+		Total: result.Count,
 	}, nil
 }
 
@@ -366,6 +412,35 @@ func (s *Web115Service) MkdirWithClient(client *driver.Pan115Client, parentID, n
 		return "", fmt.Errorf("目录名不能为空")
 	}
 	return client.Mkdir(parentID, name)
+}
+
+// MkdirWithOpenAPI 使用目标账号 AccessToken 创建文件夹，
+// 作为 Cookie WebAPI（webapi.115.com/files/add）失败后的回退。
+func (s *Web115Service) MkdirWithOpenAPI(ctx context.Context, accessToken, parentID, name string) (string, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return "", fmt.Errorf("115 OpenAPI AccessToken 为空")
+	}
+	parentID = strings.TrimSpace(parentID)
+	name = strings.TrimSpace(name)
+	if parentID == "" {
+		parentID = "0"
+	}
+	if name == "" {
+		return "", fmt.Errorf("目录名不能为空")
+	}
+
+	client := sdk115.New()
+	client.SetAccessToken(accessToken)
+	result, err := client.Mkdir(ctx, parentID, name)
+	if err != nil {
+		return "", err
+	}
+	cid := strings.TrimSpace(result.FileID)
+	if cid == "" {
+		return "", fmt.Errorf("115 OpenAPI 创建目录成功但 file_id 为空")
+	}
+	return cid, nil
 }
 
 func parse115Credential(cookie string) (*driver.Credential, error) {

@@ -74,15 +74,26 @@ type balanceCandidate struct {
 	SortOrder int
 }
 
+type balanceDirectoryService interface {
+	ResolveDirPathWithClient(client *driver.Pan115Client, dir string) (string, bool, error)
+	GetDirectoriesWithClient(client *driver.Pan115Client, cid string, offset, limit int) (Web115ListResult, error)
+	GetDirectoriesWithOpenAPI(ctx context.Context, accessToken, cid string, offset, limit int) (Web115ListResult, error)
+	MkdirWithClient(client *driver.Pan115Client, parentID, name string) (string, error)
+	MkdirWithOpenAPI(ctx context.Context, accessToken, parentID, name string) (string, error)
+}
+
 type BalanceAssignmentService struct {
-	logger    *logger.Logger
-	web115Svc *Web115Service
+	logger          *logger.Logger
+	web115Svc       *Web115Service
+	directory115Svc balanceDirectoryService
 }
 
 func NewBalanceAssignmentService(log *logger.Logger) *BalanceAssignmentService {
+	web115Svc := NewWeb115Service(log)
 	return &BalanceAssignmentService{
-		logger:    log,
-		web115Svc: NewWeb115Service(log),
+		logger:          log,
+		web115Svc:       web115Svc,
+		directory115Svc: web115Svc,
 	}
 }
 
@@ -730,7 +741,7 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 
 	targetRoot := s.targetRootPath(assignment.Match302ID, assignment.PlaybackStorageID)
 	targetDir, targetName := splitTargetPath(targetRoot, sourceInfo.RelativePath)
-	targetDirID, err := s.ensureDirPath(toClient, targetDir)
+	targetDirID, err := s.ensureDirPath(ctx, toClient, target.AccessToken, targetDir)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("创建目标目录失败: %w", err)
 	}
@@ -1248,30 +1259,27 @@ func (s *BalanceAssignmentService) targetRootPath(matchID, storageID uint) strin
 	return model.DefaultMatch302BalanceTargetRoot(matchID)
 }
 
-func (s *BalanceAssignmentService) ensureDirPath(client *driver.Pan115Client, dirPath string) (string, error) {
+func (s *BalanceAssignmentService) ensureDirPath(ctx context.Context, client *driver.Pan115Client, accessToken, dirPath string) (string, error) {
 	dirPath = path.Clean(pathhelper.EnsureLeadingSlash(dirPath))
 	if dirPath == "/" || dirPath == "." {
 		return "0", nil
 	}
-	if cid, ok, err := s.web115Svc.ResolveDirPathWithClient(client, dirPath); err == nil && ok {
+	directorySvc := s.directoryService()
+	if cid, ok, err := directorySvc.ResolveDirPathWithClient(client, dirPath); err == nil && ok {
 		return cid, nil
+	} else if err != nil {
+		s.warnDirectoryFallback("Cookie 完整路径查询失败，回退逐级查询 path=%s err=%s", dirPath, compact115Error(err))
 	}
 
 	currentID := "0"
 	for _, segment := range splitCloudPath(dirPath) {
-		list, err := s.web115Svc.GetDirectoriesWithClient(client, currentID, 0, 1150)
+		list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessToken, currentID)
 		if err != nil {
 			return "", err
 		}
-		found := ""
-		for _, item := range list.Items {
-			if item.Name == segment {
-				found = item.FileID
-				break
-			}
-		}
+		found := findDirectoryID(list, segment)
 		if found == "" {
-			created, err := s.web115Svc.MkdirWithClient(client, currentID, segment)
+			created, err := s.mkdirWithFallback(ctx, directorySvc, client, accessToken, currentID, segment)
 			if err != nil {
 				return "", err
 			}
@@ -1280,6 +1288,144 @@ func (s *BalanceAssignmentService) ensureDirPath(client *driver.Pan115Client, di
 		currentID = found
 	}
 	return currentID, nil
+}
+
+func (s *BalanceAssignmentService) directoryService() balanceDirectoryService {
+	if s.directory115Svc != nil {
+		return s.directory115Svc
+	}
+	return s.web115Svc
+}
+
+func (s *BalanceAssignmentService) getDirectoriesWithFallback(
+	ctx context.Context,
+	directorySvc balanceDirectoryService,
+	client *driver.Pan115Client,
+	accessToken, parentID string,
+) (Web115ListResult, error) {
+	list, cookieErr := directorySvc.GetDirectoriesWithClient(client, parentID, 0, int(driver.MaxDirPageLimit))
+	if cookieErr == nil {
+		return list, nil
+	}
+
+	if strings.TrimSpace(accessToken) == "" {
+		return Web115ListResult{}, fmt.Errorf(
+			"Cookie 查询目录失败且目标账号 AccessToken 为空，无法回退 Open API: %s",
+			compact115Error(cookieErr),
+		)
+	}
+	openList, openErr := directorySvc.GetDirectoriesWithOpenAPI(ctx, accessToken, parentID, 0, int(driver.MaxDirPageLimit))
+	if openErr != nil {
+		return Web115ListResult{}, fmt.Errorf(
+			"Cookie 查询目录失败: %s；Open API 查询目录失败: %w",
+			compact115Error(cookieErr),
+			openErr,
+		)
+	}
+	s.warnDirectoryFallback(
+		"Cookie 查询目录失败，已使用 Open API 回退 parent_id=%s err=%s",
+		parentID,
+		compact115Error(cookieErr),
+	)
+	return openList, nil
+}
+
+func (s *BalanceAssignmentService) mkdirWithFallback(
+	ctx context.Context,
+	directorySvc balanceDirectoryService,
+	client *driver.Pan115Client,
+	accessToken, parentID, name string,
+) (string, error) {
+	cid, cookieErr := directorySvc.MkdirWithClient(client, parentID, name)
+	if cookieErr == nil && strings.TrimSpace(cid) != "" {
+		return strings.TrimSpace(cid), nil
+	}
+	if cookieErr == nil {
+		cookieErr = fmt.Errorf("Cookie 创建目录成功但 cid 为空")
+	}
+	if is115DirectoryExistsError(cookieErr) {
+		return s.resolveExistingDirectory(ctx, directorySvc, client, accessToken, parentID, name)
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return "", fmt.Errorf(
+			"Cookie 创建目录失败且目标账号 AccessToken 为空，无法回退 Open API: %s",
+			compact115Error(cookieErr),
+		)
+	}
+
+	cid, openErr := directorySvc.MkdirWithOpenAPI(ctx, accessToken, parentID, name)
+	if openErr == nil && strings.TrimSpace(cid) != "" {
+		s.warnDirectoryFallback(
+			"Cookie 创建目录失败，已使用 Open API 回退 parent_id=%s name=%q err=%s",
+			parentID,
+			name,
+			compact115Error(cookieErr),
+		)
+		return strings.TrimSpace(cid), nil
+	}
+	if openErr == nil {
+		openErr = fmt.Errorf("Open API 创建目录成功但 file_id 为空")
+	}
+	if is115DirectoryExistsError(openErr) {
+		return s.resolveExistingDirectory(ctx, directorySvc, client, accessToken, parentID, name)
+	}
+	return "", fmt.Errorf(
+		"Cookie 创建目录失败: %s；Open API 创建目录失败: %w",
+		compact115Error(cookieErr),
+		openErr,
+	)
+}
+
+func (s *BalanceAssignmentService) resolveExistingDirectory(
+	ctx context.Context,
+	directorySvc balanceDirectoryService,
+	client *driver.Pan115Client,
+	accessToken, parentID, name string,
+) (string, error) {
+	list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessToken, parentID)
+	if err != nil {
+		return "", fmt.Errorf("目录 %q 已存在，但重新查询目录失败: %w", name, err)
+	}
+	if cid := findDirectoryID(list, name); cid != "" {
+		return cid, nil
+	}
+	return "", fmt.Errorf("目录 %q 已存在，但重新查询后未找到目录 ID", name)
+}
+
+func findDirectoryID(list Web115ListResult, name string) string {
+	for _, item := range list.Items {
+		if item.Name == name {
+			return strings.TrimSpace(item.FileID)
+		}
+	}
+	return ""
+}
+
+func is115DirectoryExistsError(err error) bool {
+	if errors.Is(err, driver.ErrExist) {
+		return true
+	}
+	var openErr *sdk115.Error
+	return errors.As(err, &openErr) && openErr.Code == 20004
+}
+
+func compact115Error(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := strings.Join(strings.Fields(strings.TrimSpace(err.Error())), " ")
+	const maxRunes = 500
+	runes := []rune(message)
+	if len(runes) > maxRunes {
+		return string(runes[:maxRunes]) + "..."
+	}
+	return message
+}
+
+func (s *BalanceAssignmentService) warnDirectoryFallback(format string, args ...any) {
+	if s != nil && s.logger != nil {
+		s.logger.Warnf(format, args...)
+	}
 }
 
 func (s *BalanceAssignmentService) findExistingTarget(client *driver.Pan115Client, dirID, fileName string, sourceInfo BalanceSourceFile) (Web115File, bool, error) {
