@@ -45,22 +45,25 @@ func TestClampOrganizePreviewTaskLimit(t *testing.T) {
 	}
 }
 
-func TestUpdateFolderAndRequeueResetsPreviewResult(t *testing.T) {
+func TestRequeueAfterSourceFilesUpdateResetsResultAndPreservesFolder(t *testing.T) {
 	db := newOrganizePreviewQueueTestDB(t)
+	startedAt := time.Now().Add(-time.Minute)
 	completedAt := time.Now()
 	task := model.OrganizePreviewTask{
 		UserID:                7,
 		CloudDirectoryID:      8,
 		CloudStorageID:        9,
-		FolderID:              "folder-1",
-		FolderName:            "示例电影 (2024)",
-		FolderPath:            "下载 / 示例电影 (2024)",
+		FolderID:              "folder-files",
+		FolderName:            "示例剧集",
+		FolderPath:            "下载 / 示例剧集",
 		Status:                model.OrganizePreviewStatusCompleted,
-		Total:                 3,
-		ResultJSON:            `{"total":3}`,
+		Total:                 2,
+		ResultJSON:            `{"total":2}`,
 		Error:                 "old error",
+		ExternalSubtitleCount: 1,
 		BestVersionCount:      1,
-		AlternateVersionCount: 2,
+		AlternateVersionCount: 1,
+		StartedAt:             &startedAt,
 		CompletedAt:           &completedAt,
 	}
 	if err := db.Create(&task).Error; err != nil {
@@ -68,37 +71,31 @@ func TestUpdateFolderAndRequeueResetsPreviewResult(t *testing.T) {
 	}
 
 	queue := &OrganizePreviewQueue{db: db}
-	claimed, err := queue.ClaimForFolderUpdate(task.UserID, task.ID)
+	claimed, err := queue.ClaimForSourceFilesUpdate(task.UserID, task.ID)
 	if err != nil {
 		t.Fatalf("claim task: %v", err)
 	}
 	if claimed.Status != model.OrganizePreviewStatusCompleted {
 		t.Fatalf("claimed original status=%q want=%q", claimed.Status, model.OrganizePreviewStatusCompleted)
 	}
-	updated, err := queue.UpdateFolderAndRequeue(
-		task.UserID,
-		task.ID,
-		"示例电影 (2024) {tmdb-12345}",
-		"下载 / 示例电影 (2024) {tmdb-12345}",
-	)
+	updated, err := queue.RequeueAfterSourceFilesUpdate(task.UserID, task.ID)
 	if err != nil {
-		t.Fatalf("update and requeue task: %v", err)
+		t.Fatalf("requeue after source file update: %v", err)
 	}
 	if updated.Status != model.OrganizePreviewStatusPending {
 		t.Fatalf("updated status=%q want=%q", updated.Status, model.OrganizePreviewStatusPending)
 	}
-	if updated.FolderName != "示例电影 (2024) {tmdb-12345}" ||
-		updated.FolderPath != "下载 / 示例电影 (2024) {tmdb-12345}" {
-		t.Fatalf("folder metadata not updated: %+v", updated)
+	if updated.FolderName != task.FolderName || updated.FolderPath != task.FolderPath {
+		t.Fatalf("folder metadata changed: %+v", updated)
 	}
 	if updated.Total != 0 || updated.ResultJSON != "" || updated.Error != "" ||
-		updated.BestVersionCount != 0 || updated.AlternateVersionCount != 0 ||
-		updated.StartedAt != nil || updated.CompletedAt != nil {
+		updated.ExternalSubtitleCount != 0 || updated.BestVersionCount != 0 ||
+		updated.AlternateVersionCount != 0 || updated.StartedAt != nil || updated.CompletedAt != nil {
 		t.Fatalf("old preview result not reset: %+v", updated)
 	}
 }
 
-func TestClaimForFolderUpdateRejectsProcessingTask(t *testing.T) {
+func TestClaimForSourceFilesUpdateRejectsProcessingTask(t *testing.T) {
 	db := newOrganizePreviewQueueTestDB(t)
 	task := model.OrganizePreviewTask{
 		UserID:           7,
@@ -112,8 +109,8 @@ func TestClaimForFolderUpdateRejectsProcessingTask(t *testing.T) {
 	}
 
 	queue := &OrganizePreviewQueue{db: db}
-	if _, err := queue.ClaimForFolderUpdate(task.UserID, task.ID); err == nil {
-		t.Fatal("processing task should not be claimed for folder update")
+	if _, err := queue.ClaimForSourceFilesUpdate(task.UserID, task.ID); err == nil {
+		t.Fatal("processing task should not be claimed for source file update")
 	}
 }
 

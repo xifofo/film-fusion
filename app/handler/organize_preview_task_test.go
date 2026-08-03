@@ -186,62 +186,76 @@ func TestBuildOrganizePreviewTaskListItemsExposesRefsWithoutResultJSON(t *testin
 	}
 }
 
-func TestBuildPreviewTaskTMDBFolderName(t *testing.T) {
+func TestBuildPreviewTaskTMDBFileName(t *testing.T) {
 	testCases := map[string]struct {
-		folderName string
-		tmdbID     string
-		want       string
+		fileName string
+		tmdbID   string
+		want     string
 	}{
-		"append marker": {
-			folderName: "示例电影 (2024)",
-			tmdbID:     "12345",
-			want:       "示例电影 (2024) {tmdb-12345}",
+		"append marker before media extension": {
+			fileName: "Show.S01E01.1080p.mkv",
+			tmdbID:   "12345",
+			want:     "Show.S01E01.1080p.{tmdb-12345}.mkv",
 		},
 		"replace tmdb marker": {
-			folderName: "示例电影 (2024) {tmdb-100}",
-			tmdbID:     "200",
-			want:       "示例电影 (2024) {tmdb-200}",
+			fileName: "Show.S01E01.{tmdb-100}.mkv",
+			tmdbID:   "200",
+			want:     "Show.S01E01.{tmdb-200}.mkv",
 		},
 		"replace legacy tmdbid marker": {
-			folderName: "示例电影 (2024) {tmdbid-100}",
-			tmdbID:     "200",
-			want:       "示例电影 (2024) {tmdb-200}",
+			fileName: "Show.S01E01.{tmdbid-100}.mkv",
+			tmdbID:   "200",
+			want:     "Show.S01E01.{tmdb-200}.mkv",
+		},
+		"preserve subtitle qualifier": {
+			fileName: "Show.S01E01.zh.ass",
+			tmdbID:   "200",
+			want:     "Show.S01E01.{tmdb-200}.zh.ass",
+		},
+		"preserve compressed subtitle extension": {
+			fileName: "Show.S01E01.zh.srt.gz",
+			tmdbID:   "200",
+			want:     "Show.S01E01.{tmdb-200}.zh.srt.gz",
+		},
+		"normalize marker after subtitle qualifier": {
+			fileName: "Show.S01E01.zh.{tmdb-100}.ass",
+			tmdbID:   "200",
+			want:     "Show.S01E01.{tmdb-200}.zh.ass",
 		},
 	}
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			if got := buildPreviewTaskTMDBFolderName(testCase.folderName, testCase.tmdbID); got != testCase.want {
-				t.Fatalf("buildPreviewTaskTMDBFolderName()=%q want=%q", got, testCase.want)
+			if got := buildPreviewTaskTMDBFileName(testCase.fileName, testCase.tmdbID); got != testCase.want {
+				t.Fatalf("buildPreviewTaskTMDBFileName()=%q want=%q", got, testCase.want)
 			}
 		})
 	}
 }
 
-func TestReplacePreviewTaskFolderPath(t *testing.T) {
-	const oldName = "示例电影 (2024)"
-	const newName = "示例电影 (2024) {tmdb-12345}"
-	testCases := map[string]struct {
-		folderPath string
-		want       string
-	}{
-		"nested path": {
-			folderPath: "下载 / 电影 / " + oldName,
-			want:       "下载 / 电影 / " + newName,
-		},
-		"single folder": {
-			folderPath: oldName,
-			want:       newName,
-		},
-		"missing path": {
-			want: newName,
-		},
+func TestBuildPreviewTaskTMDBFileRenameMapIncludesEveryFile(t *testing.T) {
+	renameMap, fileCount := buildPreviewTaskTMDBFileRenameMap([]service.Web115File{
+		{FileID: "video", Name: "Show.S01E01.mkv", IsFile: true},
+		{FileID: "subtitle", Name: "Show.S01E01.zh.ass", IsFile: true},
+		{FileID: "sidecar", Name: "Show.S01E01.nfo", IsFile: true},
+		{FileID: "already-tagged", Name: "Show.S01E02.{tmdb-200}.mkv", IsFile: true},
+		{FileID: "directory", Name: "Season 01", IsFile: false},
+	}, "200")
+
+	if fileCount != 4 {
+		t.Fatalf("file count=%d want=4", fileCount)
 	}
-	for name, testCase := range testCases {
-		t.Run(name, func(t *testing.T) {
-			if got := replacePreviewTaskFolderPath(testCase.folderPath, oldName, newName); got != testCase.want {
-				t.Fatalf("replacePreviewTaskFolderPath()=%q want=%q", got, testCase.want)
-			}
-		})
+	want := map[string]string{
+		"video":    "Show.S01E01.{tmdb-200}.mkv",
+		"subtitle": "Show.S01E01.{tmdb-200}.zh.ass",
+		"sidecar":  "Show.S01E01.{tmdb-200}.nfo",
+	}
+	if len(renameMap) != len(want) {
+		t.Fatalf("rename count=%d want=%d map=%v", len(renameMap), len(want), renameMap)
+	}
+	for fileID, wantName := range want {
+		if got := renameMap[fileID]; got != wantName {
+			t.Fatalf("rename[%s]=%q want=%q", fileID, got, wantName)
+		}
 	}
 }
 

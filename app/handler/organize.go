@@ -1226,7 +1226,7 @@ func (h *OrganizeHandler) AssignPreviewTaskTMDB(c *gin.Context) {
 	}
 
 	userID := userIDVal.(uint)
-	task, err := h.previewQueue.ClaimForFolderUpdate(userID, uint(id))
+	task, err := h.previewQueue.ClaimForSourceFilesUpdate(userID, uint(id))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			h.error(c, http.StatusNotFound, 404, "预整理任务不存在")
@@ -1235,56 +1235,112 @@ func (h *OrganizeHandler) AssignPreviewTaskTMDB(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
-	folderUpdateClaimed := true
+	fileUpdateClaimed := true
 	defer func() {
-		if folderUpdateClaimed {
-			if restoreErr := h.previewQueue.RestoreStatusAfterFolderUpdate(userID, uint(id), task.Status); restoreErr != nil && h.logger != nil {
+		if fileUpdateClaimed {
+			if restoreErr := h.previewQueue.RestoreStatusAfterSourceFilesUpdate(userID, uint(id), task.Status); restoreErr != nil && h.logger != nil {
 				h.logger.Errorf("恢复预整理任务状态失败: task_id=%d err=%v", id, restoreErr)
 			}
 		}
 	}()
 
 	folderID := strings.TrimSpace(task.FolderID)
-	folderName := strings.TrimSpace(task.FolderName)
-	if folderID == "" || folderID == "0" || folderName == "" {
+	if folderID == "" || folderID == "0" {
 		h.error(c, http.StatusBadRequest, 400, "预整理任务的源文件夹信息不完整")
 		return
 	}
-	newFolderName := buildPreviewTaskTMDBFolderName(folderName, tmdbID)
-	newFolderPath := replacePreviewTaskFolderPath(task.FolderPath, folderName, newFolderName)
 
-	if newFolderName != folderName {
-		var storage model.CloudStorage
-		if err := database.DB.Where("id = ? AND user_id = ?", task.CloudStorageID, userID).First(&storage).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				h.error(c, http.StatusBadRequest, 400, "源存储配置不存在")
-				return
-			}
-			h.error(c, http.StatusInternalServerError, 500, "读取源存储配置失败")
+	var storage model.CloudStorage
+	if err := database.DB.Where("id = ? AND user_id = ?", task.CloudStorageID, userID).First(&storage).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			h.error(c, http.StatusBadRequest, 400, "源存储配置不存在")
 			return
 		}
-		if strings.TrimSpace(storage.Cookie) == "" {
-			h.error(c, http.StatusBadRequest, 400, "源存储 Cookie 缺失，不能重命名")
-			return
-		}
-		client, err := h.web115Svc.NewClient(storage.Cookie)
-		if err != nil {
-			h.error(c, http.StatusBadRequest, 400, err.Error())
-			return
-		}
-		if err := h.web115Svc.BatchRename(client, map[string]string{folderID: newFolderName}); err != nil {
-			h.error(c, http.StatusBadRequest, 400, "重命名源文件夹失败: "+err.Error())
-			return
-		}
-	}
-
-	task, err = h.previewQueue.UpdateFolderAndRequeue(userID, uint(id), newFolderName, newFolderPath)
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "源文件夹已重命名，但重新加入队列失败: "+err.Error())
+		h.error(c, http.StatusInternalServerError, 500, "读取源存储配置失败")
 		return
 	}
-	folderUpdateClaimed = false
-	h.success(c, task, "已指定 TMDB ID，并重新加入预整理队列")
+	if strings.TrimSpace(storage.Cookie) == "" {
+		h.error(c, http.StatusBadRequest, 400, "源存储 Cookie 缺失，不能重命名")
+		return
+	}
+	client, err := h.web115Svc.NewClient(storage.Cookie)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	renameMap, fileCount, err := h.buildPreviewTaskTMDBFileRenames(client, folderID, tmdbID)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if fileCount == 0 {
+		h.error(c, http.StatusBadRequest, 400, "源文件夹内没有可指定 TMDB ID 的文件")
+		return
+	}
+	if err := h.web115Svc.BatchRename(client, renameMap); err != nil {
+		h.error(c, http.StatusBadRequest, 400, "批量重命名源文件失败: "+err.Error())
+		return
+	}
+
+	task, err = h.previewQueue.RequeueAfterSourceFilesUpdate(userID, uint(id))
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, "源文件已批量重命名，但重新加入队列失败: "+err.Error())
+		return
+	}
+	fileUpdateClaimed = false
+	h.success(c, task, fmt.Sprintf("已为文件夹内 %d 个文件指定 TMDB ID，并重新加入预整理队列", fileCount))
+}
+
+func (h *OrganizeHandler) buildPreviewTaskTMDBFileRenames(
+	client *driver.Pan115Client,
+	folderID string,
+	tmdbID string,
+) (map[string]string, int, error) {
+	renameMap := make(map[string]string)
+	fileCount := 0
+	offset := 0
+	limit := 1150
+
+	for {
+		listResp, err := h.web115Svc.GetFilesWithClient(client, folderID, offset, limit)
+		if err != nil {
+			return nil, 0, fmt.Errorf("获取源文件列表失败: %w", err)
+		}
+		pageRenames, pageFileCount := buildPreviewTaskTMDBFileRenameMap(listResp.Items, tmdbID)
+		fileCount += pageFileCount
+		for fileID, newName := range pageRenames {
+			renameMap[fileID] = newName
+		}
+
+		if listResp.Total > 0 {
+			if int64(offset+limit) >= listResp.Total {
+				break
+			}
+		} else if len(listResp.Items) < limit {
+			break
+		}
+		offset += limit
+	}
+
+	return renameMap, fileCount, nil
+}
+
+func buildPreviewTaskTMDBFileRenameMap(files []service.Web115File, tmdbID string) (map[string]string, int) {
+	renameMap := make(map[string]string)
+	fileCount := 0
+	for _, file := range files {
+		fileID := strings.TrimSpace(file.FileID)
+		fileName := strings.TrimSpace(file.Name)
+		if !file.IsFile || fileID == "" || fileName == "" {
+			continue
+		}
+		fileCount++
+		newName := buildPreviewTaskTMDBFileName(fileName, tmdbID)
+		if newName != "" && newName != fileName {
+			renameMap[fileID] = newName
+		}
+	}
+	return renameMap, fileCount
 }
 
 func (h *OrganizeHandler) DeletePreviewTask(c *gin.Context) {
@@ -3556,7 +3612,7 @@ var seasonDirRegexp = regexp.MustCompile(`(?i)^(?:season[\s._-]*(\d+)|s(\d+)|第
 
 var (
 	previewTaskTMDBIDRegexp             = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
-	previewTaskTMDBMarkerRegexp         = regexp.MustCompile(`(?i)\s*\{tmdb(?:id)?-[0-9]+\}`)
+	previewTaskTMDBMarkerRegexp         = regexp.MustCompile(`(?i)[\s._-]*\{tmdb(?:id)?-[0-9]+\}`)
 	defaultFilenameFallbackRegexp       = regexp.MustCompile(`.* - (.*)-.*`)
 	duplicateMovieTitleYearPrefixRegexp = regexp.MustCompile(`^\s*.+?[\(（]\s*(?:19|20)\d{2}\s*[\)）]\s+[-–—]\s+(.+?)\s*$`)
 	movieReleaseYearRegexp              = regexp.MustCompile(`(?:^|[^0-9])(?:19|20)\d{2}(?:[^0-9]|$)`)
@@ -3575,30 +3631,27 @@ var (
 	transferNameTokenRegexp             = regexp.MustCompile(`[[:alnum:]]+`)
 )
 
-func buildPreviewTaskTMDBFolderName(folderName, tmdbID string) string {
-	baseName := strings.TrimSpace(previewTaskTMDBMarkerRegexp.ReplaceAllString(strings.TrimSpace(folderName), ""))
+func buildPreviewTaskTMDBFileName(fileName, tmdbID string) string {
+	fileName = strings.TrimSpace(fileName)
 	marker := "{tmdb-" + strings.TrimSpace(tmdbID) + "}"
-	if baseName == "" {
-		return marker
-	}
-	return baseName + " " + marker
-}
+	cleanedName := strings.TrimSpace(previewTaskTMDBMarkerRegexp.ReplaceAllString(fileName, ""))
 
-func replacePreviewTaskFolderPath(folderPath, oldFolderName, newFolderName string) string {
-	folderPath = strings.TrimSpace(folderPath)
-	oldFolderName = strings.TrimSpace(oldFolderName)
-	newFolderName = strings.TrimSpace(newFolderName)
-	if folderPath == "" || folderPath == oldFolderName {
-		return newFolderName
+	if isSubtitleFile(cleanedName) {
+		stem, extension := splitOrganizeSubtitleName(cleanedName)
+		baseStem, qualifier := stripOrganizeSubtitleQualifier(stem)
+		baseStem = strings.TrimRight(strings.TrimSpace(baseStem), " ._-")
+		if baseStem == "" {
+			return marker + qualifier + extension
+		}
+		return baseStem + "." + marker + qualifier + extension
 	}
-	suffix := " / " + oldFolderName
-	if oldFolderName != "" && strings.HasSuffix(folderPath, suffix) {
-		return strings.TrimSuffix(folderPath, suffix) + " / " + newFolderName
+
+	extension := filepath.Ext(cleanedName)
+	stem := strings.TrimRight(strings.TrimSpace(strings.TrimSuffix(cleanedName, extension)), " ._-")
+	if stem == "" {
+		return marker + extension
 	}
-	if index := strings.LastIndex(folderPath, " / "); index >= 0 {
-		return folderPath[:index] + " / " + newFolderName
-	}
-	return newFolderName
+	return stem + "." + marker + extension
 }
 
 // extractTmdbIDFromName 从目录名（或路径段）中提取 tmdb id；无标记返回空。
