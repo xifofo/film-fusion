@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,20 @@ type Download115Config struct {
 	RetryLimit    int           // 最大重试次数
 	RetryDelay    time.Duration // 重试延迟
 }
+
+// DownloadQueueStats 下载队列各状态数量。
+type DownloadQueueStats struct {
+	Total       int64 `json:"total"`
+	Pending     int64 `json:"pending"`
+	Downloading int64 `json:"downloading"`
+	Failed      int64 `json:"failed"`
+}
+
+var (
+	ErrDownloadTaskNotFound  = errors.New("下载任务不存在")
+	ErrDownloadTaskRunning   = errors.New("下载中的任务不能移除")
+	ErrDownloadTaskNotFailed = errors.New("只有失败任务可以重试")
+)
 
 // Download115Service 115Open专用下载队列服务
 type Download115Service struct {
@@ -166,13 +182,39 @@ func (s *Download115Service) processPendingTasks() {
 
 		select {
 		case s.workers <- struct{}{}: // 获取工作者槽位
-			s.wg.Add(1)
-			go s.downloadTask(task)
 		default:
 			// 没有可用的工作者槽位，跳过
 			return
 		}
+
+		claimed, err := s.claimQueueTask(task.ID)
+		if err != nil {
+			<-s.workers
+			s.logger.Errorf("领取115Open下载任务失败: ID=%d, Error=%v", task.ID, err)
+			continue
+		}
+		if !claimed {
+			// 任务可能刚被页面移除，或已经由另一个工作者领取。
+			<-s.workers
+			continue
+		}
+
+		task.Status = model.QueueStatusDownloading
+		s.wg.Add(1)
+		go s.downloadTask(task)
 	}
+}
+
+// claimQueueTask 原子地把可执行任务标记为下载中，避免页面移除和工作者领取发生竞态。
+func (s *Download115Service) claimQueueTask(id uint) (bool, error) {
+	result := s.db.Model(&model.Download115Queue{}).
+		Where("id = ? AND retry_count < max_retry_count AND status IN ?", id,
+			[]string{model.QueueStatusPending, model.QueueStatusFailed}).
+		Update("status", model.QueueStatusDownloading)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
 }
 
 // downloadTask 执行单个下载任务
@@ -198,12 +240,6 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 		s.logger.Errorf("云存储配置不可用: StorageID=%d, Status=%s", task.CloudStorageID, task.CloudStorage.Status)
 		s.handleTaskError(&task, fmt.Errorf("云存储配置不可用: %s", task.CloudStorage.Status))
 		return
-	}
-
-	// 设置任务状态为下载中
-	task.SetDownloading()
-	if err := s.db.Save(&task).Error; err != nil {
-		s.logger.Errorf("更新任务状态失败: %v", err)
 	}
 
 	// 确保保存目录存在
@@ -353,6 +389,71 @@ func (s *Download115Service) GetQueueTasks(limit, offset int) ([]model.Download1
 	return tasks, total, nil
 }
 
+// ListQueueTasks 获取供管理页面展示的下载队列任务。
+func (s *Download115Service) ListQueueTasks(status, search, createdAtOrder string, limit, offset int) ([]model.Download115Queue, int64, error) {
+	var tasks []model.Download115Queue
+	var total int64
+
+	query := s.db.Model(&model.Download115Queue{})
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+	if search = strings.TrimSpace(search); search != "" {
+		like := "%" + search + "%"
+		query = query.Where("save_path LIKE ? OR pick_code LIKE ?", like, like)
+	}
+
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+
+	order := "ASC"
+	if strings.EqualFold(createdAtOrder, "desc") {
+		order = "DESC"
+	}
+	if err := query.Preload("CloudStorage").
+		Order("created_at " + order).
+		Order("id " + order).
+		Limit(limit).
+		Offset(offset).
+		Find(&tasks).Error; err != nil {
+		return nil, 0, err
+	}
+
+	return tasks, total, nil
+}
+
+// GetQueueStats 获取整个下载队列的状态统计。
+func (s *Download115Service) GetQueueStats() (DownloadQueueStats, error) {
+	type statusCount struct {
+		Status string
+		Count  int64
+	}
+
+	var rows []statusCount
+	if err := s.db.Model(&model.Download115Queue{}).
+		Select("status, COUNT(*) AS count").
+		Group("status").
+		Scan(&rows).Error; err != nil {
+		return DownloadQueueStats{}, err
+	}
+
+	stats := DownloadQueueStats{}
+	for _, row := range rows {
+		stats.Total += row.Count
+		switch row.Status {
+		case model.QueueStatusPending:
+			stats.Pending = row.Count
+		case model.QueueStatusDownloading:
+			stats.Downloading = row.Count
+		case model.QueueStatusFailed:
+			stats.Failed = row.Count
+		}
+	}
+
+	return stats, nil
+}
+
 // ClearQueue 清空队列（用于调试）
 func (s *Download115Service) ClearQueue() error {
 	return s.db.Where("1 = 1").Delete(&model.Download115Queue{}).Error
@@ -379,8 +480,77 @@ func (s *Download115Service) ClearFailedTasks() (int64, error) {
 		return 0, result.Error
 	}
 
-	s.logger.Infof("清理了 %d 个失败的下载任务", result.RowsAffected)
+	if s.logger != nil {
+		s.logger.Infof("清理了 %d 个失败的下载任务", result.RowsAffected)
+	}
 	return result.RowsAffected, nil
+}
+
+// RetryFailedTaskByID 将失败任务重置为等待状态。
+func (s *Download115Service) RetryFailedTaskByID(id uint) error {
+	var task model.Download115Queue
+	if err := s.db.First(&task, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrDownloadTaskNotFound
+		}
+		return err
+	}
+	if task.Status != model.QueueStatusFailed {
+		return ErrDownloadTaskNotFailed
+	}
+
+	result := s.db.Model(&task).
+		Where("status = ?", model.QueueStatusFailed).
+		Updates(map[string]any{
+			"retry_count": 0,
+			"status":      model.QueueStatusPending,
+			"last_error":  "",
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		if err := s.db.First(&model.Download115Queue{}, id).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrDownloadTaskNotFound
+		} else if err != nil {
+			return err
+		}
+		return ErrDownloadTaskNotFailed
+	}
+	if s.logger != nil {
+		s.logger.Infof("下载任务已重新入队: ID=%d, PickCode=%s", task.ID, task.PickCode)
+	}
+	return nil
+}
+
+// RemoveQueueTask 移除等待中或失败的任务；运行中的任务必须由下载工作者自行完成。
+func (s *Download115Service) RemoveQueueTask(id uint) error {
+	var task model.Download115Queue
+	if err := s.db.First(&task, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrDownloadTaskNotFound
+		}
+		return err
+	}
+	if task.Status == model.QueueStatusDownloading {
+		return ErrDownloadTaskRunning
+	}
+	if task.Status != model.QueueStatusPending && task.Status != model.QueueStatusFailed {
+		return ErrDownloadTaskRunning
+	}
+
+	result := s.db.Where("id = ? AND status IN ?", id, []string{model.QueueStatusPending, model.QueueStatusFailed}).
+		Delete(&model.Download115Queue{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrDownloadTaskRunning
+	}
+	if s.logger != nil {
+		s.logger.Infof("下载任务已移除: ID=%d, PickCode=%s", task.ID, task.PickCode)
+	}
+	return nil
 }
 
 // GetTasksByStatus 根据状态获取任务列表

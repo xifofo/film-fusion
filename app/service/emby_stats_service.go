@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,9 @@ type LibraryStat struct {
 	CollectionType string `json:"collection_type"` // movies / tvshows / mixed / homevideos / boxsets / music ...
 	MovieCount     int    `json:"movie_count"`
 	SeriesCount    int    `json:"series_count"`
+	ContentCount   int    `json:"content_count"`
+	ImageType      string `json:"image_type,omitempty"`
+	ImageTag       string `json:"image_tag,omitempty"`
 }
 
 // EmbyStats 整体统计快照
@@ -36,7 +40,7 @@ type EmbyStats struct {
 //
 // 设计原则：
 //   - 仅遍历 Emby 顶层 CollectionFolder（用户视角的"媒体库文件夹"）
-//   - 每个库 2 次轻量 HTTP（Movie / Series 各一次，Limit=1 + TotalRecordCount）
+//   - 根据 CollectionType 只统计该库实际承载的内容类型；混合库才请求 Movie + Series
 //   - 各库并发拉取，汇总后排序：内容多的库置顶
 type EmbyStatsService struct {
 	cfg  *config.Config
@@ -62,10 +66,14 @@ func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
 		Libraries:      make([]LibraryStat, len(libs)),
 	}
 	for i, lib := range libs {
+		imageType, imageTag := embyLibraryImageMeta(lib)
 		stats.Libraries[i] = LibraryStat{
 			EmbyLibraryID:  lib.ID,
 			EmbyName:       lib.Name,
 			CollectionType: lib.CollectionType,
+			ContentCount:   lib.ChildCount,
+			ImageType:      imageType,
+			ImageTag:       imageTag,
 		}
 	}
 
@@ -82,28 +90,35 @@ func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
 				return
 			}
 
-			// 仅根据库类型拉对应实体，避免无意义请求：
-			//   - tvshows / mixed / 其它 / homevideos 都可能存 Series（mixed 库可能两者都有）
-			//   - movies / mixed / 其它 都可能存 Movie
-			// 为了通用性，统一两种都拉一次：Emby 不存在的类型只是 TotalRecordCount=0，开销很小
-			movieCount, mErr := s.emby.CountItems(libID, "Movie")
-			seriesCount, sErr := s.emby.CountItems(libID, "Series")
+			targets := embyStatsItemTypes(collectionType)
+			typedContentCount := 0
+			for _, itemType := range targets {
+				count, countErr := s.emby.CountItems(libID, itemType)
 
-			mu.Lock()
-			defer mu.Unlock()
-			if mErr != nil {
-				s.log.Warnf("[emby-stats] 统计电影失败 lib=%s(%s): %v", libName, libID, mErr)
-				stats.PartialErrors = append(stats.PartialErrors,
-					fmt.Sprintf("库 %s 电影统计失败: %v", libName, mErr))
-			} else {
-				stats.Libraries[idx].MovieCount = movieCount
+				mu.Lock()
+				if countErr != nil {
+					label := embyStatsItemTypeLabel(itemType)
+					s.log.Warnf("[emby-stats] 统计%s失败 lib=%s(%s): %v", label, libName, libID, countErr)
+					stats.PartialErrors = append(stats.PartialErrors,
+						fmt.Sprintf("库 %s %s统计失败: %v", libName, label, countErr))
+				} else if itemType == "Movie" {
+					stats.Libraries[idx].MovieCount = count
+					typedContentCount += count
+				} else if itemType == "Series" {
+					stats.Libraries[idx].SeriesCount = count
+					typedContentCount += count
+				} else if itemType == "BoxSet" {
+					// 合集是 Emby 的虚拟视图，媒体库 ChildCount 可能为 0。
+					// 只把 BoxSet 实体数写入本库内容数，不重复计入电影 / 剧集总数。
+					typedContentCount += count
+				}
+				mu.Unlock()
 			}
-			if sErr != nil {
-				s.log.Warnf("[emby-stats] 统计剧集失败 lib=%s(%s): %v", libName, libID, sErr)
-				stats.PartialErrors = append(stats.PartialErrors,
-					fmt.Sprintf("库 %s 剧集统计失败: %v", libName, sErr))
-			} else {
-				stats.Libraries[idx].SeriesCount = seriesCount
+
+			if len(targets) > 0 {
+				mu.Lock()
+				stats.Libraries[idx].ContentCount = typedContentCount
+				mu.Unlock()
 			}
 		}(i, lib.ID, lib.Name, lib.CollectionType)
 	}
@@ -116,8 +131,8 @@ func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
 
 	// 按内容总量降序，同量按名称升序稳定排序
 	sort.SliceStable(stats.Libraries, func(i, j int) bool {
-		ti := stats.Libraries[i].MovieCount + stats.Libraries[i].SeriesCount
-		tj := stats.Libraries[j].MovieCount + stats.Libraries[j].SeriesCount
+		ti := stats.Libraries[i].ContentCount
+		tj := stats.Libraries[j].ContentCount
 		if ti != tj {
 			return ti > tj
 		}
@@ -127,4 +142,68 @@ func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
 	s.log.Infof("[emby-stats] 收集完成 libs=%d movies=%d series=%d partial_errors=%d",
 		stats.TotalLibraries, stats.TotalMovies, stats.TotalSeries, len(stats.PartialErrors))
 	return stats, nil
+}
+
+// LibraryImage 拉取媒体库封面；仅开放页面实际使用的主图和背景图类型。
+func (s *EmbyStatsService) LibraryImage(itemID, imageType string, maxWidth int) ([]byte, string, error) {
+	itemID = strings.TrimSpace(itemID)
+	if itemID == "" {
+		return nil, "", fmt.Errorf("item_id 不能为空")
+	}
+
+	switch strings.ToLower(strings.TrimSpace(imageType)) {
+	case "", "primary":
+		imageType = "Primary"
+	case "backdrop":
+		imageType = "Backdrop"
+	default:
+		return nil, "", fmt.Errorf("不支持的媒体库图片类型")
+	}
+
+	if maxWidth <= 0 {
+		maxWidth = 720
+	}
+	if maxWidth > 1600 {
+		maxWidth = 1600
+	}
+	return s.emby.DownloadImage(itemID, imageType, maxWidth)
+}
+
+func embyStatsItemTypes(collectionType string) []string {
+	switch strings.ToLower(strings.TrimSpace(collectionType)) {
+	case "movies":
+		return []string{"Movie"}
+	case "tvshows":
+		return []string{"Series"}
+	case "mixed", "":
+		return []string{"Movie", "Series"}
+	case "boxsets":
+		return []string{"BoxSet"}
+	default:
+		// 音乐、家庭视频等库继续使用 Emby 返回的 ChildCount，不伪装成影视库。
+		return nil
+	}
+}
+
+func embyStatsItemTypeLabel(itemType string) string {
+	switch itemType {
+	case "Series":
+		return "剧集"
+	case "BoxSet":
+		return "合集"
+	default:
+		return "电影"
+	}
+}
+
+func embyLibraryImageMeta(lib embyhelper.EmbyLibrary) (string, string) {
+	if tag := strings.TrimSpace(lib.ImageTags["Primary"]); tag != "" {
+		return "Primary", tag
+	}
+	if len(lib.BackdropImageTags) > 0 {
+		if tag := strings.TrimSpace(lib.BackdropImageTags[0]); tag != "" {
+			return "Backdrop", tag
+		}
+	}
+	return "", ""
 }

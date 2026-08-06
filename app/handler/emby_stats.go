@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
+	"strings"
 
 	"film-fusion/app/logger"
 	"film-fusion/app/service"
@@ -29,4 +31,23 @@ func (h *EmbyStatsHandler) GetStats(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, NewSuccessResponse("ok", stats))
+}
+
+// Image GET /api/emby-stats/image 代理媒体库封面（前端 <img> 通过 ?token= 鉴权）。
+func (h *EmbyStatsHandler) Image(c *gin.Context) {
+	maxWidth, _ := strconv.Atoi(c.Query("max_width"))
+	data, contentType, err := h.svc.LibraryImage(
+		strings.TrimSpace(c.Query("item_id")),
+		strings.TrimSpace(c.Query("type")),
+		maxWidth,
+	)
+	if err != nil {
+		c.JSON(http.StatusNotFound, NewErrorResponse("获取媒体库封面失败", err.Error()))
+		return
+	}
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+	c.Header("Cache-Control", "private, max-age=86400")
+	c.Data(http.StatusOK, contentType, data)
 }

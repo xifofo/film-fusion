@@ -266,6 +266,7 @@ func (s *Server) setupRoutes() {
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService, embyWatchService)
 	strmHandler := handler.NewStrmHandler(s.Logger, s.download115Service)
+	downloadQueueHandler := handler.NewDownloadQueueHandler(s.download115Service)
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.tmdbService, s.download115Service, s.embyClient)
@@ -439,6 +440,15 @@ func (s *Server) setupRoutes() {
 			strm.POST("/regenerate-directory", strmHandler.RegenerateDirectory)
 		}
 
+		// 115Open 下载队列（成功任务会自动出队）
+		downloadQueue := protected.Group("/download-queue")
+		{
+			downloadQueue.GET("", downloadQueueHandler.List)
+			downloadQueue.DELETE("/failed", downloadQueueHandler.ClearFailed)
+			downloadQueue.POST("/:id/retry", downloadQueueHandler.Retry)
+			downloadQueue.DELETE("/:id", downloadQueueHandler.Remove)
+		}
+
 		// 整理文件相关路由
 		organize := protected.Group("/organize")
 		{
@@ -530,6 +540,7 @@ func (s *Server) setupRoutes() {
 		embyStats := protected.Group("/emby-stats")
 		{
 			embyStats.GET("", embyStatsHandler.GetStats)
+			embyStats.GET("/image", embyStatsHandler.Image)
 		}
 
 		// Emby 代理 302 重定向日志
