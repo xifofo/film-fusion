@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
@@ -13,11 +14,13 @@ import (
 
 const (
 	// Web115CookieCheckInterval 心跳/检查间隔：定时探活 cookie 并判断是否到续期点
-	Web115CookieCheckInterval = 1 * time.Hour
+	Web115CookieCheckInterval = 10 * time.Minute
 	// Web115CookieRefreshInterval 换端续期周期：cookie 在线时，距上次续期超过此时长则主动换发新 cookie
 	Web115CookieRefreshInterval = 72 * time.Hour
 	// Web115CookieErrorRetryDelay 续期失败后的退避时长，避免对已失效 cookie 反复猛刷触发风控
 	Web115CookieErrorRetryDelay = 6 * time.Hour
+	// Web115CookieNotificationRetryInterval 通知渠道临时不可用时的重试间隔，避免每次探活都重复请求。
+	Web115CookieNotificationRetryInterval = 1 * time.Hour
 	// web115KeepAliveConfigKey cookie 保活元数据在 CloudStorage.Config(JSON) 中的键名
 	web115KeepAliveConfigKey = "cookie_keepalive"
 )
@@ -32,6 +35,8 @@ type web115KeepAliveMeta struct {
 	Healthy       bool       `json:"healthy"`                   // 最近一次探活/续期是否健康
 	LastResult    string     `json:"last_result,omitempty"`     // 最近一次操作结果描述
 	LastError     string     `json:"last_error,omitempty"`      // 最近一次错误信息
+	LastAlertAt   *time.Time `json:"last_alert_at,omitempty"`   // 本轮 Cookie 失效告警成功发送时间
+	LastAlertTry  *time.Time `json:"last_alert_try,omitempty"`  // 本轮 Cookie 失效告警最近尝试时间
 }
 
 // Web115CookieStatus 对外暴露的 cookie 保活状态
@@ -47,22 +52,33 @@ type Web115CookieStatus struct {
 	LastError     string     `json:"last_error"`
 }
 
+// Web115CookieNotifier 是 Cookie 失效告警所需的最小通知能力。
+type Web115CookieNotifier interface {
+	SendMessage(ctx context.Context, text string) error
+}
+
 // Web115KeepAliveService 115 web cookie 保活服务：
 // 定时探活 cookie，趁其在线时换端续期（login_another_app），失效时尝试抢救并落地告警。
 type Web115KeepAliveService struct {
 	logger    *logger.Logger
 	web115Svc *Web115Service
+	notifier  Web115CookieNotifier
 	stopChan  chan struct{}
 	wg        sync.WaitGroup
 	ticker    *time.Ticker
-	mu        sync.Mutex // 串行化续期，避免并发换端登录互相挤掉
+	mu        sync.Mutex // 串行化续期/告警状态更新，避免并发操作互相覆盖
 }
 
 // NewWeb115KeepAliveService 创建 cookie 保活服务
-func NewWeb115KeepAliveService(log *logger.Logger) *Web115KeepAliveService {
+func NewWeb115KeepAliveService(log *logger.Logger, notifiers ...Web115CookieNotifier) *Web115KeepAliveService {
+	var notifier Web115CookieNotifier
+	if len(notifiers) > 0 {
+		notifier = notifiers[0]
+	}
 	return &Web115KeepAliveService{
 		logger:    log,
 		web115Svc: NewWeb115Service(log),
+		notifier:  notifier,
 		stopChan:  make(chan struct{}),
 	}
 }
@@ -142,6 +158,8 @@ func (s *Web115KeepAliveService) keepAliveOne(storage *model.CloudStorage) {
 	// 失败退避：最近刚失败过则跳过，避免对已失效 cookie 反复猛刷
 	if !meta.Healthy && meta.LastCheckAt != nil && now.Sub(*meta.LastCheckAt) < Web115CookieErrorRetryDelay {
 		s.logger.Debugf("存储[%s]的 115 cookie 处于失败退避期，跳过", storage.StorageName)
+		// 只重试未送达的通知，不在退避期内再次请求 115。
+		s.notifyInvalidCookie(storage.ID, nil)
 		return
 	}
 
@@ -150,6 +168,9 @@ func (s *Web115KeepAliveService) keepAliveOne(storage *model.CloudStorage) {
 		// cookie 已失效，尝试抢救性续期（大概率失败，但趁可能的残余在线状态试一次）
 		s.logger.Warnf("存储[%s]的 115 cookie 探活失败，尝试抢救续期: %v", storage.StorageName, err)
 		s.tryRefresh(storage, &meta, root, "cookie 探活失败，抢救续期")
+		if !meta.Healthy {
+			s.notifyInvalidCookie(storage.ID, err)
+		}
 		return
 	}
 
@@ -163,6 +184,7 @@ func (s *Web115KeepAliveService) keepAliveOne(storage *model.CloudStorage) {
 	meta.LastCheckAt = &now
 	meta.LastResult = "cookie 在线（心跳）"
 	meta.LastError = ""
+	clearWeb115CookieAlert(&meta)
 	s.saveMeta(storage, root, meta)
 	s.logger.Debugf("存储[%s]的 115 cookie 心跳正常", storage.StorageName)
 }
@@ -191,6 +213,7 @@ func (s *Web115KeepAliveService) tryRefresh(storage *model.CloudStorage, meta *w
 	meta.LastError = ""
 	meta.LastRefreshAt = &now
 	meta.LastResult = reason + "成功"
+	clearWeb115CookieAlert(meta)
 
 	cfgStr, derr := dumpKeepAliveMeta(root, *meta)
 	if derr != nil {
@@ -213,6 +236,78 @@ func (s *Web115KeepAliveService) tryRefresh(storage *model.CloudStorage, meta *w
 	storage.Cookie = newCookie
 	storage.Config = cfgStr
 	s.logger.Infof("存储[%s]的 115 cookie 已续期(app=%s, %s)", storage.StorageName, app, reason)
+}
+
+// notifyInvalidCookie 在 Cookie 探活和抢救续期都失败后发送一次 Telegram 告警。
+// 告警状态持久化在 CloudStorage.Config 中，服务重启后也不会重复轰炸；发送失败则按小时重试。
+func (s *Web115KeepAliveService) notifyInvalidCookie(storageID uint, probeErr error) {
+	if s == nil || s.notifier == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var storage model.CloudStorage
+	if err := database.DB.First(&storage, storageID).Error; err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("查询 115 Cookie 失效告警存储失败(storage=%d): %v", storageID, err)
+		}
+		return
+	}
+	meta, root := loadKeepAliveMeta(storage.Config)
+	if meta.Healthy {
+		return
+	}
+
+	now := time.Now()
+	if !web115CookieAlertDue(meta, now) {
+		return
+	}
+	meta.LastAlertTry = &now
+	s.saveMeta(&storage, root, meta)
+
+	message := formatWeb115CookieInvalidAlert(storage, meta, probeErr, now)
+	if err := s.notifier.SendMessage(context.Background(), message); err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("115 Cookie 失效通知发送失败(storage=%d name=%s): %v", storage.ID, storage.StorageName, err)
+		}
+		return
+	}
+
+	alertedAt := time.Now()
+	meta.LastAlertAt = &alertedAt
+	s.saveMeta(&storage, root, meta)
+	if s.logger != nil {
+		s.logger.Infof("已发送 115 Cookie 失效通知(storage=%d name=%s)", storage.ID, storage.StorageName)
+	}
+}
+
+func web115CookieAlertDue(meta web115KeepAliveMeta, now time.Time) bool {
+	if meta.LastAlertAt != nil {
+		return false
+	}
+	return meta.LastAlertTry == nil || now.Sub(*meta.LastAlertTry) >= Web115CookieNotificationRetryInterval
+}
+
+func clearWeb115CookieAlert(meta *web115KeepAliveMeta) {
+	if meta == nil {
+		return
+	}
+	meta.LastAlertAt = nil
+	meta.LastAlertTry = nil
+}
+
+func formatWeb115CookieInvalidAlert(storage model.CloudStorage, meta web115KeepAliveMeta, probeErr error, now time.Time) string {
+	reason := firstNonEmptyKeepAlive(meta.LastError, compact115Error(probeErr), "未知错误")
+	return strings.Join([]string{
+		"[115 Cookie 失效] FilmFusion",
+		fmt.Sprintf("存储: %s (ID: %d)", firstNonEmptyKeepAlive(storage.StorageName, "未命名存储"), storage.ID),
+		"状态: Cookie 探活失败，自动续期也未能恢复",
+		"原因: " + reason,
+		"处理: 请在云存储管理中更新 Cookie，或执行“立即续期”",
+		"检测时间: " + now.Local().Format("2006-01-02 15:04:05 MST"),
+	}, "\n")
 }
 
 // saveMeta 仅持久化 cookie 保活元数据（config 列），不触碰其它字段

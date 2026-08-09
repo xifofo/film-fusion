@@ -77,6 +77,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
 	embyMissingService := service.NewEmbyMissingService(cfg, log, embyClient)
+	telegramNotifier := service.NewTelegramNotifier(cfg, log)
 
 	s := &Server{
 		gin: router,
@@ -88,7 +89,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Logger:                 log,
 		tokenRefreshService:    service.NewTokenRefreshService(log),
 		hdhiveRefreshService:   service.NewHDHiveTokenRefreshService(cfg, log),
-		web115KeepAliveService: service.NewWeb115KeepAliveService(log),
+		web115KeepAliveService: service.NewWeb115KeepAliveService(log, telegramNotifier),
 		download115Service:     download115Service,
 		moviePilotService:      moviePilotService,
 		tmdbService:            tmdbService,
@@ -99,9 +100,9 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		balanceCleanupSvc:      service.NewBalanceCleanupService(log),
 		embyClient:             embyClient,
 		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
+		telegramNotifier:       telegramNotifier,
 		taskQueue:              taskQueue,
 	}
-	s.telegramNotifier = service.NewTelegramNotifier(cfg, log)
 	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.telegramNotifier, s.moviePilotService)
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.telegramNotifier)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.telegramNotifier)
