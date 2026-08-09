@@ -19,7 +19,7 @@ const (
 	web115ReloginTimeout = 30 * time.Second
 )
 
-// DefaultReloginApp 默认换端登录的目标 app。
+// DefaultReloginApp 换端登录的内置兜底目标 app。
 // 选用 alipaymini(ssoent=R2)这类独立设备端，避免踢掉用户日常使用的 web(A1)/手机端。
 const DefaultReloginApp = driver.LoginAppAlipayMini
 
@@ -38,6 +38,17 @@ func ParseLoginApp(s string) driver.LoginApp {
 	default:
 		return DefaultReloginApp
 	}
+}
+
+// resolveReloginApp 按“单存储覆盖 > 全局默认 > 内置默认”的顺序解析续期端。
+func (s *Web115KeepAliveService) resolveReloginApp(app string) driver.LoginApp {
+	if strings.TrimSpace(app) != "" {
+		return ParseLoginApp(app)
+	}
+	if s != nil && s.cfg != nil {
+		return ParseLoginApp(s.cfg.Server.Cookie115DefaultApp)
+	}
+	return DefaultReloginApp
 }
 
 // RefreshCookieByApp 用一个仍然在线的旧 cookie，免扫码地为同一账号换取一份新的、

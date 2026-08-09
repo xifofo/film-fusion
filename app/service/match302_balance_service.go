@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"path"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -82,18 +81,26 @@ type balanceDirectoryService interface {
 	MkdirWithOpenAPI(ctx context.Context, accessToken, parentID, name string) (string, error)
 }
 
+type balanceSourceFileResolver interface {
+	NewClient(cookie string) (*driver.Pan115Client, error)
+	ResolveFilePathWithClient(client *driver.Pan115Client, filePath string) (Web115File, bool, error)
+	ResolveFilePathWithOpenAPI(ctx context.Context, accessToken, filePath string) (Web115File, bool, error)
+}
+
 type BalanceAssignmentService struct {
-	logger          *logger.Logger
-	web115Svc       *Web115Service
-	directory115Svc balanceDirectoryService
+	logger           *logger.Logger
+	web115Svc        *Web115Service
+	directory115Svc  balanceDirectoryService
+	sourceFile115Svc balanceSourceFileResolver
 }
 
 func NewBalanceAssignmentService(log *logger.Logger) *BalanceAssignmentService {
 	web115Svc := NewWeb115Service(log)
 	return &BalanceAssignmentService{
-		logger:          log,
-		web115Svc:       web115Svc,
-		directory115Svc: web115Svc,
+		logger:           log,
+		web115Svc:        web115Svc,
+		directory115Svc:  web115Svc,
+		sourceFile115Svc: web115Svc,
 	}
 }
 
@@ -131,37 +138,87 @@ func (s *BalanceAssignmentService) ResolveSourceFileInfo(ctx context.Context, ma
 		}
 		match.CloudStorage = &storage
 	}
-	if strings.TrimSpace(match.CloudStorage.AccessToken) == "" {
-		return BalanceSourceFile{}, fmt.Errorf("源账号 AccessToken 缺失")
+	storage := match.CloudStorage
+	mode := storage.Match302AccessModeValue()
+	if !storage.HasMatch302AccessCredential() {
+		switch mode {
+		case model.Match302AccessModeOpenAPIOnly:
+			return BalanceSourceFile{}, fmt.Errorf("源账号处于仅 OpenAPI 模式但 AccessToken 缺失")
+		case model.Match302AccessModeCookieOnly:
+			return BalanceSourceFile{}, fmt.Errorf("源账号处于仅 Cookie 模式但 Cookie 缺失")
+		default:
+			return BalanceSourceFile{}, fmt.Errorf("源账号 AccessToken 和 Cookie 均缺失")
+		}
 	}
 
-	client := sdk115.New()
-	client.SetAccessToken(match.CloudStorage.AccessToken)
-	info, err := client.GetFolderInfoByPath(ctx, pathhelper.EnsureLeadingSlash(matchedPath))
-	if err != nil {
-		return BalanceSourceFile{}, fmt.Errorf("源文件信息解析失败: %w", err)
+	resolver := s.sourceFileResolver()
+	var attemptErrors []error
+	for _, method := range model.Match302AccessOrder(mode) {
+		var (
+			file  Web115File
+			found bool
+			err   error
+		)
+		switch method {
+		case model.Match302AccessMethodOpenAPI:
+			if strings.TrimSpace(storage.AccessToken) == "" {
+				attemptErrors = append(attemptErrors, fmt.Errorf("OpenAPI AccessToken 缺失"))
+				continue
+			}
+			file, found, err = resolver.ResolveFilePathWithOpenAPI(ctx, storage.AccessToken, matchedPath)
+		case model.Match302AccessMethodCookie:
+			if strings.TrimSpace(storage.Cookie) == "" {
+				attemptErrors = append(attemptErrors, fmt.Errorf("Cookie 缺失"))
+				continue
+			}
+			var webClient *driver.Pan115Client
+			webClient, err = resolver.NewClient(storage.Cookie)
+			if err == nil {
+				file, found, err = resolver.ResolveFilePathWithClient(webClient, matchedPath)
+			}
+		}
+		if err != nil {
+			attemptErrors = append(attemptErrors, fmt.Errorf("%s 解析失败: %w", method, err))
+			continue
+		}
+		if !found {
+			attemptErrors = append(attemptErrors, fmt.Errorf("%s 未找到源文件", method))
+			continue
+		}
+		if strings.TrimSpace(file.PickCode) == "" {
+			attemptErrors = append(attemptErrors, fmt.Errorf("%s 返回的 pickcode 为空", method))
+			continue
+		}
+		if len(attemptErrors) > 0 && s.logger != nil {
+			s.logger.Warnf("[match302-balance] 源文件解析已降级到 %s mode=%s", method, mode)
+		}
+		fileName := strings.TrimSpace(file.Name)
+		if fileName == "" {
+			fileName = path.Base(pathhelper.EnsureLeadingSlash(matchedPath))
+		}
+		return buildBalanceSourceFile(sourcePath, matchedPath, match.TargetPath, fileName, file.PickCode, file.FileID, file.SHA1, file.Size), nil
 	}
-	if strings.TrimSpace(info.PickCode) == "" {
-		return BalanceSourceFile{}, fmt.Errorf("源文件 pickcode 解析失败")
-	}
+	return BalanceSourceFile{}, fmt.Errorf("源文件信息解析失败 mode=%s: %w", mode, errors.Join(attemptErrors...))
+}
 
-	size, _ := strconv.ParseInt(strings.TrimSpace(info.Size), 10, 64)
-	fileName := strings.TrimSpace(info.FileName)
-	if fileName == "" {
-		fileName = path.Base(pathhelper.EnsureLeadingSlash(matchedPath))
+func (s *BalanceAssignmentService) sourceFileResolver() balanceSourceFileResolver {
+	if s.sourceFile115Svc != nil {
+		return s.sourceFile115Svc
 	}
-	relativePath := relativeMediaPath(match.TargetPath, matchedPath, fileName)
+	return s.web115Svc
+}
 
+func buildBalanceSourceFile(sourcePath, matchedPath, targetPath, fileName, pickCode, fileID, sha1 string, size int64) BalanceSourceFile {
 	return BalanceSourceFile{
 		SourceFilePath: sourcePath,
 		MatchedPath:    pathhelper.EnsureLeadingSlash(matchedPath),
-		RelativePath:   relativePath,
+		RelativePath:   relativeMediaPath(targetPath, matchedPath, fileName),
 		FileName:       fileName,
-		PickCode:       strings.TrimSpace(info.PickCode),
-		FileID:         strings.TrimSpace(info.FileID),
-		SHA1:           strings.ToUpper(strings.TrimSpace(info.Sha1)),
+		PickCode:       strings.TrimSpace(pickCode),
+		FileID:         strings.TrimSpace(fileID),
+		SHA1:           strings.ToUpper(strings.TrimSpace(sha1)),
 		Size:           size,
-	}, nil
+	}
 }
 
 func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req BalancePlaybackRequest) (*BalancePlaybackDecision, error) {
@@ -290,9 +347,9 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 			decision.ActualPickCode = assignment.SourcePickcode
 			break
 		}
-		if strings.TrimSpace(playbackStorage.Cookie) == "" || !storageUsable(playbackStorage) {
+		if !storageUsable(playbackStorage) {
 			decision.Status = "失败回退"
-			decision.FallbackReason = "子账号 Cookie 缺失或账号不可用"
+			decision.FallbackReason = "子账号访问凭据缺失或账号不可用"
 			decision.IsSourcePlayback = true
 			decision.AccountType = "source"
 			decision.PlaybackStorage = match.CloudStorage
@@ -347,7 +404,7 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 
 	// 指定账号即源账号 -> 直接源播放(无需秒传)
 	if forcedID == match.CloudStorageID {
-		if strings.TrimSpace(match.CloudStorage.Cookie) == "" || !storageUsable(*match.CloudStorage) {
+		if !storageUsable(*match.CloudStorage) {
 			return nil, false
 		}
 		return &BalancePlaybackDecision{
@@ -584,9 +641,6 @@ func (s *BalanceAssignmentService) FindReadyPlaybackCacheByPath(filePath string)
 		if assignment.PlaybackStorage == nil || !storageUsable(*assignment.PlaybackStorage) {
 			continue
 		}
-		if strings.TrimSpace(assignment.PlaybackStorage.AccessToken) == "" && strings.TrimSpace(assignment.PlaybackStorage.Cookie) == "" {
-			continue
-		}
 		return assignment, nil
 	}
 	return nil, nil
@@ -741,7 +795,7 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 
 	targetRoot := s.targetRootPath(assignment.Match302ID, assignment.PlaybackStorageID)
 	targetDir, targetName := splitTargetPath(targetRoot, sourceInfo.RelativePath)
-	targetDirID, err := s.ensureDirPath(ctx, toClient, target.AccessToken, targetDir)
+	targetDirID, err := s.ensureDirPath(ctx, toClient, target.Match302AccessModeValue(), target.AccessToken, targetDir)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("创建目标目录失败: %w", err)
 	}
@@ -759,7 +813,7 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 	}
 
 	rangeHash := func(signCheck string) (string, error) {
-		downloadInfo, err := s.web115Svc.DownloadForP115Transfer(ctx, source.AccessToken, fromClient, sourceInfo)
+		downloadInfo, err := s.web115Svc.DownloadForP115Transfer(ctx, source.Match302AccessModeValue(), source.AccessToken, fromClient, sourceInfo)
 		if err != nil {
 			return "", fmt.Errorf("获取源账号直链失败: %w", err)
 		}
@@ -1259,27 +1313,30 @@ func (s *BalanceAssignmentService) targetRootPath(matchID, storageID uint) strin
 	return model.DefaultMatch302BalanceTargetRoot(matchID)
 }
 
-func (s *BalanceAssignmentService) ensureDirPath(ctx context.Context, client *driver.Pan115Client, accessToken, dirPath string) (string, error) {
+func (s *BalanceAssignmentService) ensureDirPath(ctx context.Context, client *driver.Pan115Client, accessMode, accessToken, dirPath string) (string, error) {
 	dirPath = path.Clean(pathhelper.EnsureLeadingSlash(dirPath))
 	if dirPath == "/" || dirPath == "." {
 		return "0", nil
 	}
 	directorySvc := s.directoryService()
-	if cid, ok, err := directorySvc.ResolveDirPathWithClient(client, dirPath); err == nil && ok {
-		return cid, nil
-	} else if err != nil {
-		s.warnDirectoryFallback("Cookie 完整路径查询失败，回退逐级查询 path=%s err=%s", dirPath, compact115Error(err))
+	accessMode = model.NormalizeMatch302AccessMode(accessMode)
+	if accessMode != model.Match302AccessModeOpenAPIOnly {
+		if cid, ok, err := directorySvc.ResolveDirPathWithClient(client, dirPath); err == nil && ok {
+			return cid, nil
+		} else if err != nil {
+			s.warnDirectoryFallback("Cookie 完整路径查询失败，回退逐级查询 path=%s err=%s", dirPath, compact115Error(err))
+		}
 	}
 
 	currentID := "0"
 	for _, segment := range splitCloudPath(dirPath) {
-		list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessToken, currentID)
+		list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessMode, accessToken, currentID)
 		if err != nil {
 			return "", err
 		}
 		found := findDirectoryID(list, segment)
 		if found == "" {
-			created, err := s.mkdirWithFallback(ctx, directorySvc, client, accessToken, currentID, segment)
+			created, err := s.mkdirWithFallback(ctx, directorySvc, client, accessMode, accessToken, currentID, segment)
 			if err != nil {
 				return "", err
 			}
@@ -1301,16 +1358,23 @@ func (s *BalanceAssignmentService) getDirectoriesWithFallback(
 	ctx context.Context,
 	directorySvc balanceDirectoryService,
 	client *driver.Pan115Client,
-	accessToken, parentID string,
+	accessMode, accessToken, parentID string,
 ) (Web115ListResult, error) {
+	accessMode = model.NormalizeMatch302AccessMode(accessMode)
+	if accessMode == model.Match302AccessModeOpenAPIOnly {
+		if strings.TrimSpace(accessToken) == "" {
+			return Web115ListResult{}, fmt.Errorf("仅 OpenAPI 模式下目标账号 AccessToken 为空")
+		}
+		return directorySvc.GetDirectoriesWithOpenAPI(ctx, accessToken, parentID, 0, int(driver.MaxDirPageLimit))
+	}
 	list, cookieErr := directorySvc.GetDirectoriesWithClient(client, parentID, 0, int(driver.MaxDirPageLimit))
 	if cookieErr == nil {
 		return list, nil
 	}
 
-	if strings.TrimSpace(accessToken) == "" {
+	if accessMode == model.Match302AccessModeCookieOnly || strings.TrimSpace(accessToken) == "" {
 		return Web115ListResult{}, fmt.Errorf(
-			"Cookie 查询目录失败且目标账号 AccessToken 为空，无法回退 Open API: %s",
+			"Cookie 查询目录失败且当前模式不允许回退 Open API: %s",
 			compact115Error(cookieErr),
 		)
 	}
@@ -1334,8 +1398,15 @@ func (s *BalanceAssignmentService) mkdirWithFallback(
 	ctx context.Context,
 	directorySvc balanceDirectoryService,
 	client *driver.Pan115Client,
-	accessToken, parentID, name string,
+	accessMode, accessToken, parentID, name string,
 ) (string, error) {
+	accessMode = model.NormalizeMatch302AccessMode(accessMode)
+	if accessMode == model.Match302AccessModeOpenAPIOnly {
+		if strings.TrimSpace(accessToken) == "" {
+			return "", fmt.Errorf("仅 OpenAPI 模式下目标账号 AccessToken 为空")
+		}
+		return directorySvc.MkdirWithOpenAPI(ctx, accessToken, parentID, name)
+	}
 	cid, cookieErr := directorySvc.MkdirWithClient(client, parentID, name)
 	if cookieErr == nil && strings.TrimSpace(cid) != "" {
 		return strings.TrimSpace(cid), nil
@@ -1344,11 +1415,11 @@ func (s *BalanceAssignmentService) mkdirWithFallback(
 		cookieErr = fmt.Errorf("Cookie 创建目录成功但 cid 为空")
 	}
 	if is115DirectoryExistsError(cookieErr) {
-		return s.resolveExistingDirectory(ctx, directorySvc, client, accessToken, parentID, name)
+		return s.resolveExistingDirectory(ctx, directorySvc, client, accessMode, accessToken, parentID, name)
 	}
-	if strings.TrimSpace(accessToken) == "" {
+	if accessMode == model.Match302AccessModeCookieOnly || strings.TrimSpace(accessToken) == "" {
 		return "", fmt.Errorf(
-			"Cookie 创建目录失败且目标账号 AccessToken 为空，无法回退 Open API: %s",
+			"Cookie 创建目录失败且当前模式不允许回退 Open API: %s",
 			compact115Error(cookieErr),
 		)
 	}
@@ -1367,7 +1438,7 @@ func (s *BalanceAssignmentService) mkdirWithFallback(
 		openErr = fmt.Errorf("Open API 创建目录成功但 file_id 为空")
 	}
 	if is115DirectoryExistsError(openErr) {
-		return s.resolveExistingDirectory(ctx, directorySvc, client, accessToken, parentID, name)
+		return s.resolveExistingDirectory(ctx, directorySvc, client, accessMode, accessToken, parentID, name)
 	}
 	return "", fmt.Errorf(
 		"Cookie 创建目录失败: %s；Open API 创建目录失败: %w",
@@ -1380,9 +1451,9 @@ func (s *BalanceAssignmentService) resolveExistingDirectory(
 	ctx context.Context,
 	directorySvc balanceDirectoryService,
 	client *driver.Pan115Client,
-	accessToken, parentID, name string,
+	accessMode, accessToken, parentID, name string,
 ) (string, error) {
-	list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessToken, parentID)
+	list, err := s.getDirectoriesWithFallback(ctx, directorySvc, client, accessMode, accessToken, parentID)
 	if err != nil {
 		return "", fmt.Errorf("目录 %q 已存在，但重新查询目录失败: %w", name, err)
 	}
@@ -1477,7 +1548,21 @@ func (s *BalanceAssignmentService) findFileByPickCode(client *driver.Pan115Clien
 }
 
 func storageUsable(storage model.CloudStorage) bool {
-	return storage.StorageType == model.StorageType115Open && storage.Status == model.StatusActive && !storage.IsRefreshTokenExpired()
+	if storage.StorageType != model.StorageType115Open || storage.Status == model.StatusDisabled {
+		return false
+	}
+	cookieUsable := strings.TrimSpace(storage.Cookie) != ""
+	openAPIUsable := storage.Status == model.StatusActive &&
+		strings.TrimSpace(storage.AccessToken) != "" &&
+		!storage.IsRefreshTokenExpired()
+	switch storage.Match302AccessModeValue() {
+	case model.Match302AccessModeOpenAPIOnly:
+		return openAPIUsable
+	case model.Match302AccessModeCookieOnly:
+		return cookieUsable
+	default:
+		return openAPIUsable || cookieUsable
+	}
 }
 
 func positiveWeight(weight int) int {

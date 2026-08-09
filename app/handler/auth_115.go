@@ -438,6 +438,7 @@ func (h *Auth115Handler) CompleteAuth(c *gin.Context) {
 		expiresAt := time.Now().Add(time.Duration(token.ExpiresIn) * time.Second)
 		cloudStorage.TokenExpiresAt = &expiresAt
 	}
+	cloudStorage.NormalizeMatch302Defaults()
 
 	// 保存到数据库，GORM会根据ID自动判断是创建还是更新
 	if err := database.DB.Save(&cloudStorage).Error; err != nil {

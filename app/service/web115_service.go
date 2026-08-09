@@ -3,6 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"path"
 	"strconv"
 	"strings"
 
@@ -111,6 +113,106 @@ func (s *Web115Service) GetFilesWithClient(client *driver.Pan115Client, cid stri
 		Total: int64(result.Count),
 		Raw:   []byte(resp.String()),
 	}, nil
+}
+
+// ResolveFilePathWithClient 仅使用 Cookie 会话，将 115 完整文件路径解析为文件信息。
+// 先通过父目录路径取得 CID，再分页列出该目录的文件并精确匹配文件名，避免全盘搜索的重名歧义。
+func (s *Web115Service) ResolveFilePathWithClient(client *driver.Pan115Client, filePath string) (Web115File, bool, error) {
+	if client == nil {
+		return Web115File{}, false, fmt.Errorf("115 client 为空")
+	}
+	return resolveWeb115FilePath(
+		filePath,
+		func(dir string) (string, bool, error) {
+			return s.ResolveDirPathWithClient(client, dir)
+		},
+		func(cid string, offset, limit int) (Web115ListResult, error) {
+			return s.GetFilesWithClient(client, cid, offset, limit)
+		},
+	)
+}
+
+// ResolveFilePathWithOpenAPI uses the 115 OpenAPI path lookup and returns the
+// same neutral file shape as the Cookie resolver.
+func (s *Web115Service) ResolveFilePathWithOpenAPI(ctx context.Context, accessToken, filePath string) (Web115File, bool, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return Web115File{}, false, fmt.Errorf("115 OpenAPI AccessToken 为空")
+	}
+	filePath = strings.TrimSpace(filePath)
+	if decoded, err := url.PathUnescape(filePath); err == nil {
+		filePath = decoded
+	}
+	normalizedPath := path.Clean("/" + strings.TrimPrefix(filePath, "/"))
+	client := sdk115.New()
+	client.SetAccessToken(accessToken)
+	info, err := client.GetFolderInfoByPath(ctx, normalizedPath)
+	if err != nil {
+		return Web115File{}, false, err
+	}
+	size, _ := strconv.ParseInt(strings.TrimSpace(info.Size), 10, 64)
+	fileName := strings.TrimSpace(info.FileName)
+	if fileName == "" {
+		fileName = path.Base(normalizedPath)
+	}
+	return Web115File{
+		FileID:   strings.TrimSpace(info.FileID),
+		Name:     fileName,
+		PickCode: strings.TrimSpace(info.PickCode),
+		SHA1:     strings.TrimSpace(info.Sha1),
+		IsFile:   true,
+		Size:     size,
+	}, true, nil
+}
+
+func resolveWeb115FilePath(
+	filePath string,
+	resolveDir func(string) (string, bool, error),
+	listFiles func(string, int, int) (Web115ListResult, error),
+) (Web115File, bool, error) {
+	filePath = strings.TrimSpace(filePath)
+	if decoded, err := url.PathUnescape(filePath); err == nil {
+		filePath = decoded
+	}
+	filePath = path.Clean("/" + strings.TrimPrefix(filePath, "/"))
+	fileName := path.Base(filePath)
+	if filePath == "/" || fileName == "." || fileName == ".." || strings.TrimSpace(fileName) == "" {
+		return Web115File{}, false, fmt.Errorf("115 文件路径无效: %q", filePath)
+	}
+
+	parentPath := path.Dir(filePath)
+	parentID, found, err := resolveDir(parentPath)
+	if err != nil {
+		return Web115File{}, false, fmt.Errorf("解析 115 父目录失败 path=%q: %w", parentPath, err)
+	}
+	if !found || strings.TrimSpace(parentID) == "" {
+		return Web115File{}, false, nil
+	}
+
+	limit := int(driver.MaxDirPageLimit)
+	for offset := 0; ; offset += limit {
+		list, err := listFiles(parentID, offset, limit)
+		if err != nil {
+			return Web115File{}, false, fmt.Errorf("查询 115 父目录文件失败 cid=%s offset=%d: %w", parentID, offset, err)
+		}
+		for _, item := range list.Items {
+			if item.IsFile && item.Name == fileName {
+				return item, true, nil
+			}
+		}
+
+		if list.Total > 0 {
+			if int64(offset+limit) >= list.Total {
+				break
+			}
+		} else if len(list.Items) < limit {
+			break
+		}
+		if len(list.Items) == 0 {
+			break
+		}
+	}
+	return Web115File{}, false, nil
 }
 
 func (s *Web115Service) GetDirectories(cookie, cid string, offset, limit int) (Web115ListResult, error) {

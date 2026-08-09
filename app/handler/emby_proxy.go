@@ -28,6 +28,7 @@ import (
 	"time"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
+	driver "github.com/SheltonZhu/115driver/pkg/driver"
 	"github.com/gin-gonic/gin"
 	"github.com/patrickmn/go-cache"
 	"gorm.io/gorm"
@@ -856,7 +857,7 @@ func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath string, storage 
 	if errors.Is(err, gorm.ErrRecordNotFound) || pickcodeCache.Pickcode == "" {
 		h.logger.Infof("[EMBY PROXY] 路径 %s 未找到 pickcode 缓存，正在获取", cacheKey)
 
-		pickcode, err := h.fetchPickcodeFromAPI(matchedPath, storage.AccessToken)
+		pickcode, err := h.fetchPickcodeForStorage(context.Background(), matchedPath, storage)
 		if err != nil {
 			return "", false, fmt.Errorf("获取 pickcode 失败: %w", err)
 		}
@@ -865,6 +866,7 @@ func (h *EmbyProxyHandler) getDownloadURL(filePath, matchedPath string, storage 
 		cache, _, err := model.UpsertPickcodeCache(database.DB, cacheKey, pickcode)
 		if err != nil {
 			h.logger.Errorf("[EMBY PROXY] 保存 pickcode 缓存失败: %v", err)
+			return "", false, fmt.Errorf("保存 pickcode 缓存失败: %w", err)
 		}
 		pickcodeCache = *cache
 	}
@@ -881,42 +883,80 @@ func (h *EmbyProxyHandler) getDownloadURLForStorage(storage model.CloudStorage, 
 	if pickcode == "" {
 		return "", false, fmt.Errorf("pickcode 为空")
 	}
-	cacheKey := h.md5CacheKey(fmt.Sprintf("download-url:%d:%s:%s", storage.ID, pickcode, userAgent))
+	mode := storage.Match302AccessModeValue()
+	cacheKey := h.md5CacheKey(fmt.Sprintf("download-url:%d:%s:%s:%s", storage.ID, mode, pickcode, userAgent))
 	if cacheLink, found := h.goCache.Get(cacheKey); found {
 		if link, ok := cacheLink.(string); ok && link != "" {
 			return link, true, nil
 		}
 	}
 
-	var redirectURL string
-	if strings.TrimSpace(storage.AccessToken) != "" {
-		h.sdk115Open.SetAccessToken(storage.AccessToken)
-		downURLResp, err := h.sdk115Open.DownURL(context.Background(), pickcode, userAgent)
-		if err != nil {
-			return "", false, fmt.Errorf("调用 DownURL API 失败: %w", err)
-		}
-		for _, urlInfo := range downURLResp {
-			if urlInfo.URL.URL != "" {
-				redirectURL = urlInfo.URL.URL
-				break
+	redirectURL, err := resolveMatch302DownloadURL(
+		mode,
+		func() (string, error) {
+			if strings.TrimSpace(storage.AccessToken) == "" {
+				return "", fmt.Errorf("OpenAPI AccessToken 缺失")
 			}
-		}
-	} else if strings.TrimSpace(storage.Cookie) != "" {
-		client, err := h.web115Svc.NewClient(storage.Cookie)
-		if err != nil {
-			return "", false, fmt.Errorf("115 Cookie 无效: %w", err)
-		}
-		info, err := client.DownloadWithUA(pickcode, userAgent)
-		if err != nil {
-			return "", false, fmt.Errorf("调用 115 Web 下载接口失败: %w", err)
-		}
-		redirectURL = info.Url.Url
-	}
-	if redirectURL == "" {
-		return "", false, fmt.Errorf("未找到可用的下载URL，pickcode: %s", pickcode)
+			h.sdk115Open.SetAccessToken(storage.AccessToken)
+			downURLResp, err := h.sdk115Open.DownURL(context.Background(), pickcode, userAgent)
+			if err != nil {
+				return "", fmt.Errorf("调用 DownURL API 失败: %w", err)
+			}
+			for _, urlInfo := range downURLResp {
+				if rawURL := strings.TrimSpace(urlInfo.URL.URL); rawURL != "" {
+					return rawURL, nil
+				}
+			}
+			return "", fmt.Errorf("OpenAPI DownURL 未返回可用直链")
+		},
+		func() (string, error) {
+			if strings.TrimSpace(storage.Cookie) == "" {
+				return "", fmt.Errorf("Cookie 缺失")
+			}
+			client, err := h.web115Svc.NewClient(storage.Cookie)
+			if err != nil {
+				return "", fmt.Errorf("115 Cookie 无效: %w", err)
+			}
+			info, err := client.DownloadWithUA(pickcode, userAgent)
+			if err != nil {
+				return "", fmt.Errorf("调用 DownloadWithUA 失败: %w", err)
+			}
+			return strings.TrimSpace(info.Url.Url), nil
+		},
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("未找到可用的下载URL，pickcode=%s: %w", pickcode, err)
 	}
 	h.goCache.Set(cacheKey, redirectURL, h.downloadURLCacheTTL(redirectURL))
 	return redirectURL, false, nil
+}
+
+func resolveMatch302DownloadURL(
+	mode string,
+	openAPI func() (string, error),
+	cookie func() (string, error),
+) (string, error) {
+	var attemptErrors []error
+	for _, method := range model.Match302AccessOrder(mode) {
+		var (
+			rawURL string
+			err    error
+		)
+		switch method {
+		case model.Match302AccessMethodOpenAPI:
+			rawURL, err = openAPI()
+		case model.Match302AccessMethodCookie:
+			rawURL, err = cookie()
+		}
+		if err == nil && strings.TrimSpace(rawURL) != "" {
+			return strings.TrimSpace(rawURL), nil
+		}
+		if err == nil {
+			err = fmt.Errorf("未返回可用直链")
+		}
+		attemptErrors = append(attemptErrors, fmt.Errorf("%s: %w", method, err))
+	}
+	return "", fmt.Errorf("Match302 下载方式 %s 全部失败: %w", model.NormalizeMatch302AccessMode(mode), errors.Join(attemptErrors...))
 }
 
 // is115FileNotFound 判断错误是否为 115 开放平台「文件(夹)不存在或已删除」(code 430004)。
@@ -978,16 +1018,47 @@ func (h *EmbyProxyHandler) downloadURLCacheTTL(rawURL string) time.Duration {
 	return configured
 }
 
-// fetchPickcodeFromAPI 从API获取 pickcode
-func (h *EmbyProxyHandler) fetchPickcodeFromAPI(matchedPath, accessToken string) (string, error) {
-	h.sdk115Open.SetAccessToken(accessToken)
-
-	folderInfo, err := h.sdk115Open.GetFolderInfoByPath(context.Background(), pathhelper.EnsureLeadingSlash(matchedPath))
-	if err != nil {
-		return "", fmt.Errorf("获取115Open文件夹信息失败: %w", err)
+func (h *EmbyProxyHandler) fetchPickcodeForStorage(ctx context.Context, matchedPath string, storage model.CloudStorage) (string, error) {
+	mode := storage.Match302AccessModeValue()
+	var attemptErrors []error
+	for _, method := range model.Match302AccessOrder(mode) {
+		var (
+			file  service.Web115File
+			found bool
+			err   error
+		)
+		switch method {
+		case model.Match302AccessMethodOpenAPI:
+			if strings.TrimSpace(storage.AccessToken) == "" {
+				attemptErrors = append(attemptErrors, fmt.Errorf("OpenAPI AccessToken 缺失"))
+				continue
+			}
+			file, found, err = h.web115Svc.ResolveFilePathWithOpenAPI(ctx, storage.AccessToken, matchedPath)
+		case model.Match302AccessMethodCookie:
+			if strings.TrimSpace(storage.Cookie) == "" {
+				attemptErrors = append(attemptErrors, fmt.Errorf("Cookie 缺失"))
+				continue
+			}
+			var client *driver.Pan115Client
+			client, err = h.web115Svc.NewClient(storage.Cookie)
+			if err == nil {
+				file, found, err = h.web115Svc.ResolveFilePathWithClient(client, matchedPath)
+			}
+		}
+		if err != nil {
+			attemptErrors = append(attemptErrors, fmt.Errorf("%s 解析失败: %w", method, err))
+			continue
+		}
+		if !found || strings.TrimSpace(file.PickCode) == "" {
+			attemptErrors = append(attemptErrors, fmt.Errorf("%s 未返回有效 pickcode", method))
+			continue
+		}
+		if len(attemptErrors) > 0 && h.logger != nil {
+			h.logger.Warnf("[EMBY PROXY] Match302 pickcode 已降级到 %s mode=%s", method, mode)
+		}
+		return strings.TrimSpace(file.PickCode), nil
 	}
-
-	return folderInfo.PickCode, nil
+	return "", fmt.Errorf("Match302 pickcode 解析失败 mode=%s: %w", mode, errors.Join(attemptErrors...))
 }
 
 // GETPlaybackInfo 获取播放信息，使用新的emby客户端方法

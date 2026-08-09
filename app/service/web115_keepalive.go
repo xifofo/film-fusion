@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"film-fusion/app/config"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
@@ -23,12 +24,14 @@ const (
 	Web115CookieNotificationRetryInterval = 1 * time.Hour
 	// web115KeepAliveConfigKey cookie 保活元数据在 CloudStorage.Config(JSON) 中的键名
 	web115KeepAliveConfigKey = "cookie_keepalive"
+	// UseDefaultReloginApp 清除单存储覆盖，使其跟随全局默认自动续期端。
+	UseDefaultReloginApp = "default"
 )
 
 // web115KeepAliveMeta cookie 保活元数据，序列化后存放在 CloudStorage.Config 的 cookie_keepalive 键下。
 // 注意：cookie 健康状态与 CloudStorage.Status 严格隔离，Status 由开放平台 token 逻辑独占，保活流程绝不触碰。
 type web115KeepAliveMeta struct {
-	App           string     `json:"app,omitempty"`             // 续期绑定的 app 端（空=默认 alipaymini）
+	App           string     `json:"app,omitempty"`             // 续期绑定的 app 端（空=跟随全局默认）
 	Enabled       *bool      `json:"enabled,omitempty"`         // 是否对该存储启用 cookie 保活（nil=默认启用）
 	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"` // 上次换端续期成功时间
 	LastCheckAt   *time.Time `json:"last_check_at,omitempty"`   // 上次探活/操作时间
@@ -44,6 +47,7 @@ type Web115CookieStatus struct {
 	StorageID     uint       `json:"storage_id"`
 	StorageName   string     `json:"storage_name"`
 	App           string     `json:"app"`
+	UseDefault    bool       `json:"use_default"`
 	Healthy       bool       `json:"healthy"`
 	HasCookie     bool       `json:"has_cookie"`
 	LastRefreshAt *time.Time `json:"last_refresh_at"`
@@ -60,6 +64,7 @@ type Web115CookieNotifier interface {
 // Web115KeepAliveService 115 web cookie 保活服务：
 // 定时探活 cookie，趁其在线时换端续期（login_another_app），失效时尝试抢救并落地告警。
 type Web115KeepAliveService struct {
+	cfg       *config.Config
 	logger    *logger.Logger
 	web115Svc *Web115Service
 	notifier  Web115CookieNotifier
@@ -70,12 +75,13 @@ type Web115KeepAliveService struct {
 }
 
 // NewWeb115KeepAliveService 创建 cookie 保活服务
-func NewWeb115KeepAliveService(log *logger.Logger, notifiers ...Web115CookieNotifier) *Web115KeepAliveService {
+func NewWeb115KeepAliveService(cfg *config.Config, log *logger.Logger, notifiers ...Web115CookieNotifier) *Web115KeepAliveService {
 	var notifier Web115CookieNotifier
 	if len(notifiers) > 0 {
 		notifier = notifiers[0]
 	}
 	return &Web115KeepAliveService{
+		cfg:       cfg,
 		logger:    log,
 		web115Svc: NewWeb115Service(log),
 		notifier:  notifier,
@@ -195,8 +201,7 @@ func (s *Web115KeepAliveService) tryRefresh(storage *model.CloudStorage, meta *w
 	defer s.mu.Unlock()
 
 	now := time.Now()
-	app := ParseLoginApp(meta.App)
-	meta.App = string(app)
+	app := s.resolveReloginApp(meta.App)
 	meta.LastCheckAt = &now
 
 	newCookie, err := s.web115Svc.RefreshCookieByApp(storage.Cookie, app)
@@ -342,9 +347,7 @@ func (s *Web115KeepAliveService) ManualRefresh(storageID, userID uint, app strin
 	}
 
 	meta, root := loadKeepAliveMeta(storage.Config)
-	if strings.TrimSpace(app) != "" {
-		meta.App = string(ParseLoginApp(app))
-	}
+	applyReloginAppPreference(&meta, app)
 	s.tryRefresh(&storage, &meta, root, "手动续期")
 
 	if !meta.Healthy {
@@ -368,14 +371,13 @@ func (s *Web115KeepAliveService) GetStatus(userID uint) ([]Web115CookieStatus, e
 	for i := range storages {
 		st := &storages[i]
 		meta, _ := loadKeepAliveMeta(st.Config)
-		appName := meta.App
-		if appName == "" {
-			appName = string(DefaultReloginApp)
-		}
+		useDefault := strings.TrimSpace(meta.App) == ""
+		appName := string(s.resolveReloginApp(meta.App))
 		out = append(out, Web115CookieStatus{
 			StorageID:     st.ID,
 			StorageName:   st.StorageName,
 			App:           appName,
+			UseDefault:    useDefault,
 			Healthy:       meta.Healthy,
 			HasCookie:     strings.TrimSpace(st.Cookie) != "",
 			LastRefreshAt: meta.LastRefreshAt,
@@ -385,6 +387,18 @@ func (s *Web115KeepAliveService) GetStatus(userID uint) ([]Web115CookieStatus, e
 		})
 	}
 	return out, nil
+}
+
+func applyReloginAppPreference(meta *web115KeepAliveMeta, requestedApp string) {
+	requestedApp = strings.ToLower(strings.TrimSpace(requestedApp))
+	if requestedApp == "" {
+		return
+	}
+	if requestedApp == UseDefaultReloginApp {
+		meta.App = ""
+		return
+	}
+	meta.App = string(ParseLoginApp(requestedApp))
 }
 
 // loadKeepAliveMeta 从 Config(JSON) 中解析 cookie 保活元数据，并返回完整的根对象以便回写时保留其它键

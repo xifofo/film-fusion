@@ -19,6 +19,198 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
+func TestResolveSourceFileInfoUsesCookieWithoutAccessToken(t *testing.T) {
+	storage := &model.CloudStorage{
+		ID:          2,
+		StorageType: model.StorageType115Open,
+		StorageName: "cookie-source",
+		Cookie:      "UID=test; CID=test; SEID=test",
+		Status:      model.StatusActive,
+	}
+	match := &model.Match302{
+		CloudStorageID: storage.ID,
+		CloudStorage:   storage,
+		TargetPath:     "/library",
+	}
+	resolver := &fakeBalanceSourceFileResolver{
+		file: Web115File{
+			FileID:   "file-id",
+			Name:     "Test.mkv",
+			PickCode: "pick-code",
+			SHA1:     "abcdef",
+			IsFile:   true,
+			Size:     12345,
+		},
+		found: true,
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.sourceFile115Svc = resolver
+
+	got, err := svc.ResolveSourceFileInfo(
+		context.Background(),
+		match,
+		"/media/Movie/Test.mkv",
+		"/library/Movie/Test.mkv",
+	)
+	if err != nil {
+		t.Fatalf("ResolveSourceFileInfo returned error: %v", err)
+	}
+	if resolver.cookie != storage.Cookie || resolver.path != "/library/Movie/Test.mkv" {
+		t.Fatalf("resolver inputs cookie=%q path=%q", resolver.cookie, resolver.path)
+	}
+	if got.PickCode != "pick-code" || got.FileID != "file-id" || got.SHA1 != "ABCDEF" || got.Size != 12345 {
+		t.Fatalf("source file = %+v", got)
+	}
+	if got.RelativePath != "Movie/Test.mkv" {
+		t.Fatalf("relative path = %q", got.RelativePath)
+	}
+}
+
+func TestResolveSourceFileInfoCookieOnlyIgnoresConfiguredAccessToken(t *testing.T) {
+	storage := &model.CloudStorage{
+		ID:                 2,
+		StorageType:        model.StorageType115Open,
+		AccessToken:        "must-not-be-used",
+		Cookie:             "UID=test; CID=test; SEID=test",
+		Match302AccessMode: model.Match302AccessModeCookieOnly,
+	}
+	resolver := &fakeBalanceSourceFileResolver{
+		file: Web115File{
+			FileID:   "cookie-file",
+			Name:     "Test.mkv",
+			PickCode: "cookie-pick",
+			IsFile:   true,
+		},
+		found: true,
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.sourceFile115Svc = resolver
+
+	got, err := svc.ResolveSourceFileInfo(context.Background(), &model.Match302{
+		CloudStorageID: storage.ID,
+		CloudStorage:   storage,
+	}, "/media/Test.mkv", "/Test.mkv")
+	if err != nil {
+		t.Fatalf("ResolveSourceFileInfo returned error: %v", err)
+	}
+	if got.PickCode != "cookie-pick" || resolver.openCalls != 0 || resolver.cookieCalls != 1 {
+		t.Fatalf("pickcode=%q openCalls=%d cookieCalls=%d", got.PickCode, resolver.openCalls, resolver.cookieCalls)
+	}
+}
+
+func TestResolveSourceFileInfoOpenAPIOnlyIgnoresConfiguredCookie(t *testing.T) {
+	storage := &model.CloudStorage{
+		ID:                 2,
+		StorageType:        model.StorageType115Open,
+		AccessToken:        "open-token",
+		Cookie:             "must-not-be-used",
+		Match302AccessMode: model.Match302AccessModeOpenAPIOnly,
+	}
+	resolver := &fakeBalanceSourceFileResolver{
+		openFile: Web115File{
+			FileID:   "open-file",
+			Name:     "Test.mkv",
+			PickCode: "open-pick",
+			IsFile:   true,
+		},
+		openFound: true,
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.sourceFile115Svc = resolver
+
+	got, err := svc.ResolveSourceFileInfo(context.Background(), &model.Match302{
+		CloudStorageID: storage.ID,
+		CloudStorage:   storage,
+	}, "/media/Test.mkv", "/Test.mkv")
+	if err != nil {
+		t.Fatalf("ResolveSourceFileInfo returned error: %v", err)
+	}
+	if got.PickCode != "open-pick" || resolver.openCalls != 1 || resolver.cookieCalls != 0 {
+		t.Fatalf("pickcode=%q openCalls=%d cookieCalls=%d", got.PickCode, resolver.openCalls, resolver.cookieCalls)
+	}
+}
+
+func TestResolveSourceFileInfoAutoFallsBackToCookie(t *testing.T) {
+	storage := &model.CloudStorage{
+		ID:                 2,
+		StorageType:        model.StorageType115Open,
+		AccessToken:        "expired-token",
+		Cookie:             "UID=test; CID=test; SEID=test",
+		Match302AccessMode: model.Match302AccessModeAuto,
+	}
+	resolver := &fakeBalanceSourceFileResolver{
+		openErr: errors.New("OpenAPI unavailable"),
+		file: Web115File{
+			FileID:   "cookie-file",
+			Name:     "Test.mkv",
+			PickCode: "cookie-pick",
+			IsFile:   true,
+		},
+		found: true,
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.sourceFile115Svc = resolver
+
+	got, err := svc.ResolveSourceFileInfo(context.Background(), &model.Match302{
+		CloudStorageID: storage.ID,
+		CloudStorage:   storage,
+	}, "/media/Test.mkv", "/Test.mkv")
+	if err != nil {
+		t.Fatalf("ResolveSourceFileInfo returned error: %v", err)
+	}
+	if got.PickCode != "cookie-pick" || resolver.openCalls != 1 || resolver.cookieCalls != 1 {
+		t.Fatalf("pickcode=%q openCalls=%d cookieCalls=%d", got.PickCode, resolver.openCalls, resolver.cookieCalls)
+	}
+}
+
+func TestResolveSourceFileInfoRequiresTokenOrCookie(t *testing.T) {
+	match := &model.Match302{
+		CloudStorageID: 1,
+		CloudStorage: &model.CloudStorage{
+			ID:          1,
+			StorageType: model.StorageType115Open,
+		},
+	}
+	_, err := NewBalanceAssignmentService(nil).ResolveSourceFileInfo(
+		context.Background(),
+		match,
+		"/media/Test.mkv",
+		"/Test.mkv",
+	)
+	if err == nil || !strings.Contains(err.Error(), "AccessToken 和 Cookie 均缺失") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestStorageUsableHonorsMatch302AccessMode(t *testing.T) {
+	expired := time.Now().Add(-time.Hour)
+	storage := model.CloudStorage{
+		StorageType:      model.StorageType115Open,
+		Status:           model.StatusExpired,
+		AccessToken:      "expired-open-token",
+		Cookie:           "valid-cookie",
+		RefreshExpiresAt: &expired,
+	}
+
+	storage.Match302AccessMode = model.Match302AccessModeOpenAPIOnly
+	if storageUsable(storage) {
+		t.Fatal("OpenAPI-only storage with expired refresh credential should be unavailable")
+	}
+	storage.Match302AccessMode = model.Match302AccessModeCookieOnly
+	if !storageUsable(storage) {
+		t.Fatal("Cookie-only storage must ignore OpenAPI status and refresh expiry")
+	}
+	storage.Status = model.StatusDisabled
+	if storageUsable(storage) {
+		t.Fatal("disabled storage must remain unavailable in Cookie-only mode")
+	}
+	storage.Status = model.StatusExpired
+	storage.Cookie = ""
+	if storageUsable(storage) {
+		t.Fatal("Cookie-only storage without Cookie should be unavailable")
+	}
+}
+
 func TestFindReadyPlaybackCacheByPathUsesSourceOrTargetPath(t *testing.T) {
 	db := setupBalanceServiceTestDB(t)
 	source, target, match := createBalanceCacheBase(t, db, true)
@@ -274,7 +466,7 @@ func TestEnsureDirPathFallsBackToOpenAPIForDirectoryQuery(t *testing.T) {
 	svc := NewBalanceAssignmentService(nil)
 	svc.directory115Svc = directorySvc
 
-	got, err := svc.ensureDirPath(context.Background(), nil, "target-token", "/FilmFusion Cache")
+	got, err := svc.ensureDirPath(context.Background(), nil, model.Match302AccessModeAuto, "target-token", "/FilmFusion Cache")
 	if err != nil {
 		t.Fatalf("ensureDirPath returned error: %v", err)
 	}
@@ -290,6 +482,71 @@ func TestEnsureDirPathFallsBackToOpenAPIForDirectoryQuery(t *testing.T) {
 			directorySvc.mkdirClientCalls,
 			directorySvc.mkdirOpenCalls,
 		)
+	}
+}
+
+func TestEnsureDirPathCookieOnlyDoesNotFallBackToOpenAPI(t *testing.T) {
+	openCalls := 0
+	directorySvc := &fakeBalanceDirectoryService{
+		resolveDirPathWithClient: func(*driver.Pan115Client, string) (string, bool, error) {
+			return "", false, errors.New("cookie lookup unavailable")
+		},
+		getDirectoriesWithClient: func(*driver.Pan115Client, string, int, int) (Web115ListResult, error) {
+			return Web115ListResult{}, errors.New("cookie list unavailable")
+		},
+		getDirectoriesWithOpenAPI: func(context.Context, string, string, int, int) (Web115ListResult, error) {
+			openCalls++
+			return Web115ListResult{}, nil
+		},
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.directory115Svc = directorySvc
+
+	_, err := svc.ensureDirPath(
+		context.Background(),
+		nil,
+		model.Match302AccessModeCookieOnly,
+		"must-not-be-used",
+		"/cache",
+	)
+	if err == nil || openCalls != 0 {
+		t.Fatalf("error=%v openCalls=%d", err, openCalls)
+	}
+}
+
+func TestEnsureDirPathOpenAPIOnlySkipsCookie(t *testing.T) {
+	cookieCalls := 0
+	directorySvc := &fakeBalanceDirectoryService{
+		resolveDirPathWithClient: func(*driver.Pan115Client, string) (string, bool, error) {
+			cookieCalls++
+			return "", false, errors.New("unexpected Cookie path lookup")
+		},
+		getDirectoriesWithClient: func(*driver.Pan115Client, string, int, int) (Web115ListResult, error) {
+			cookieCalls++
+			return Web115ListResult{}, errors.New("unexpected Cookie list")
+		},
+		getDirectoriesWithOpenAPI: func(_ context.Context, accessToken, cid string, _, _ int) (Web115ListResult, error) {
+			if accessToken != "target-token" || cid != "0" {
+				t.Fatalf("OpenAPI token/cid = %q/%q", accessToken, cid)
+			}
+			return Web115ListResult{Items: []Web115File{{FileID: "cache-id", Name: "cache"}}}, nil
+		},
+	}
+	svc := NewBalanceAssignmentService(nil)
+	svc.directory115Svc = directorySvc
+
+	got, err := svc.ensureDirPath(
+		context.Background(),
+		nil,
+		model.Match302AccessModeOpenAPIOnly,
+		"target-token",
+		"/cache",
+	)
+	if err != nil {
+		t.Fatalf("ensureDirPath returned error: %v", err)
+	}
+	if got != "cache-id" || cookieCalls != 0 {
+		t.Fatalf("cid=%q cookieCalls=%d", got, cookieCalls)
 	}
 }
 
@@ -319,7 +576,7 @@ func TestEnsureDirPathFallsBackToOpenAPIForMkdir(t *testing.T) {
 	svc := NewBalanceAssignmentService(nil)
 	svc.directory115Svc = directorySvc
 
-	got, err := svc.ensureDirPath(context.Background(), nil, "target-token", "/cache")
+	got, err := svc.ensureDirPath(context.Background(), nil, model.Match302AccessModeAuto, "target-token", "/cache")
 	if err != nil {
 		t.Fatalf("ensureDirPath returned error: %v", err)
 	}
@@ -357,7 +614,7 @@ func TestEnsureDirPathResolvesConcurrentExistingDirectory(t *testing.T) {
 	svc := NewBalanceAssignmentService(nil)
 	svc.directory115Svc = directorySvc
 
-	got, err := svc.ensureDirPath(context.Background(), nil, "target-token", "/cache")
+	got, err := svc.ensureDirPath(context.Background(), nil, model.Match302AccessModeAuto, "target-token", "/cache")
 	if err != nil {
 		t.Fatalf("ensureDirPath returned error: %v", err)
 	}
@@ -384,7 +641,7 @@ func TestEnsureDirPathReportsCookieAndOpenAPIErrorsCompactly(t *testing.T) {
 	svc := NewBalanceAssignmentService(nil)
 	svc.directory115Svc = directorySvc
 
-	_, err := svc.ensureDirPath(context.Background(), nil, "target-token", "/cache")
+	_, err := svc.ensureDirPath(context.Background(), nil, model.Match302AccessModeAuto, "target-token", "/cache")
 	if err == nil {
 		t.Fatal("ensureDirPath expected error")
 	}
@@ -405,6 +662,39 @@ type fakeBalanceDirectoryService struct {
 	mkdirWithOpenAPI          func(context.Context, string, string, string) (string, error)
 	mkdirClientCalls          int
 	mkdirOpenCalls            int
+}
+
+type fakeBalanceSourceFileResolver struct {
+	cookie      string
+	path        string
+	file        Web115File
+	found       bool
+	err         error
+	openFile    Web115File
+	openFound   bool
+	openErr     error
+	openCalls   int
+	cookieCalls int
+}
+
+func (f *fakeBalanceSourceFileResolver) NewClient(cookie string) (*driver.Pan115Client, error) {
+	f.cookieCalls++
+	f.cookie = cookie
+	if f.err != nil {
+		return nil, f.err
+	}
+	return nil, nil
+}
+
+func (f *fakeBalanceSourceFileResolver) ResolveFilePathWithClient(_ *driver.Pan115Client, filePath string) (Web115File, bool, error) {
+	f.path = filePath
+	return f.file, f.found, f.err
+}
+
+func (f *fakeBalanceSourceFileResolver) ResolveFilePathWithOpenAPI(_ context.Context, _ string, filePath string) (Web115File, bool, error) {
+	f.openCalls++
+	f.path = filePath
+	return f.openFile, f.openFound, f.openErr
 }
 
 func (f *fakeBalanceDirectoryService) ResolveDirPathWithClient(client *driver.Pan115Client, dir string) (string, bool, error) {

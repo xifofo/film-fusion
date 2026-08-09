@@ -52,11 +52,16 @@ func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
 		RefreshBeforeMin   *int   `json:"refresh_before_min"`
 		Config             string `json:"config"`
 		SortOrder          int    `json:"sort_order"`
+		Match302AccessMode string `json:"match302_access_mode"`
 		Match302MaxActive  int    `json:"match302_max_active"`
 		Match302CacheMaxGB int64  `json:"match302_cache_max_gb"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if !model.IsValidMatch302AccessMode(req.Match302AccessMode) {
+		h.error(c, http.StatusBadRequest, 400, "Match302 访问方式无效")
 		return
 	}
 
@@ -78,6 +83,7 @@ func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
 		Cookie:             req.Cookie,
 		Config:             req.Config,
 		SortOrder:          req.SortOrder,
+		Match302AccessMode: model.NormalizeMatch302AccessMode(req.Match302AccessMode),
 		Match302MaxActive:  req.Match302MaxActive,
 		Match302CacheMaxGB: req.Match302CacheMaxGB,
 		Status:             model.StatusActive,
@@ -212,6 +218,7 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 		Status             *string    `json:"status"`
 		Config             *string    `json:"config"`
 		SortOrder          *int       `json:"sort_order"`
+		Match302AccessMode *string    `json:"match302_access_mode"`
 		Match302MaxActive  *int       `json:"match302_max_active"`
 		Match302CacheMaxGB *int64     `json:"match302_cache_max_gb"`
 	}
@@ -260,6 +267,13 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 	}
 	if req.SortOrder != nil {
 		updates["sort_order"] = *req.SortOrder
+	}
+	if req.Match302AccessMode != nil {
+		if !model.IsValidMatch302AccessMode(*req.Match302AccessMode) {
+			h.error(c, http.StatusBadRequest, 400, "Match302 访问方式无效")
+			return
+		}
+		updates["match302_access_mode"] = model.NormalizeMatch302AccessMode(*req.Match302AccessMode)
 	}
 	if req.Match302MaxActive != nil {
 		maxActive := *req.Match302MaxActive

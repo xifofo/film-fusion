@@ -89,7 +89,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Logger:                 log,
 		tokenRefreshService:    service.NewTokenRefreshService(log),
 		hdhiveRefreshService:   service.NewHDHiveTokenRefreshService(cfg, log),
-		web115KeepAliveService: service.NewWeb115KeepAliveService(log, telegramNotifier),
+		web115KeepAliveService: service.NewWeb115KeepAliveService(cfg, log, telegramNotifier),
 		download115Service:     download115Service,
 		moviePilotService:      moviePilotService,
 		tmdbService:            tmdbService,

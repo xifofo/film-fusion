@@ -2,6 +2,7 @@ package model
 
 import (
 	"log"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -29,6 +30,7 @@ type CloudStorage struct {
 	LastErrorAt        *time.Time     `gorm:"comment:最后错误时间" json:"last_error_at"`
 	Config             string         `gorm:"type:json;comment:额外配置信息" json:"config"`
 	SortOrder          int            `gorm:"default:0;comment:排序" json:"sort_order"`
+	Match302AccessMode string         `gorm:"size:20;not null;default:auto;comment:Match302访问方式(auto/openapi_only/cookie_only)" json:"match302_access_mode"`
 	Match302MaxActive  int            `gorm:"default:0;comment:Match302最大同时播放数，0表示不限制" json:"match302_max_active"`
 	Match302CacheMaxGB int64          `gorm:"default:0;comment:Match302子账号缓存空间上限GB，0表示不限制" json:"match302_cache_max_gb"`
 	CreatedAt          time.Time      `json:"created_at"`
@@ -45,11 +47,69 @@ func (CloudStorage) TableName() string {
 }
 
 func (cs *CloudStorage) NormalizeMatch302Defaults() {
+	cs.Match302AccessMode = NormalizeMatch302AccessMode(cs.Match302AccessMode)
 	if cs.Match302MaxActive < 0 {
 		cs.Match302MaxActive = 0
 	}
 	if cs.Match302CacheMaxGB < 0 {
 		cs.Match302CacheMaxGB = 0
+	}
+}
+
+const (
+	Match302AccessModeAuto        = "auto"
+	Match302AccessModeOpenAPIOnly = "openapi_only"
+	Match302AccessModeCookieOnly  = "cookie_only"
+
+	Match302AccessMethodOpenAPI = "openapi"
+	Match302AccessMethodCookie  = "cookie"
+)
+
+// NormalizeMatch302AccessMode keeps old rows and unknown values on the
+// backwards-compatible automatic strategy.
+func NormalizeMatch302AccessMode(value string) string {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case Match302AccessModeOpenAPIOnly:
+		return Match302AccessModeOpenAPIOnly
+	case Match302AccessModeCookieOnly:
+		return Match302AccessModeCookieOnly
+	default:
+		return Match302AccessModeAuto
+	}
+}
+
+func IsValidMatch302AccessMode(value string) bool {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "", Match302AccessModeAuto, Match302AccessModeOpenAPIOnly, Match302AccessModeCookieOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+func Match302AccessOrder(value string) []string {
+	switch NormalizeMatch302AccessMode(value) {
+	case Match302AccessModeOpenAPIOnly:
+		return []string{Match302AccessMethodOpenAPI}
+	case Match302AccessModeCookieOnly:
+		return []string{Match302AccessMethodCookie}
+	default:
+		return []string{Match302AccessMethodOpenAPI, Match302AccessMethodCookie}
+	}
+}
+
+func (cs CloudStorage) Match302AccessModeValue() string {
+	return NormalizeMatch302AccessMode(cs.Match302AccessMode)
+}
+
+func (cs CloudStorage) HasMatch302AccessCredential() bool {
+	switch cs.Match302AccessModeValue() {
+	case Match302AccessModeOpenAPIOnly:
+		return strings.TrimSpace(cs.AccessToken) != ""
+	case Match302AccessModeCookieOnly:
+		return strings.TrimSpace(cs.Cookie) != ""
+	default:
+		return strings.TrimSpace(cs.AccessToken) != "" || strings.TrimSpace(cs.Cookie) != ""
 	}
 }
 

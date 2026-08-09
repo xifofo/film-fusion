@@ -6,12 +6,43 @@ import (
 	"testing"
 	"time"
 
+	"film-fusion/app/config"
 	"film-fusion/app/model"
 )
 
 func TestWeb115CookieCheckInterval(t *testing.T) {
 	if Web115CookieCheckInterval != 10*time.Minute {
 		t.Fatalf("Web115CookieCheckInterval = %s, want 10m", Web115CookieCheckInterval)
+	}
+}
+
+func TestResolveReloginAppUsesHotReloadedGlobalDefault(t *testing.T) {
+	cfg := &config.Config{Server: config.ServerConfig{Cookie115DefaultApp: "tv"}}
+	service := &Web115KeepAliveService{cfg: cfg}
+
+	if got := string(service.resolveReloginApp("")); got != "tv" {
+		t.Fatalf("resolveReloginApp(empty) = %q, want tv", got)
+	}
+	if got := string(service.resolveReloginApp("web")); got != "web" {
+		t.Fatalf("resolveReloginApp(web) = %q, want web", got)
+	}
+
+	cfg.Server.Cookie115DefaultApp = "wechatmini"
+	if got := string(service.resolveReloginApp("")); got != "wechatmini" {
+		t.Fatalf("resolveReloginApp(empty) after reload = %q, want wechatmini", got)
+	}
+}
+
+func TestApplyReloginAppPreferenceCanFollowGlobalDefault(t *testing.T) {
+	meta := web115KeepAliveMeta{App: "tv"}
+	applyReloginAppPreference(&meta, UseDefaultReloginApp)
+	if meta.App != "" {
+		t.Fatalf("default preference kept per-storage app %q", meta.App)
+	}
+
+	applyReloginAppPreference(&meta, "ios")
+	if meta.App != "ios" {
+		t.Fatalf("explicit preference = %q, want ios", meta.App)
 	}
 }
 

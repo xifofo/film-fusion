@@ -131,6 +131,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	in := payload.Config
+	if strings.TrimSpace(in.Server.Cookie115DefaultApp) == "" {
+		in.Server.Cookie115DefaultApp = h.cfg.Server.Cookie115DefaultApp
+	}
+	in.Server.Cookie115DefaultApp = config.NormalizeCookie115App(in.Server.Cookie115DefaultApp)
 	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
 	if in.Emby.ImageOptimization.IsZero() {
 		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
@@ -199,6 +203,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	// 基本校验
 	if strings.TrimSpace(in.Server.Port) == "" {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")
+		return
+	}
+	if err := config.ValidateCookie115App(in.Server.Cookie115DefaultApp); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 	// 兼容未携带 site 字段的旧版前端。

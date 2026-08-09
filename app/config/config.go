@@ -33,6 +33,7 @@ const (
 	DefaultLoginBackgroundMode     = "latest"
 	DefaultLoginBackgroundInterval = 12
 	DefaultLoginBackgroundLimit    = 10
+	DefaultCookie115App            = "alipaymini"
 )
 
 // SiteConfig 保存可安全展示给未登录用户的站点外观配置。
@@ -67,6 +68,7 @@ type ServerConfig struct {
 	Username               string              `mapstructure:"username" json:"username"`
 	Password               string              `mapstructure:"password" json:"password"`
 	Download115Concurrency int                 `mapstructure:"download_115_concurrency" json:"download_115_concurrency"`
+	Cookie115DefaultApp    string              `mapstructure:"cookie_115_default_app" json:"cookie_115_default_app"`
 	ProcessNewMedia        bool                `mapstructure:"process_new_media" json:"process_new_media"` // 是否处理新增媒体事件
 	Security               LoginSecurityConfig `mapstructure:"security" json:"security"`                   // FilmFusion 登录防爆破配置
 }
@@ -229,6 +231,7 @@ func Load() *Config {
 	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
 	applyTelegramDefaults(&config.Telegram)
 	applyJWTSecret(&config.JWT)
+	config.Server.Cookie115DefaultApp = NormalizeCookie115App(config.Server.Cookie115DefaultApp)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -245,6 +248,7 @@ func Save(c *Config) error {
 	viper.Set("server.username", c.Server.Username)
 	viper.Set("server.password", c.Server.Password)
 	viper.Set("server.download_115_concurrency", c.Server.Download115Concurrency)
+	viper.Set("server.cookie_115_default_app", c.Server.Cookie115DefaultApp)
 	viper.Set("server.process_new_media", c.Server.ProcessNewMedia)
 	setLoginSecurity("server.security", c.Server.Security)
 
@@ -370,6 +374,7 @@ func setLoginSecurity(prefix string, settings LoginSecurityConfig) {
 func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
+	viper.SetDefault("server.cookie_115_default_app", DefaultCookie115App)
 	setDefaultLoginSecurity("server.security")
 
 	// 登录页公开展示配置
@@ -628,6 +633,9 @@ func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
 		return fmt.Errorf("服务器端口未设置")
 	}
+	if err := ValidateCookie115App(config.Server.Cookie115DefaultApp); err != nil {
+		return err
+	}
 	if err := ValidateSite(config.Site); err != nil {
 		return err
 	}
@@ -644,6 +652,25 @@ func validateConfig(config *Config) error {
 		return err
 	}
 	return nil
+}
+
+// NormalizeCookie115App 规范化 115 Cookie 自动续期目标端；空值使用安全的独立小程序端。
+func NormalizeCookie115App(app string) string {
+	app = strings.ToLower(strings.TrimSpace(app))
+	if app == "" {
+		return DefaultCookie115App
+	}
+	return app
+}
+
+// ValidateCookie115App 校验 115driver 当前支持的换端登录目标。
+func ValidateCookie115App(app string) error {
+	switch NormalizeCookie115App(app) {
+	case "web", "android", "ios", "tv", "alipaymini", "wechatmini", "qandroid":
+		return nil
+	default:
+		return fmt.Errorf("115 Cookie 默认自动续期端不受支持")
+	}
 }
 
 func ValidateSite(settings SiteConfig) error {

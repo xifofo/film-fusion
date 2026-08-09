@@ -3,23 +3,65 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+
+	"film-fusion/app/model"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	m115 "github.com/SheltonZhu/115driver/pkg/crypto/m115"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 )
 
-func (s *Web115Service) DownloadForP115Transfer(ctx context.Context, accessToken string, client *driver.Pan115Client, sourceInfo BalanceSourceFile) (*driver.DownloadInfo, error) {
-	if strings.TrimSpace(accessToken) != "" {
-		return s.DownloadWithOpenAPIForRange(ctx, accessToken, sourceInfo.PickCode, "")
+func (s *Web115Service) DownloadForP115Transfer(ctx context.Context, accessMode, accessToken string, client *driver.Pan115Client, sourceInfo BalanceSourceFile) (*driver.DownloadInfo, error) {
+	return resolveMatch302DownloadInfo(
+		accessMode,
+		func() (*driver.DownloadInfo, error) {
+			if strings.TrimSpace(accessToken) == "" {
+				return nil, fmt.Errorf("115 OpenAPI AccessToken 为空")
+			}
+			return s.DownloadWithOpenAPIForRange(ctx, accessToken, sourceInfo.PickCode, "")
+		},
+		func() (*driver.DownloadInfo, error) {
+			if client == nil {
+				return nil, fmt.Errorf("115 Cookie client 为空")
+			}
+			if sourceInfo.IsCollect {
+				return s.DownloadWithWebAPIForRange(client, sourceInfo.PickCode)
+			}
+			return s.DownloadWithAndroidAPIForRange(client, sourceInfo.PickCode)
+		},
+	)
+}
+
+func resolveMatch302DownloadInfo(
+	mode string,
+	openAPI func() (*driver.DownloadInfo, error),
+	cookie func() (*driver.DownloadInfo, error),
+) (*driver.DownloadInfo, error) {
+	var attemptErrors []error
+	for _, method := range model.Match302AccessOrder(mode) {
+		var (
+			info *driver.DownloadInfo
+			err  error
+		)
+		switch method {
+		case model.Match302AccessMethodOpenAPI:
+			info, err = openAPI()
+		case model.Match302AccessMethodCookie:
+			info, err = cookie()
+		}
+		if err == nil && info != nil && strings.TrimSpace(info.Url.Url) != "" {
+			return info, nil
+		}
+		if err == nil {
+			err = fmt.Errorf("未返回可用直链")
+		}
+		attemptErrors = append(attemptErrors, fmt.Errorf("%s: %w", method, err))
 	}
-	if sourceInfo.IsCollect {
-		return s.DownloadWithWebAPIForRange(client, sourceInfo.PickCode)
-	}
-	return s.DownloadWithAndroidAPIForRange(client, sourceInfo.PickCode)
+	return nil, fmt.Errorf("Match302 秒传源直链获取失败 mode=%s: %w", model.NormalizeMatch302AccessMode(mode), errors.Join(attemptErrors...))
 }
 
 func (s *Web115Service) DownloadWithOpenAPIForRange(ctx context.Context, accessToken, pickCode, userAgent string) (*driver.DownloadInfo, error) {
