@@ -34,6 +34,7 @@ const (
 	DefaultLoginBackgroundInterval = 12
 	DefaultLoginBackgroundLimit    = 10
 	DefaultCookie115App            = "alipaymini"
+	MaxWeb115UserAgentLength       = 2048
 )
 
 // SiteConfig 保存可安全展示给未登录用户的站点外观配置。
@@ -69,6 +70,7 @@ type ServerConfig struct {
 	Password               string              `mapstructure:"password" json:"password"`
 	Download115Concurrency int                 `mapstructure:"download_115_concurrency" json:"download_115_concurrency"`
 	Cookie115DefaultApp    string              `mapstructure:"cookie_115_default_app" json:"cookie_115_default_app"`
+	Web115UserAgent        string              `mapstructure:"web_115_user_agent" json:"web_115_user_agent"`
 	ProcessNewMedia        bool                `mapstructure:"process_new_media" json:"process_new_media"` // 是否处理新增媒体事件
 	Security               LoginSecurityConfig `mapstructure:"security" json:"security"`                   // FilmFusion 登录防爆破配置
 }
@@ -232,6 +234,7 @@ func Load() *Config {
 	applyTelegramDefaults(&config.Telegram)
 	applyJWTSecret(&config.JWT)
 	config.Server.Cookie115DefaultApp = NormalizeCookie115App(config.Server.Cookie115DefaultApp)
+	config.Server.Web115UserAgent = NormalizeWeb115UserAgent(config.Server.Web115UserAgent)
 
 	// 验证配置
 	if err := validateConfig(&config); err != nil {
@@ -241,14 +244,14 @@ func Load() *Config {
 	return &config
 }
 
-// Save 把内存配置写回 config.yaml（仅覆盖已暴露的键，未暴露键会被保留）。
+// Save 把 YAML 管理的内存配置写回 config.yaml（仅覆盖已暴露的键，未暴露键会被保留）。
+// 115 默认 App 与浏览器 UA 由 system_configs 管理，这里不会再更新对应 YAML 字段。
 // 通过全局 viper 设置各键后 WriteConfig，保持原有 yaml 键名与未管理项。
 func Save(c *Config) error {
 	viper.Set("server.port", c.Server.Port)
 	viper.Set("server.username", c.Server.Username)
 	viper.Set("server.password", c.Server.Password)
 	viper.Set("server.download_115_concurrency", c.Server.Download115Concurrency)
-	viper.Set("server.cookie_115_default_app", c.Server.Cookie115DefaultApp)
 	viper.Set("server.process_new_media", c.Server.ProcessNewMedia)
 	setLoginSecurity("server.security", c.Server.Security)
 
@@ -375,6 +378,7 @@ func setDefaults() {
 	viper.SetDefault("server.port", "5000")
 	viper.SetDefault("server.process_new_media", true) // 默认启用新媒体处理
 	viper.SetDefault("server.cookie_115_default_app", DefaultCookie115App)
+	viper.SetDefault("server.web_115_user_agent", "")
 	setDefaultLoginSecurity("server.security")
 
 	// 登录页公开展示配置
@@ -633,9 +637,8 @@ func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
 		return fmt.Errorf("服务器端口未设置")
 	}
-	if err := ValidateCookie115App(config.Server.Cookie115DefaultApp); err != nil {
-		return err
-	}
+	// 115 默认 App 与浏览器 UA 会在数据库初始化时从唯一持久化来源读取并校验。
+	// 此处不能因迁移后残留的旧 YAML 值阻止服务启动。
 	if err := ValidateSite(config.Site); err != nil {
 		return err
 	}
@@ -671,6 +674,23 @@ func ValidateCookie115App(app string) error {
 	default:
 		return fmt.Errorf("115 Cookie 默认自动续期端不受支持")
 	}
+}
+
+// NormalizeWeb115UserAgent 规范化供后续 115 网页请求使用的浏览器 User-Agent。
+func NormalizeWeb115UserAgent(userAgent string) string {
+	return strings.TrimSpace(userAgent)
+}
+
+// ValidateWeb115UserAgent 防止保存无法作为 HTTP User-Agent 请求头使用的值。
+func ValidateWeb115UserAgent(userAgent string) error {
+	userAgent = NormalizeWeb115UserAgent(userAgent)
+	if len(userAgent) > MaxWeb115UserAgentLength {
+		return fmt.Errorf("115 浏览器 User-Agent 不能超过 %d 字节", MaxWeb115UserAgentLength)
+	}
+	if strings.ContainsAny(userAgent, "\r\n") {
+		return fmt.Errorf("115 浏览器 User-Agent 不能包含换行")
+	}
+	return nil
 }
 
 func ValidateSite(settings SiteConfig) error {

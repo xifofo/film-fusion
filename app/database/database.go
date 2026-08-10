@@ -47,6 +47,12 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 		return err
 	}
 
+	// 首次从 YAML 导入 115 运行配置；之后数据库是唯一持久化来源。
+	if err := Init115Settings(cfg); err != nil {
+		log.Errorf("初始化 115 运行配置失败: %v", err)
+		return err
+	}
+
 	// 初始化管理员账户
 	if err := InitAdminUser(cfg, log); err != nil {
 		log.Errorf("初始化管理员账户失败: %v", err)

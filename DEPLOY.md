@@ -117,6 +117,8 @@ server:
   username: "admin"              # 初始管理员用户名
   password: ""                   # 初始管理员密码（务必修改）
   download_115_concurrency: 1    # 115 下载并发数
+  cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入
+  web_115_user_agent: ""         # 仅首次初始化数据库时导入
   process_new_media: false       # 是否处理新增媒体事件（Emby webhook）
 
 emby:
@@ -156,6 +158,8 @@ jwt:
   expire_time: 240               # Token 过期时间（小时）
   issuer: "film-fusion"
 ```
+
+115 默认 App 与浏览器 UA 首次从 YAML 导入，之后由数据库作为唯一持久化来源；UA 暂未接入请求。
 
 > 获取 Emby API Key：登录 Emby → 设置 → 高级 → API 密钥 → 新建。
 

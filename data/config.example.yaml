@@ -3,7 +3,8 @@ server:
   username: "admin"
   password: ""
   download_115_concurrency: 1  # 115Open下载并发数
-  cookie_115_default_app: "alipaymini" # 115 Cookie 自动续期默认设备端
+  cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入；之后在系统设置中维护
+  web_115_user_agent: ""       # 仅首次初始化数据库时导入；之后在系统设置中维护
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
   # FilmFusion 管理后台登录防爆破。直连时 trusted_proxy_cidrs 保持为空。
   security:

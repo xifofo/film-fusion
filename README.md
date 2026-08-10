@@ -54,12 +54,15 @@ server:
   username: "admin"                 # 初始管理员用户名
   password: "your-secure-password"  # 初始管理员密码
   download_115_concurrency: 2       # 115网盘下载并发数
+  cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入
+  web_115_user_agent: ""            # 仅首次初始化数据库时导入
 
 jwt:
   expire_time: 240                  # Token过期时间（小时）
 ```
 
 JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工配置。
+115 默认 App 与浏览器 UA 首次从上述 YAML 导入，之后只保存在数据库并通过系统设置维护；UA 暂未接入请求。
 
 ### Emby 集成配置
 ```yaml

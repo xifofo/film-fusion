@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// AppConfigHandler 提供 config.yaml 的在线读取/编辑与热重载。
+// AppConfigHandler 提供 YAML 与数据库系统配置的在线读取、编辑与热重载。
 // 共享同一 *config.Config 指针：保存后就地更新该结构体，使按需读取配置的逻辑立即生效；
 // 同时重建 Emby 客户端、重排封面 cron；端口/日志等启动期绑定项标注「需重启」。
 type AppConfigHandler struct {
@@ -93,6 +94,7 @@ func (h *AppConfigHandler) GetPublic(c *gin.Context) {
 func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
 	v.Site = h.currentSiteConfig()
+	v.Server.Cookie115DefaultApp, v.Server.Web115UserAgent = h.current115Settings()
 	secrets := gin.H{
 		"server.password":           h.cfg.Server.Password != "",
 		"webhook.clouddrive2.token": h.cfg.Webhook.CloudDrive2.Token != "",
@@ -120,10 +122,35 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 }
 
 type appConfigUpdatePayload struct {
-	Config config.Config `json:"config"`
+	Config                      config.Config `json:"config"`
+	web115UserAgentFieldPresent bool
 }
 
-// Update PUT /api/app-config 保存配置到 config.yaml 并尽量热重载。
+func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		Config json.RawMessage `json:"config"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw.Config) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(raw.Config, &p.Config); err != nil {
+		return err
+	}
+
+	var fields struct {
+		Server map[string]json.RawMessage `json:"server"`
+	}
+	if err := json.Unmarshal(raw.Config, &fields); err != nil {
+		return err
+	}
+	_, p.web115UserAgentFieldPresent = fields.Server["web_115_user_agent"]
+	return nil
+}
+
+// Update PUT /api/app-config 将启动配置保存到 YAML、运行配置保存到数据库，并尽量热重载。
 func (h *AppConfigHandler) Update(c *gin.Context) {
 	var payload appConfigUpdatePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
@@ -131,10 +158,16 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	in := payload.Config
+	current115App, current115UserAgent := h.current115Settings()
 	if strings.TrimSpace(in.Server.Cookie115DefaultApp) == "" {
-		in.Server.Cookie115DefaultApp = h.cfg.Server.Cookie115DefaultApp
+		in.Server.Cookie115DefaultApp = current115App
 	}
 	in.Server.Cookie115DefaultApp = config.NormalizeCookie115App(in.Server.Cookie115DefaultApp)
+	// 旧版前端未携带字段时沿用现值；新版前端明确传空字符串时允许清除。
+	if !payload.web115UserAgentFieldPresent {
+		in.Server.Web115UserAgent = current115UserAgent
+	}
+	in.Server.Web115UserAgent = config.NormalizeWeb115UserAgent(in.Server.Web115UserAgent)
 	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
 	if in.Emby.ImageOptimization.IsZero() {
 		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
@@ -206,6 +239,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	if err := config.ValidateCookie115App(in.Server.Cookie115DefaultApp); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if err := config.ValidateWeb115UserAgent(in.Server.Web115UserAgent); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
@@ -317,7 +354,7 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		restart = append(restart, "115 下载并发数")
 	}
 
-	// 外观配置写入 system_configs，同时镜像到 config.yaml 作为兼容备份。
+	// 外观配置与 115 运行配置写入 system_configs；115 两项不再写回 YAML。
 	if err := h.saveConfigAndSiteSettings(&in); err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "写入配置失败: "+err.Error())
 		return

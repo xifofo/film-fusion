@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"film-fusion/app/config"
+	"film-fusion/app/database"
 	"film-fusion/app/model"
 
 	"gorm.io/gorm"
@@ -91,7 +92,7 @@ func (h *AppConfigHandler) currentSiteConfig() config.SiteConfig {
 
 func (h *AppConfigHandler) saveConfigAndSiteSettings(in *config.Config) error {
 	if h.db == nil {
-		return config.Save(in)
+		return errors.New("数据库未初始化，无法保存系统配置")
 	}
 
 	tx := h.db.Begin()
@@ -106,6 +107,10 @@ func (h *AppConfigHandler) saveConfigAndSiteSettings(in *config.Config) error {
 	}()
 
 	if err := saveSiteSettings(tx, in.Site); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := database.Save115Settings(tx, in.Server); err != nil {
 		tx.Rollback()
 		return err
 	}

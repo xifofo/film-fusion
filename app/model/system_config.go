@@ -59,3 +59,9 @@ const (
 	ConfigKeySiteICPNumber          = "site.icp_number"
 	ConfigKeySitePoliceNumber       = "site.police_number"
 )
+
+// 115 运行配置键。config.yaml 仅用于首次初始化数据库，之后以 system_configs 为唯一持久化来源。
+const (
+	ConfigKey115CookieDefaultApp = "server.cookie_115_default_app"
+	ConfigKey115WebUserAgent     = "server.web_115_user_agent"
+)
