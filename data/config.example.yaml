@@ -36,17 +36,28 @@ webhook:
     enabled: false
     token: ""  # openssl rand -hex 32
 
-telegram:
-  enabled: false
-  bot_token: ""              # 从 @BotFather 获取，后台读取时会脱敏
-  chat_id: ""                # 群组/频道 ID，例如 -1001234567890
-  message_thread_id: 0       # 论坛群话题 ID，0 表示不指定
+notifications:
   instance_name: "FilmFusion"
-  api_base: "https://api.telegram.org"
-  timeout_seconds: 10
-  silent: false
-  notify_emby_brute_force: true
-  notify_system_brute_force: true
+  routes:
+    emby_brute_force: [telegram]
+    system_brute_force: [telegram]
+    rss_matched: [telegram]
+    web_115_cookie_invalid: [telegram]
+  telegram:
+    enabled: false
+    bot_token: ""              # 从 @BotFather 获取，后台读取时会脱敏
+    chat_id: ""                # 群组/频道 ID，例如 -1001234567890
+    message_thread_id: 0       # 论坛群话题 ID，0 表示不指定
+    api_base: "https://api.telegram.org"
+    timeout_seconds: 10
+    silent: false
+  webhook:
+    enabled: false
+    url: ""                    # 接收统一 FilmFusion JSON 通知事件
+    token: ""                  # 可选；设置后使用 Authorization: Bearer <token>
+    timeout_seconds: 10
+
+# 旧版顶层 telegram 配置仍可自动导入；后台下次保存时会同步为 notifications 配置。
 
 moviepilot:
   api: "http://127.0.0.1:3001"

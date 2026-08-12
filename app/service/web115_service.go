@@ -7,11 +7,13 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"film-fusion/app/logger"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
+	"github.com/go-resty/resty/v2"
 )
 
 type Web115Service struct {
@@ -333,6 +335,20 @@ func (s *Web115Service) GetDirectoriesWithOpenAPI(ctx context.Context, accessTok
 const web115BrowserUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 115Browser/36.0.0 Chromium/125.0"
 
 func (s *Web115Service) NewClient(cookie string) (*driver.Pan115Client, error) {
+	return s.newClientWithContext(context.Background(), cookie, 0)
+}
+
+// NewClientWithContext creates the same web client while binding every SDK
+// request to the caller's cancellation and deadline. Long-running automation
+// actions use this path so shutdown and per-node timeouts remain effective.
+func (s *Web115Service) NewClientWithContext(ctx context.Context, cookie string, timeout time.Duration) (*driver.Pan115Client, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return s.newClientWithContext(ctx, cookie, timeout)
+}
+
+func (s *Web115Service) newClientWithContext(ctx context.Context, cookie string, timeout time.Duration) (*driver.Pan115Client, error) {
 	cookie = normalizeCookie(cookie)
 	credential, err := parse115Credential(cookie)
 	if err != nil {
@@ -340,6 +356,13 @@ func (s *Web115Service) NewClient(cookie string) (*driver.Pan115Client, error) {
 	}
 
 	client := driver.New(driver.UA(web115BrowserUA))
+	if timeout > 0 {
+		client.Client.SetTimeout(timeout)
+	}
+	client.Client.OnBeforeRequest(func(_ *resty.Client, request *resty.Request) error {
+		request.SetContext(ctx)
+		return nil
+	})
 	if uid, err := parse115UID(credential.UID); err == nil {
 		client.UserID = uid
 	}

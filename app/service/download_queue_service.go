@@ -41,16 +41,18 @@ var (
 
 // Download115Service 115Open专用下载队列服务
 type Download115Service struct {
-	logger    *logger.Logger
-	db        *gorm.DB
-	sdk115    *sdk115.Client
-	config    *Download115Config
-	workers   chan struct{} // 用于控制并发数的信号量
-	ctx       context.Context
-	cancel    context.CancelFunc
-	wg        sync.WaitGroup
-	isRunning bool
-	mu        sync.RWMutex
+	logger             *logger.Logger
+	db                 *gorm.DB
+	sdk115             *sdk115.Client
+	config             *Download115Config
+	workers            chan struct{} // 用于控制并发数的信号量
+	ctx                context.Context
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	isRunning          bool
+	mu                 sync.RWMutex
+	queueMutationMu    sync.Mutex
+	deleteSourceFolder sourceFolderDeleteFunc
 }
 
 // NewDownload115Service 创建新的115Open下载服务
@@ -67,7 +69,7 @@ func NewDownload115Service(log *logger.Logger, maxConcurrent int) *Download115Se
 		config.MaxConcurrent = 1 // 默认 1 个并发
 	}
 
-	return &Download115Service{
+	service := &Download115Service{
 		logger:  log,
 		db:      database.DB,
 		sdk115:  sdk115.New(),
@@ -76,39 +78,91 @@ func NewDownload115Service(log *logger.Logger, maxConcurrent int) *Download115Se
 		ctx:     ctx,
 		cancel:  cancel,
 	}
+	service.deleteSourceFolder = service.deleteSourceFolderWithWeb115
+	return service
 }
 
 // AddDownloadTask 添加115Open下载任务到队列
 func (s *Download115Service) AddDownloadTask(cloudStorageID uint, pickCode, savePath string) error {
-	// 检查任务是否已存在
-	var existing model.Download115Queue
-	if err := s.db.Where("pick_code = ?", pickCode).First(&existing).Error; err == nil {
-		s.logger.Warnf("115Open下载任务已存在: PickCode=%s", pickCode)
-		return fmt.Errorf("下载任务已存在")
-	}
+	return s.addDownloadTask(cloudStorageID, pickCode, savePath, nil)
+}
 
-	// 验证云存储配置是否存在
-	var cloudStorage model.CloudStorage
-	if err := s.db.First(&cloudStorage, cloudStorageID).Error; err != nil {
-		s.logger.Errorf("云存储配置不存在: ID=%d", cloudStorageID)
-		return fmt.Errorf("云存储配置不存在")
+// AddDownloadTaskForSourceFolderDeletion 添加与源文件夹延迟删除任务绑定的字幕下载。
+func (s *Download115Service) AddDownloadTaskForSourceFolderDeletion(cloudStorageID uint, pickCode, savePath string, deletionID uint) error {
+	if deletionID == 0 {
+		return errors.New("源文件夹延迟删除任务无效")
 	}
+	return s.addDownloadTask(cloudStorageID, pickCode, savePath, &deletionID)
+}
 
-	// 创建新的下载任务
-	task := &model.Download115Queue{
-		CloudStorageID: cloudStorageID,
-		PickCode:       pickCode,
-		SavePath:       savePath,
-		MaxRetryCount:  3, // 默认最大重试3次
-		Status:         model.QueueStatusPending,
+func (s *Download115Service) addDownloadTask(cloudStorageID uint, pickCode, savePath string, deletionID *uint) error {
+	if s == nil || s.db == nil {
+		return errors.New("下载服务未初始化")
 	}
+	pickCode = strings.TrimSpace(pickCode)
+	savePath = strings.TrimSpace(savePath)
+	if cloudStorageID == 0 || pickCode == "" || savePath == "" {
+		return errors.New("下载任务参数不完整")
+	}
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 
-	if err := s.db.Create(task).Error; err != nil {
-		s.logger.Errorf("添加115Open下载任务失败: %v", err)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var existing model.Download115Queue
+		if err := tx.Where("pick_code = ?", pickCode).First(&existing).Error; err == nil {
+			return fmt.Errorf("下载任务已存在")
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		var cloudStorage model.CloudStorage
+		if err := tx.Select("id").First(&cloudStorage, cloudStorageID).Error; err != nil {
+			return fmt.Errorf("云存储配置不存在")
+		}
+
+		if deletionID != nil {
+			var deletion model.OrganizeSourceFolderDeletionTask
+			if err := tx.Where("id = ? AND cloud_storage_id = ? AND status = ?", *deletionID, cloudStorageID, model.SourceFolderDeletionStatusCollecting).
+				First(&deletion).Error; err != nil {
+				return fmt.Errorf("源文件夹延迟删除任务不可用: %w", err)
+			}
+		}
+
+		task := &model.Download115Queue{
+			CloudStorageID:         cloudStorageID,
+			SourceFolderDeletionID: deletionID,
+			PickCode:               pickCode,
+			SavePath:               savePath,
+			MaxRetryCount:          3,
+			Status:                 model.QueueStatusPending,
+		}
+		if err := tx.Create(task).Error; err != nil {
+			return err
+		}
+
+		if deletionID != nil {
+			updated := tx.Model(&model.OrganizeSourceFolderDeletionTask{}).
+				Where("id = ? AND status = ?", *deletionID, model.SourceFolderDeletionStatusCollecting).
+				UpdateColumn("total_downloads", gorm.Expr("total_downloads + 1"))
+			if updated.Error != nil {
+				return updated.Error
+			}
+			if updated.RowsAffected != 1 {
+				return errors.New("源文件夹延迟删除任务计数失败")
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("添加115Open下载任务失败: PickCode=%s Error=%v", pickCode, err)
+		}
 		return err
 	}
 
-	s.logger.Infof("添加115Open下载任务成功: CloudStorageID=%d, PickCode=%s, SavePath=%s", cloudStorageID, pickCode, savePath)
+	if s.logger != nil {
+		s.logger.Infof("添加115Open下载任务成功: CloudStorageID=%d, PickCode=%s, SavePath=%s", cloudStorageID, pickCode, savePath)
+	}
 	return nil
 }
 
@@ -118,12 +172,22 @@ func (s *Download115Service) StartWorkers() {
 	defer s.mu.Unlock()
 
 	if s.isRunning {
-		s.logger.Warn("115Open下载服务已经在运行中")
+		if s.logger != nil {
+			s.logger.Warn("115Open下载服务已经在运行中")
+		}
 		return
 	}
 
+	if err := s.recoverInterruptedQueueState(); err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("恢复中断的115Open下载和源文件夹删除任务失败: %v", err)
+		}
+		return
+	}
 	s.isRunning = true
-	s.logger.Infof("启动115Open下载服务，最大并发数: %d", s.config.MaxConcurrent)
+	if s.logger != nil {
+		s.logger.Infof("启动115Open下载服务，最大并发数: %d", s.config.MaxConcurrent)
+	}
 
 	go s.processQueue()
 }
@@ -137,17 +201,23 @@ func (s *Download115Service) StopWorkers() {
 		return
 	}
 
-	s.logger.Info("正在停止115Open下载服务...")
+	if s.logger != nil {
+		s.logger.Info("正在停止115Open下载服务...")
+	}
 	s.cancel()
 	s.wg.Wait()
 	s.isRunning = false
-	s.logger.Info("115Open下载服务已停止")
+	if s.logger != nil {
+		s.logger.Info("115Open下载服务已停止")
+	}
 }
 
 // processQueue 处理下载队列
 func (s *Download115Service) processQueue() {
 	ticker := time.NewTicker(time.Second * 5) // 每5秒检查一次队列
 	defer ticker.Stop()
+	s.processPendingTasks()
+	s.processReadySourceFolderDeletions()
 
 	for {
 		select {
@@ -155,6 +225,7 @@ func (s *Download115Service) processQueue() {
 			return
 		case <-ticker.C:
 			s.processPendingTasks()
+			s.processReadySourceFolderDeletions()
 		}
 	}
 }
@@ -207,6 +278,8 @@ func (s *Download115Service) processPendingTasks() {
 
 // claimQueueTask 原子地把可执行任务标记为下载中，避免页面移除和工作者领取发生竞态。
 func (s *Download115Service) claimQueueTask(id uint) (bool, error) {
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 	result := s.db.Model(&model.Download115Queue{}).
 		Where("id = ? AND retry_count < max_retry_count AND status IN ?", id,
 			[]string{model.QueueStatusPending, model.QueueStatusFailed}).
@@ -256,10 +329,19 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 		return
 	}
 
-	// 下载成功，设置完成状态并删除记录
-	task.SetCompleted()
-	if err := s.db.Delete(&task).Error; err != nil {
-		s.logger.Errorf("删除115Open下载任务记录失败: %v", err)
+	// 下载成功后，在同一事务中累计延迟删除进度并移除队列记录。
+	deletionID, err := s.completeDownloadQueueTask(task.ID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Errorf("保存115Open下载完成状态失败: PickCode=%s Error=%v", task.PickCode, err)
+		}
+		s.queueMutationMu.Lock()
+		_ = s.db.Model(&model.Download115Queue{}).Where("id = ?", task.ID).Updates(map[string]any{
+			"status":     model.QueueStatusPending,
+			"last_error": "下载已完成，但保存完成状态失败: " + err.Error(),
+		}).Error
+		s.queueMutationMu.Unlock()
+		return
 	}
 
 	var size int64
@@ -274,7 +356,14 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 		Message: "下载完成",
 	})
 
-	s.logger.Infof("115Open下载任务完成并已删除记录: PickCode=%s", task.PickCode)
+	if s.logger != nil {
+		s.logger.Infof("115Open下载任务完成并已删除记录: PickCode=%s", task.PickCode)
+	}
+	if deletionID != nil {
+		if _, err := s.tryDeleteReadySourceFolder(*deletionID); err != nil && s.logger != nil {
+			s.logger.Warnf("字幕已下载，但延迟删除源文件夹暂未完成: DeleteTaskID=%d Error=%v", *deletionID, err)
+		}
+	}
 }
 
 // performDownload 执行实际下载
@@ -357,9 +446,13 @@ func (s *Download115Service) handleTaskError(task *model.Download115Queue, err e
 	}
 
 	// 保存更新后的任务状态
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 	if dbErr := s.db.Save(task).Error; dbErr != nil {
 		s.logger.Errorf("保存任务错误状态失败: %v", dbErr)
+		return
 	}
+	s.noteSourceFolderDownloadFailure(task.ID, err)
 }
 
 // GetQueueCount 获取当前队列中的任务数量
@@ -456,7 +549,24 @@ func (s *Download115Service) GetQueueStats() (DownloadQueueStats, error) {
 
 // ClearQueue 清空队列（用于调试）
 func (s *Download115Service) ClearQueue() error {
-	return s.db.Where("1 = 1").Delete(&model.Download115Queue{}).Error
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var tasks []model.Download115Queue
+		if err := tx.Select("id", "source_folder_deletion_id").Find(&tasks).Error; err != nil {
+			return err
+		}
+		deletionIDs := make([]uint, 0, len(tasks))
+		for _, task := range tasks {
+			if task.SourceFolderDeletionID != nil {
+				deletionIDs = append(deletionIDs, *task.SourceFolderDeletionID)
+			}
+		}
+		if err := tx.Where("1 = 1").Delete(&model.Download115Queue{}).Error; err != nil {
+			return err
+		}
+		return cancelSourceFolderDeletionsForRemovedDownloads(tx, deletionIDs)
+	})
 }
 
 // UpdateConcurrency 更新并发数
@@ -475,19 +585,41 @@ func (s *Download115Service) UpdateConcurrency(maxConcurrent int) {
 
 // ClearFailedTasks 清理失败的任务
 func (s *Download115Service) ClearFailedTasks() (int64, error) {
-	result := s.db.Where("status = ?", model.QueueStatusFailed).Delete(&model.Download115Queue{})
-	if result.Error != nil {
-		return 0, result.Error
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
+	var deletedCount int64
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var tasks []model.Download115Queue
+		if err := tx.Select("id", "source_folder_deletion_id").Where("status = ?", model.QueueStatusFailed).Find(&tasks).Error; err != nil {
+			return err
+		}
+		deletionIDs := make([]uint, 0, len(tasks))
+		for _, task := range tasks {
+			if task.SourceFolderDeletionID != nil {
+				deletionIDs = append(deletionIDs, *task.SourceFolderDeletionID)
+			}
+		}
+		result := tx.Where("status = ?", model.QueueStatusFailed).Delete(&model.Download115Queue{})
+		if result.Error != nil {
+			return result.Error
+		}
+		deletedCount = result.RowsAffected
+		return cancelSourceFolderDeletionsForRemovedDownloads(tx, deletionIDs)
+	})
+	if err != nil {
+		return 0, err
 	}
 
 	if s.logger != nil {
-		s.logger.Infof("清理了 %d 个失败的下载任务", result.RowsAffected)
+		s.logger.Infof("清理了 %d 个失败的下载任务", deletedCount)
 	}
-	return result.RowsAffected, nil
+	return deletedCount, nil
 }
 
 // RetryFailedTaskByID 将失败任务重置为等待状态。
 func (s *Download115Service) RetryFailedTaskByID(id uint) error {
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 	var task model.Download115Queue
 	if err := s.db.First(&task, id).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -520,32 +652,46 @@ func (s *Download115Service) RetryFailedTaskByID(id uint) error {
 	if s.logger != nil {
 		s.logger.Infof("下载任务已重新入队: ID=%d, PickCode=%s", task.ID, task.PickCode)
 	}
+	if task.SourceFolderDeletionID != nil {
+		_ = s.db.Model(&model.OrganizeSourceFolderDeletionTask{}).
+			Where("id = ?", *task.SourceFolderDeletionID).
+			Update("last_error", "").Error
+	}
 	return nil
 }
 
 // RemoveQueueTask 移除等待中或失败的任务；运行中的任务必须由下载工作者自行完成。
 func (s *Download115Service) RemoveQueueTask(id uint) error {
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 	var task model.Download115Queue
-	if err := s.db.First(&task, id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrDownloadTaskNotFound
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&task, id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrDownloadTaskNotFound
+			}
+			return err
 		}
-		return err
-	}
-	if task.Status == model.QueueStatusDownloading {
-		return ErrDownloadTaskRunning
-	}
-	if task.Status != model.QueueStatusPending && task.Status != model.QueueStatusFailed {
-		return ErrDownloadTaskRunning
-	}
+		if task.Status == model.QueueStatusDownloading ||
+			(task.Status != model.QueueStatusPending && task.Status != model.QueueStatusFailed) {
+			return ErrDownloadTaskRunning
+		}
 
-	result := s.db.Where("id = ? AND status IN ?", id, []string{model.QueueStatusPending, model.QueueStatusFailed}).
-		Delete(&model.Download115Queue{})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return ErrDownloadTaskRunning
+		result := tx.Where("id = ? AND status IN ?", id, []string{model.QueueStatusPending, model.QueueStatusFailed}).
+			Delete(&model.Download115Queue{})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrDownloadTaskRunning
+		}
+		if task.SourceFolderDeletionID == nil {
+			return nil
+		}
+		return cancelSourceFolderDeletionsForRemovedDownloads(tx, []uint{*task.SourceFolderDeletionID})
+	})
+	if err != nil {
+		return err
 	}
 	if s.logger != nil {
 		s.logger.Infof("下载任务已移除: ID=%d, PickCode=%s", task.ID, task.PickCode)
@@ -578,6 +724,8 @@ func (s *Download115Service) GetTasksByStatus(status string, limit, offset int) 
 
 // RetryFailedTask 重试指定的失败任务
 func (s *Download115Service) RetryFailedTask(pickCode string) error {
+	s.queueMutationMu.Lock()
+	defer s.queueMutationMu.Unlock()
 	var task model.Download115Queue
 	if err := s.db.Where("pick_code = ? AND status = ?", pickCode, model.QueueStatusFailed).First(&task).Error; err != nil {
 		return fmt.Errorf("未找到失败的任务: %s", pickCode)
@@ -590,6 +738,11 @@ func (s *Download115Service) RetryFailedTask(pickCode string) error {
 
 	if err := s.db.Save(&task).Error; err != nil {
 		return fmt.Errorf("重置任务状态失败: %v", err)
+	}
+	if task.SourceFolderDeletionID != nil {
+		_ = s.db.Model(&model.OrganizeSourceFolderDeletionTask{}).
+			Where("id = ?", *task.SourceFolderDeletionID).
+			Update("last_error", "").Error
 	}
 
 	s.logger.Infof("重置任务状态成功: PickCode=%s", pickCode)

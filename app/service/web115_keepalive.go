@@ -56,18 +56,13 @@ type Web115CookieStatus struct {
 	LastError     string     `json:"last_error"`
 }
 
-// Web115CookieNotifier 是 Cookie 失效告警所需的最小通知能力。
-type Web115CookieNotifier interface {
-	SendMessage(ctx context.Context, text string) error
-}
-
 // Web115KeepAliveService 115 web cookie 保活服务：
 // 定时探活 cookie，趁其在线时换端续期（login_another_app），失效时尝试抢救并落地告警。
 type Web115KeepAliveService struct {
 	cfg       *config.Config
 	logger    *logger.Logger
 	web115Svc *Web115Service
-	notifier  Web115CookieNotifier
+	notifier  NotificationPublisher
 	stopChan  chan struct{}
 	wg        sync.WaitGroup
 	ticker    *time.Ticker
@@ -75,8 +70,8 @@ type Web115KeepAliveService struct {
 }
 
 // NewWeb115KeepAliveService 创建 cookie 保活服务
-func NewWeb115KeepAliveService(cfg *config.Config, log *logger.Logger, notifiers ...Web115CookieNotifier) *Web115KeepAliveService {
-	var notifier Web115CookieNotifier
+func NewWeb115KeepAliveService(cfg *config.Config, log *logger.Logger, notifiers ...NotificationPublisher) *Web115KeepAliveService {
+	var notifier NotificationPublisher
 	if len(notifiers) > 0 {
 		notifier = notifiers[0]
 	}
@@ -243,7 +238,7 @@ func (s *Web115KeepAliveService) tryRefresh(storage *model.CloudStorage, meta *w
 	s.logger.Infof("存储[%s]的 115 cookie 已续期(app=%s, %s)", storage.StorageName, app, reason)
 }
 
-// notifyInvalidCookie 在 Cookie 探活和抢救续期都失败后发送一次 Telegram 告警。
+// notifyInvalidCookie 在 Cookie 探活和抢救续期都失败后发送一次通知告警。
 // 告警状态持久化在 CloudStorage.Config 中，服务重启后也不会重复轰炸；发送失败则按小时重试。
 func (s *Web115KeepAliveService) notifyInvalidCookie(storageID uint, probeErr error) {
 	if s == nil || s.notifier == nil {
@@ -273,9 +268,24 @@ func (s *Web115KeepAliveService) notifyInvalidCookie(storageID uint, probeErr er
 	s.saveMeta(&storage, root, meta)
 
 	message := formatWeb115CookieInvalidAlert(storage, meta, probeErr, now)
-	if err := s.notifier.SendMessage(context.Background(), message); err != nil {
+	report := s.notifier.Publish(context.Background(), NotificationEvent{
+		Type:  NotificationEventWeb115Invalid,
+		Title: "[115 Cookie 失效] " + notificationInstanceName(s.cfg), Message: message,
+		Severity: NotificationSeverityCritical, OccurredAt: now,
+		Metadata: map[string]string{
+			"storage_id":   fmt.Sprintf("%d", storage.ID),
+			"storage_name": storage.StorageName,
+		},
+	})
+	if report.Skipped {
 		if s.logger != nil {
-			s.logger.Errorf("115 Cookie 失效通知发送失败(storage=%d name=%s): %v", storage.ID, storage.StorageName, err)
+			s.logger.Infof("115 Cookie 失效通知已按事件路由跳过(storage=%d name=%s)", storage.ID, storage.StorageName)
+		}
+		return
+	}
+	if !report.AnySuccess() {
+		if s.logger != nil {
+			s.logger.Errorf("115 Cookie 失效通知发送失败(storage=%d name=%s): %s", storage.ID, storage.StorageName, report.FailureMessage())
 		}
 		return
 	}
@@ -284,7 +294,11 @@ func (s *Web115KeepAliveService) notifyInvalidCookie(storageID uint, probeErr er
 	meta.LastAlertAt = &alertedAt
 	s.saveMeta(&storage, root, meta)
 	if s.logger != nil {
-		s.logger.Infof("已发送 115 Cookie 失效通知(storage=%d name=%s)", storage.ID, storage.StorageName)
+		if report.HasFailures() {
+			s.logger.Warnf("115 Cookie 失效通知部分发送成功(storage=%d name=%s): %s", storage.ID, storage.StorageName, report.FailureMessage())
+		} else {
+			s.logger.Infof("已发送 115 Cookie 失效通知(storage=%d name=%s)", storage.ID, storage.StorageName)
+		}
 	}
 }
 
@@ -306,7 +320,6 @@ func clearWeb115CookieAlert(meta *web115KeepAliveMeta) {
 func formatWeb115CookieInvalidAlert(storage model.CloudStorage, meta web115KeepAliveMeta, probeErr error, now time.Time) string {
 	reason := firstNonEmptyKeepAlive(meta.LastError, compact115Error(probeErr), "未知错误")
 	return strings.Join([]string{
-		"[115 Cookie 失效] FilmFusion",
 		fmt.Sprintf("存储: %s (ID: %d)", firstNonEmptyKeepAlive(storage.StorageName, "未命名存储"), storage.ID),
 		"状态: Cookie 探活失败，自动续期也未能恢复",
 		"原因: " + reason,

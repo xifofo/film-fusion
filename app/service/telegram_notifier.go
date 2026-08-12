@@ -15,142 +15,70 @@ import (
 	"film-fusion/app/logger"
 )
 
-const maxTelegramResponseBytes = 1 << 20
+const (
+	maxTelegramResponseBytes = 1 << 20
+	maxTelegramCaptionRunes  = 1024
+	maxTelegramMessageRunes  = 4096
+)
 
-type SecurityAlert struct {
-	Source       string
-	IP           string
-	Username     string
-	Scope        string
-	FailureCount int
-	BlockedUntil time.Time
-	TriggeredAt  time.Time
-}
-
-type SecurityAlertNotifier interface {
-	NotifySecurityAlert(alert SecurityAlert)
-}
-
-type TelegramNotifier struct {
+// TelegramChannel 只负责把统一通知事件适配为 Telegram Bot API 请求。
+type TelegramChannel struct {
 	cfg    *config.Config
 	logger *logger.Logger
 	client *http.Client
 }
 
-func NewTelegramNotifier(cfg *config.Config, log *logger.Logger) *TelegramNotifier {
-	return &TelegramNotifier{cfg: cfg, logger: log, client: &http.Client{}}
+func NewTelegramChannel(cfg *config.Config, log *logger.Logger) *TelegramChannel {
+	return &TelegramChannel{cfg: cfg, logger: log, client: &http.Client{}}
 }
 
-// NotifySecurityAlert 快速返回，实际网络请求在独立 goroutine 中执行。
-func (n *TelegramNotifier) NotifySecurityAlert(alert SecurityAlert) {
-	if n == nil || n.cfg == nil {
-		return
-	}
-	settings := n.cfg.Telegram
-	if !settings.Enabled || !securityAlertEnabled(settings, alert.Source) {
-		return
-	}
-	go func() {
-		if err := n.send(context.Background(), settings, formatSecurityAlert(settings.InstanceName, alert)); err != nil && n.logger != nil {
-			n.logger.Errorf("[TELEGRAM] 安全告警发送失败: %v", err)
-		}
-	}()
-}
+func (c *TelegramChannel) ID() string { return config.NotificationChannelTelegram }
 
-func securityAlertEnabled(settings config.TelegramConfig, source string) bool {
-	switch source {
-	case "emby":
-		return settings.NotifyEmbyBruteForce
-	case "filmfusion":
-		return settings.NotifySystemBruteForce
-	default:
+func (c *TelegramChannel) Ready() bool {
+	if c == nil || c.cfg == nil {
 		return false
 	}
+	settings := c.cfg.Notifications.Telegram
+	return settings.Enabled && strings.TrimSpace(settings.BotToken) != "" && strings.TrimSpace(settings.ChatID) != ""
 }
 
-func formatSecurityAlert(instance string, alert SecurityAlert) string {
-	if strings.TrimSpace(instance) == "" {
-		instance = "FilmFusion"
+func (c *TelegramChannel) Send(ctx context.Context, event NotificationEvent) error {
+	if c == nil || c.cfg == nil {
+		return fmt.Errorf("Telegram 通知渠道未初始化")
 	}
-	source := "FilmFusion 后台"
-	if alert.Source == "emby" {
-		source = "Emby"
+	settings := c.cfg.Notifications.Telegram
+	if !settings.Enabled {
+		return fmt.Errorf("Telegram 通知渠道未启用")
 	}
-	scope := "IP"
-	if alert.Scope == "account_ip" {
-		scope = "账号 + IP"
-	}
-	lines := []string{
-		"[安全告警] " + instance,
-		"来源: " + source,
-		"事件: 登录失败达到阈值，已临时封禁",
-		"范围: " + scope,
-		"IP: " + emptyFallback(alert.IP, "unknown"),
-	}
-	if strings.TrimSpace(alert.Username) != "" {
-		lines = append(lines, "账号: "+alert.Username)
-	}
-	if alert.FailureCount > 0 {
-		lines = append(lines, "失败次数: "+strconv.Itoa(alert.FailureCount))
-	}
-	if !alert.BlockedUntil.IsZero() {
-		lines = append(lines, "封禁至: "+alert.BlockedUntil.Local().Format("2006-01-02 15:04:05 MST"))
-	}
-	triggeredAt := alert.TriggeredAt
-	if triggeredAt.IsZero() {
-		triggeredAt = time.Now()
-	}
-	lines = append(lines, "触发时间: "+triggeredAt.Local().Format("2006-01-02 15:04:05 MST"))
-	return strings.Join(lines, "\n")
+	return c.sendEvent(ctx, settings, event)
 }
 
-func emptyFallback(value, fallback string) string {
-	if strings.TrimSpace(value) == "" {
-		return fallback
+// Test 使用已保存的连接参数测试渠道，即使渠道开关尚未启用也允许发送。
+func (c *TelegramChannel) Test(ctx context.Context, event NotificationEvent) error {
+	if c == nil || c.cfg == nil {
+		return fmt.Errorf("Telegram 通知渠道未初始化")
 	}
-	return value
+	return c.sendEvent(ctx, c.cfg.Notifications.Telegram, event)
 }
 
-func (n *TelegramNotifier) SendTest(ctx context.Context) error {
-	if n == nil || n.cfg == nil {
-		return fmt.Errorf("Telegram 通知服务未初始化")
-	}
-	settings := n.cfg.Telegram
-	instance := emptyFallback(settings.InstanceName, "FilmFusion")
-	message := fmt.Sprintf("[测试通知] %s\nTelegram 通知连接正常。\n发送时间: %s", instance, time.Now().Local().Format("2006-01-02 15:04:05 MST"))
-	return n.send(ctx, settings, message)
-}
-
-// SendMessage sends a business notification through the saved Telegram target.
-func (n *TelegramNotifier) SendMessage(ctx context.Context, text string) error {
-	if n == nil || n.cfg == nil {
-		return fmt.Errorf("Telegram 通知服务未初始化")
-	}
-	if !n.cfg.Telegram.Enabled {
-		return fmt.Errorf("Telegram 通知未启用")
-	}
+func (c *TelegramChannel) sendEvent(ctx context.Context, settings config.TelegramChannelConfig, event NotificationEvent) error {
+	text := renderNotificationText(event)
 	if strings.TrimSpace(text) == "" {
 		return fmt.Errorf("Telegram 通知内容不能为空")
 	}
-	return n.send(ctx, n.cfg.Telegram, text)
+	text = truncateTelegramText(text, maxTelegramMessageRunes)
+	if strings.TrimSpace(event.ImageURL) != "" {
+		caption := truncateTelegramText(renderNotificationText(event), maxTelegramCaptionRunes)
+		if err := c.sendPhoto(ctx, settings, event.ImageURL, caption); err == nil {
+			return nil
+		} else if c.logger != nil {
+			c.logger.Warnf("[TELEGRAM] 图片通知发送失败，降级为文本通知: %v", err)
+		}
+	}
+	return c.sendText(ctx, settings, text)
 }
 
-// SendPhoto sends a remote image with an optional caption to the saved Telegram target.
-func (n *TelegramNotifier) SendPhoto(ctx context.Context, photoURL, caption string) error {
-	if n == nil || n.cfg == nil {
-		return fmt.Errorf("Telegram 通知服务未初始化")
-	}
-	if !n.cfg.Telegram.Enabled {
-		return fmt.Errorf("Telegram 通知未启用")
-	}
-	photoURL = strings.TrimSpace(photoURL)
-	if photoURL == "" {
-		return fmt.Errorf("Telegram 图片地址不能为空")
-	}
-	return n.sendPhoto(ctx, n.cfg.Telegram, photoURL, caption)
-}
-
-func (n *TelegramNotifier) send(parent context.Context, settings config.TelegramConfig, text string) error {
+func (c *TelegramChannel) sendText(parent context.Context, settings config.TelegramChannelConfig, text string) error {
 	form := url.Values{
 		"chat_id":              {settings.ChatID},
 		"text":                 {text},
@@ -159,31 +87,37 @@ func (n *TelegramNotifier) send(parent context.Context, settings config.Telegram
 	if settings.MessageThreadID > 0 {
 		form.Set("message_thread_id", strconv.FormatInt(settings.MessageThreadID, 10))
 	}
-	return n.postForm(parent, settings, "sendMessage", form)
+	return c.postForm(parent, settings, "sendMessage", form)
 }
 
-func (n *TelegramNotifier) sendPhoto(parent context.Context, settings config.TelegramConfig, photoURL, caption string) error {
+func (c *TelegramChannel) sendPhoto(parent context.Context, settings config.TelegramChannelConfig, photoURL, caption string) error {
 	form := url.Values{
 		"chat_id":              {settings.ChatID},
-		"photo":                {photoURL},
+		"photo":                {strings.TrimSpace(photoURL)},
 		"caption":              {caption},
 		"disable_notification": {strconv.FormatBool(settings.Silent)},
+	}
+	if form.Get("photo") == "" {
+		return fmt.Errorf("Telegram 图片地址不能为空")
 	}
 	if settings.MessageThreadID > 0 {
 		form.Set("message_thread_id", strconv.FormatInt(settings.MessageThreadID, 10))
 	}
-	return n.postForm(parent, settings, "sendPhoto", form)
+	return c.postForm(parent, settings, "sendPhoto", form)
 }
 
-func (n *TelegramNotifier) postForm(parent context.Context, settings config.TelegramConfig, method string, form url.Values) error {
+func (c *TelegramChannel) postForm(parent context.Context, settings config.TelegramChannelConfig, method string, form url.Values) error {
 	if strings.TrimSpace(settings.BotToken) == "" || strings.TrimSpace(settings.ChatID) == "" {
-		return fmt.Errorf("请先配置 Bot Token 和 Chat ID")
+		return fmt.Errorf("请先配置 Telegram Bot Token 和 Chat ID")
 	}
 	if settings.TimeoutSeconds <= 0 {
 		settings.TimeoutSeconds = 10
 	}
 	if strings.TrimSpace(settings.APIBase) == "" {
 		settings.APIBase = "https://api.telegram.org"
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 
 	ctx, cancel := context.WithTimeout(parent, time.Duration(settings.TimeoutSeconds)*time.Second)
@@ -195,7 +129,7 @@ func (n *TelegramNotifier) postForm(parent context.Context, settings config.Tele
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := n.client.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("请求 Telegram API 失败: %s", redactTelegramError(err.Error(), settings.BotToken))
 	}
@@ -227,4 +161,21 @@ func redactTelegramError(message, token string) string {
 		return message
 	}
 	return strings.ReplaceAll(message, token, "[REDACTED]")
+}
+
+func truncateTelegramText(message string, limit int) string {
+	message = strings.TrimSpace(message)
+	runes := []rune(message)
+	if limit <= 0 || len(runes) <= limit {
+		return message
+	}
+	lines := strings.Split(message, "\n")
+	lastLine := strings.TrimSpace(lines[len(lines)-1])
+	lastLineRunes := []rune(lastLine)
+	if len(lines) > 1 && (strings.HasPrefix(lastLine, "http://") || strings.HasPrefix(lastLine, "https://")) && len(lastLineRunes)+4 < limit {
+		prefix := strings.TrimSpace(strings.Join(lines[:len(lines)-1], "\n"))
+		prefixLimit := limit - len(lastLineRunes) - 1
+		return truncateNotificationRunes(prefix, prefixLimit) + "\n" + lastLine
+	}
+	return truncateNotificationRunes(message, limit)
 }

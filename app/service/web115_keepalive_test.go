@@ -83,12 +83,13 @@ func TestClearWeb115CookieAlert(t *testing.T) {
 
 func TestFormatWeb115CookieInvalidAlertDoesNotExposeCookie(t *testing.T) {
 	const secretCookie = "UID=123; CID=secret-cid; SEID=secret-seid"
-	message := formatWeb115CookieInvalidAlert(
+	body := formatWeb115CookieInvalidAlert(
 		model.CloudStorage{ID: 7, StorageName: "家庭媒体", Cookie: secretCookie},
 		web115KeepAliveMeta{LastError: "旧 Cookie 无效，无法续期"},
 		errors.New("探活失败"),
 		time.Date(2026, 8, 9, 12, 0, 0, 0, time.Local),
 	)
+	message := renderNotificationText(NotificationEvent{Title: "[115 Cookie 失效] FilmFusion", Message: body})
 
 	for _, want := range []string{"[115 Cookie 失效]", "家庭媒体", "自动续期也未能恢复", "旧 Cookie 无效"} {
 		if !strings.Contains(message, want) {

@@ -72,15 +72,9 @@ func TestStripRSSTrailingMetadataSupportsNestedBrackets(t *testing.T) {
 }
 
 type recordingRSSSender struct {
-	mu       sync.Mutex
-	messages []string
-	photos   []rssPhotoNotification
-	photoErr error
-}
-
-type rssPhotoNotification struct {
-	URL     string
-	Caption string
+	mu     sync.Mutex
+	events []NotificationEvent
+	report *NotificationReport
 }
 
 type rssRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -89,39 +83,34 @@ func (fn rssRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, err
 	return fn(request)
 }
 
-func (s *recordingRSSSender) SendMessage(_ context.Context, text string) error {
+func (s *recordingRSSSender) Publish(_ context.Context, event NotificationEvent) NotificationReport {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.messages = append(s.messages, text)
-	return nil
+	s.events = append(s.events, event)
+	if s.report != nil {
+		return *s.report
+	}
+	return NotificationReport{
+		Event:      event.Type,
+		Deliveries: []NotificationDelivery{{Channel: config.NotificationChannelTelegram, Success: true}},
+	}
 }
 
-func (s *recordingRSSSender) SendPhoto(_ context.Context, photoURL, caption string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.photos = append(s.photos, rssPhotoNotification{URL: photoURL, Caption: caption})
-	return s.photoErr
-}
+func (s *recordingRSSSender) Ready(NotificationEventType) bool { return true }
 
 func (s *recordingRSSSender) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.messages)
+	return len(s.events)
 }
 
-func (s *recordingRSSSender) photoCount() int {
+func (s *recordingRSSSender) lastEvent() NotificationEvent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.photos)
-}
-
-func (s *recordingRSSSender) lastPhoto() rssPhotoNotification {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.photos) == 0 {
-		return rssPhotoNotification{}
+	if len(s.events) == 0 {
+		return NotificationEvent{}
 	}
-	return s.photos[len(s.photos)-1]
+	return s.events[len(s.events)-1]
 }
 
 func TestRSSRefreshBuildsBaselineThenNotifiesNewMatch(t *testing.T) {
@@ -394,87 +383,73 @@ func TestRecognizeRSSMediaUsesSearchAndMP2QualityFallback(t *testing.T) {
 }
 
 func TestRSSRefreshEnrichesMoviePilotNotification(t *testing.T) {
-	for _, test := range []struct {
-		name             string
-		photoErr         error
-		wantTextFallback int
-	}{
-		{name: "photo"},
-		{name: "photo failure falls back to text", photoErr: errors.New("photo failed"), wantTextFallback: 1},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			db, err := gorm.Open(sqlite.Open("file:"+strings.ReplaceAll(test.name, " ", "-")+"?mode=memory&cache=shared"), &gorm.Config{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := db.AutoMigrate(&model.RSSMonitorSetting{}, &model.RSSNotificationRule{}, &model.RSSMonitorItem{}); err != nil {
-				t.Fatal(err)
-			}
+	db, err := gorm.Open(sqlite.Open("file:rss-enriched-notification?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.RSSMonitorSetting{}, &model.RSSNotificationRule{}, &model.RSSMonitorItem{}); err != nil {
+		t.Fatal(err)
+	}
 
-			var mu sync.Mutex
-			items := []string{"baseline-guid"}
-			transport := rssRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
-				mu.Lock()
-				defer mu.Unlock()
-				var body strings.Builder
-				_, _ = fmt.Fprint(&body, `<?xml version="1.0"?><rss version="2.0"><channel><title>Test RSS</title>`)
-				for _, guid := range items {
-					_, _ = fmt.Fprintf(&body, `<item><title>Show.Name.S01E01.WEB-DL.2160p [Tracker]</title><link>https://example.com/%s</link><category>剧集</category><guid>%s</guid><enclosure length="1116691496"/><pubDate>Wed, 22 Jul 2026 09:26:58 +0800</pubDate></item>`, guid, guid)
-				}
-				_, _ = fmt.Fprint(&body, `</channel></rss>`)
-				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body.String()))}, nil
-			})
+	var mu sync.Mutex
+	items := []string{"baseline-guid"}
+	transport := rssRoundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		var body strings.Builder
+		_, _ = fmt.Fprint(&body, `<?xml version="1.0"?><rss version="2.0"><channel><title>Test RSS</title>`)
+		for _, guid := range items {
+			_, _ = fmt.Fprintf(&body, `<item><title>Show.Name.S01E01.WEB-DL.2160p [Tracker]</title><link>https://example.com/%s</link><category>剧集</category><guid>%s</guid><enclosure length="1116691496"/><pubDate>Wed, 22 Jul 2026 09:26:58 +0800</pubDate></item>`, guid, guid)
+		}
+		_, _ = fmt.Fprint(&body, `</channel></rss>`)
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body.String()))}, nil
+	})
 
-			sender := &recordingRSSSender{photoErr: test.photoErr}
-			recognizer := &retryRSSRecognizer{}
-			monitor := NewRSSMonitorService(&config.Config{}, nil, sender, recognizer)
-			monitor.db = db
-			monitor.client = &http.Client{Transport: transport}
-			if err := monitor.EnsureDefaults(); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := monitor.UpdateSettings(RSSSettingsInput{Enabled: true, FeedName: "Test", FeedURL: "https://rss.example.com/feed", IntervalMinutes: 2}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := monitor.Refresh(context.Background()); err != nil {
-				t.Fatal(err)
-			}
+	sender := &recordingRSSSender{}
+	recognizer := &retryRSSRecognizer{}
+	monitor := NewRSSMonitorService(&config.Config{}, nil, sender, recognizer)
+	monitor.db = db
+	monitor.client = &http.Client{Transport: transport}
+	if err := monitor.EnsureDefaults(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := monitor.UpdateSettings(RSSSettingsInput{Enabled: true, FeedName: "Test", FeedURL: "https://rss.example.com/feed", IntervalMinutes: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := monitor.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 
-			mu.Lock()
-			items = append(items, "new-guid")
-			mu.Unlock()
-			result, err := monitor.Refresh(context.Background())
-			if err != nil {
-				t.Fatal(err)
-			}
-			if result.Notified != 1 || result.Failed != 0 || sender.photoCount() != 1 || sender.count() != test.wantTextFallback {
-				t.Fatalf("unexpected notification result=%+v photos=%d messages=%d", result, sender.photoCount(), sender.count())
-			}
-			if len(recognizer.calls) != 2 || recognizer.calls[1] != "Show.Name.S01E01.WEB-DL.2160p" {
-				t.Fatalf("expected stripped-title retry, calls=%q", recognizer.calls)
-			}
+	mu.Lock()
+	items = append(items, "new-guid")
+	mu.Unlock()
+	result, err := monitor.Refresh(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Notified != 1 || result.Failed != 0 || sender.count() != 1 {
+		t.Fatalf("unexpected notification result=%+v events=%d", result, sender.count())
+	}
+	if len(recognizer.calls) != 2 || recognizer.calls[1] != "Show.Name.S01E01.WEB-DL.2160p" {
+		t.Fatalf("expected stripped-title retry, calls=%q", recognizer.calls)
+	}
 
-			photo := sender.lastPhoto()
-			if photo.URL != "https://image.tmdb.org/t/p/w780/backdrop.jpg" {
-				t.Fatalf("unexpected photo URL: %s", photo.URL)
-			}
-			for _, expected := range []string{"百花杀 (2026) S01E01 新资源上线", "评分：8.0，类型：电视剧，类别：国产剧集", "质量：WEB-DL 2160p，共1个文件"} {
-				if !strings.Contains(photo.Caption, expected) {
-					t.Fatalf("caption %q does not include %q", photo.Caption, expected)
-				}
-			}
-			if len([]rune(photo.Caption)) > maxTelegramCaptionRunes {
-				t.Fatalf("caption exceeds Telegram limit: %d", len([]rune(photo.Caption)))
-			}
+	event := sender.lastEvent()
+	if event.Type != NotificationEventRSSMatched || event.ImageURL != "https://image.tmdb.org/t/p/w780/backdrop.jpg" {
+		t.Fatalf("unexpected notification event: %+v", event)
+	}
+	for _, expected := range []string{"百花杀 (2026) S01E01 新资源上线", "评分：8.0，类型：电视剧，类别：国产剧集", "质量：WEB-DL 2160p，共1个文件"} {
+		if !strings.Contains(event.Message, expected) {
+			t.Fatalf("message %q does not include %q", event.Message, expected)
+		}
+	}
 
-			var stored model.RSSMonitorItem
-			if err := db.Where("guid = ?", "new-guid").First(&stored).Error; err != nil {
-				t.Fatal(err)
-			}
-			if stored.MediaTitle != "百花杀" || stored.MediaYear != "2026" || stored.MediaType != "电视剧" || stored.SeasonEpisode != "S01E01" || stored.Quality != "WEB-DL 2160p" || stored.TmdbID != "12345" || stored.RecognitionError != "" {
-				t.Fatalf("unexpected persisted media metadata: %+v", stored)
-			}
-		})
+	var stored model.RSSMonitorItem
+	if err := db.Where("guid = ?", "new-guid").First(&stored).Error; err != nil {
+		t.Fatal(err)
+	}
+	if stored.MediaTitle != "百花杀" || stored.MediaYear != "2026" || stored.MediaType != "电视剧" || stored.SeasonEpisode != "S01E01" || stored.Quality != "WEB-DL 2160p" || stored.TmdbID != "12345" || stored.RecognitionError != "" {
+		t.Fatalf("unexpected persisted media metadata: %+v", stored)
 	}
 }
 

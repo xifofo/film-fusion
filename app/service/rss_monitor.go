@@ -30,8 +30,6 @@ const (
 	defaultRSSIntervalMinutes   = 2
 	rssRecentItemRetentionLimit = 5000
 	maxRSSBodyBytes             = 8 << 20
-	maxTelegramCaptionRunes     = 1024
-	maxTelegramMessageRunes     = 4096
 	legacyRSSMessageTemplate    = "[RSS 上新] {{rule_name}}\n{{title}}\n分类: {{category}}\n大小: {{size}}\n发布时间: {{pub_date}}\n{{link}}"
 	defaultRSSMessageTemplate   = "{{media_title}} ({{media_year}}) {{season_episode}} 新资源上线\n评分：{{rating}}，类型：{{media_type}}，类别：{{media_category}}\n质量：{{quality}}，共{{file_count}}个文件，大小：{{size}}\n{{link}}"
 )
@@ -99,14 +97,11 @@ type RSSMonitorDashboard struct {
 	RecentMatchedItems []model.RSSMonitorItem      `json:"recent_matched_items"`
 	RetentionLimit     int                         `json:"retention_limit"`
 	Running            bool                        `json:"running"`
-	TelegramReady      bool                        `json:"telegram_ready"`
-	TotalSeen          int64                       `json:"total_seen"`
-	TotalNotified      int64                       `json:"total_notified"`
-}
-
-type RSSMessageSender interface {
-	SendMessage(ctx context.Context, text string) error
-	SendPhoto(ctx context.Context, photoURL, caption string) error
+	NotificationReady  bool                        `json:"notification_ready"`
+	// TelegramReady 保留一个版本的响应兼容，值与 NotificationReady 相同。
+	TelegramReady bool  `json:"telegram_ready"`
+	TotalSeen     int64 `json:"total_seen"`
+	TotalNotified int64 `json:"total_notified"`
 }
 
 type RSSMediaRecognizer interface {
@@ -130,7 +125,7 @@ type RSSMonitorService struct {
 	cfg        *config.Config
 	log        *logger.Logger
 	db         *gorm.DB
-	notifier   RSSMessageSender
+	notifier   NotificationPublisher
 	recognizer RSSMediaRecognizer
 	client     *http.Client
 
@@ -142,7 +137,7 @@ type RSSMonitorService struct {
 	running atomic.Bool
 }
 
-func NewRSSMonitorService(cfg *config.Config, log *logger.Logger, notifier RSSMessageSender, recognizer RSSMediaRecognizer) *RSSMonitorService {
+func NewRSSMonitorService(cfg *config.Config, log *logger.Logger, notifier NotificationPublisher, recognizer RSSMediaRecognizer) *RSSMonitorService {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &RSSMonitorService{
 		cfg:        cfg,
@@ -302,8 +297,10 @@ func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
 	}
 	var totalSeen, totalNotified int64
 	s.db.Model(&model.RSSMonitorItem{}).Count(&totalSeen)
-	s.db.Model(&model.RSSMonitorItem{}).Where("notification_status = ?", model.RSSNotificationSent).Count(&totalNotified)
-	telegramReady := s.cfg != nil && s.cfg.Telegram.Enabled && strings.TrimSpace(s.cfg.Telegram.BotToken) != "" && strings.TrimSpace(s.cfg.Telegram.ChatID) != ""
+	s.db.Model(&model.RSSMonitorItem{}).
+		Where("notification_status IN ?", []string{model.RSSNotificationSent, model.RSSNotificationPartial}).
+		Count(&totalNotified)
+	notificationReady := s.notifier != nil && s.notifier.Ready(NotificationEventRSSMatched)
 	dashboard := RSSMonitorDashboard{
 		Sources:            sources,
 		Rules:              rules,
@@ -311,7 +308,8 @@ func (s *RSSMonitorService) Dashboard(limit int) (RSSMonitorDashboard, error) {
 		RecentMatchedItems: matchedItems,
 		RetentionLimit:     rssRecentItemRetentionLimit,
 		Running:            s.running.Load(),
-		TelegramReady:      telegramReady,
+		NotificationReady:  notificationReady,
+		TelegramReady:      notificationReady,
 		TotalSeen:          totalSeen,
 		TotalNotified:      totalNotified,
 	}
@@ -744,29 +742,39 @@ func (s *RSSMonitorService) refreshSource(ctx context.Context, setting model.RSS
 		}
 
 		message := RenderRSSMediaMessage(*matchedRule, feedItem, rssFirstNonEmpty(feed.Title, setting.FeedName), media)
-		textMessage := truncateRSSCaption(message, maxTelegramMessageRunes)
-		var notifyErr error
 		if s.notifier == nil {
-			notifyErr = errors.New("Telegram 通知服务未初始化")
-		} else if media.PosterURL != "" {
-			notifyErr = s.notifier.SendPhoto(ctx, media.PosterURL, truncateRSSCaption(message, maxTelegramCaptionRunes))
-			if notifyErr != nil {
-				if s.log != nil {
-					s.log.Warnf("[RSS] Telegram 图片通知发送失败，降级为文本通知: %v", notifyErr)
-				}
-				notifyErr = s.notifier.SendMessage(ctx, textMessage)
-			}
-		} else {
-			notifyErr = s.notifier.SendMessage(ctx, textMessage)
-		}
-		if notifyErr != nil {
 			stored.NotificationStatus = model.RSSNotificationFailed
-			stored.NotificationError = notifyErr.Error()
+			stored.NotificationError = "通知服务未初始化"
 			result.Failed++
 		} else {
-			stored.NotificationStatus = model.RSSNotificationSent
-			stored.NotifiedAt = &now
-			result.Notified++
+			report := s.notifier.Publish(ctx, NotificationEvent{
+				Type: NotificationEventRSSMatched, Message: message, ImageURL: media.PosterURL,
+				Severity: NotificationSeverityInfo, OccurredAt: now,
+				Metadata: map[string]string{
+					"source": rssFirstNonEmpty(feed.Title, setting.FeedName),
+					"rule":   matchedRule.Name, "title": feedItem.Title, "link": feedItem.Link,
+				},
+			})
+			switch {
+			case report.Skipped:
+				stored.NotificationStatus = model.RSSNotificationSkipped
+				stored.NotificationError = report.SkipReason
+			case !report.AnySuccess():
+				stored.NotificationStatus = model.RSSNotificationFailed
+				stored.NotificationError = report.FailureMessage()
+				result.Failed++
+			case report.HasFailures():
+				stored.NotificationStatus = model.RSSNotificationPartial
+				stored.NotificationError = report.FailureMessage()
+				stored.NotifiedAt = &now
+				result.Notified++
+				result.Failed++
+			default:
+				stored.NotificationStatus = model.RSSNotificationSent
+				stored.NotificationError = ""
+				stored.NotifiedAt = &now
+				result.Notified++
+			}
 		}
 		s.db.Model(&stored).Updates(map[string]any{
 			"media_title":         stored.MediaTitle,
@@ -1120,38 +1128,6 @@ func formatRSSRating(rating float64) string {
 		return "暂无"
 	}
 	return strconv.FormatFloat(rating, 'f', 1, 64)
-}
-
-func truncateRSSCaption(message string, limit int) string {
-	message = strings.TrimSpace(message)
-	runes := []rune(message)
-	if limit <= 0 || len(runes) <= limit {
-		return message
-	}
-
-	lines := strings.Split(message, "\n")
-	lastLine := strings.TrimSpace(lines[len(lines)-1])
-	lastLineRunes := []rune(lastLine)
-	if len(lines) > 1 && (strings.HasPrefix(lastLine, "http://") || strings.HasPrefix(lastLine, "https://")) && len(lastLineRunes)+4 < limit {
-		prefix := strings.TrimSpace(strings.Join(lines[:len(lines)-1], "\n"))
-		prefixLimit := limit - len(lastLineRunes) - 1
-		return truncateRSSRunes(prefix, prefixLimit) + "\n" + lastLine
-	}
-	return truncateRSSRunes(message, limit)
-}
-
-func truncateRSSRunes(value string, limit int) string {
-	runes := []rune(value)
-	if limit <= 0 {
-		return ""
-	}
-	if len(runes) <= limit {
-		return value
-	}
-	if limit <= 3 {
-		return string(runes[:limit])
-	}
-	return strings.TrimSpace(string(runes[:limit-3])) + "..."
 }
 
 func formatRSSSize(size int64) string {

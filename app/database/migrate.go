@@ -27,6 +27,12 @@ func AutoMigrate() error {
 		return fmt.Errorf("迁移Match302负载均衡唯一索引失败: %v", err)
 	}
 
+	// RSS 自动化以源为生命周期根，一个源必须且只能拥有一个流程。
+	// 在建立唯一索引前先拒绝有歧义的旧数据，避免迁移时静默删除配置。
+	if err := validateRSSAutomationOneToOneData(); err != nil {
+		return fmt.Errorf("迁移RSS自动化一对一关系失败: %v", err)
+	}
+
 	// 自动迁移表结构
 	if err := DB.AutoMigrate(
 		&model.SystemConfig{},
@@ -34,6 +40,7 @@ func AutoMigrate() error {
 		&model.CloudStorage{},
 		&model.CloudPath{},
 		&model.CloudDirectory{},
+		&model.OrganizeSourceFolderDeletionTask{},
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
 		&model.Match302{},
@@ -55,12 +62,69 @@ func AutoMigrate() error {
 		&model.RSSMonitorSetting{},
 		&model.RSSNotificationRule{},
 		&model.RSSMonitorItem{},
+		&model.RSSAutomationSource{},
+		&model.RSSAutomationWorkflow{},
+		&model.RSSAutomationTarget{},
+		&model.RSSAutomationEntry{},
+		&model.RSSAutomationRun{},
+		&model.RSSAutomationNodeRun{},
 	); err != nil {
 		return err
 	}
 
 	if err := migrateMatch302CacheQuotaToGB(); err != nil {
 		return fmt.Errorf("迁移Match302缓存空间单位失败: %v", err)
+	}
+
+	return nil
+}
+
+func validateRSSAutomationOneToOneData() error {
+	if !DB.Migrator().HasTable(&model.RSSAutomationSource{}) ||
+		!DB.Migrator().HasTable(&model.RSSAutomationWorkflow{}) {
+		return nil
+	}
+
+	var invalidWorkflowCount int64
+	if err := DB.Raw(`
+		SELECT count(*)
+		FROM rss_automation_workflows AS workflow
+		LEFT JOIN rss_automation_sources AS source ON source.id = workflow.source_id
+		WHERE workflow.source_id <= 0 OR source.id IS NULL
+	`).Scan(&invalidWorkflowCount).Error; err != nil {
+		return err
+	}
+
+	var duplicateSourceCount int64
+	if err := DB.Raw(`
+		SELECT count(*)
+		FROM (
+			SELECT source_id
+			FROM rss_automation_workflows
+			GROUP BY source_id
+			HAVING count(*) > 1
+		)
+	`).Scan(&duplicateSourceCount).Error; err != nil {
+		return err
+	}
+
+	var sourceWithoutWorkflowCount int64
+	if err := DB.Raw(`
+		SELECT count(*)
+		FROM rss_automation_sources AS source
+		LEFT JOIN rss_automation_workflows AS workflow ON workflow.source_id = source.id
+		WHERE workflow.id IS NULL
+	`).Scan(&sourceWithoutWorkflowCount).Error; err != nil {
+		return err
+	}
+
+	if invalidWorkflowCount > 0 || duplicateSourceCount > 0 || sourceWithoutWorkflowCount > 0 {
+		return fmt.Errorf(
+			"现有数据不满足一个 RSS 源对应一个流程（无有效源的流程 %d 个、存在重复流程的源 %d 个、没有流程的源 %d 个）",
+			invalidWorkflowCount,
+			duplicateSourceCount,
+			sourceWithoutWorkflowCount,
+		)
 	}
 
 	return nil

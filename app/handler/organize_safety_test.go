@@ -215,32 +215,6 @@ func TestEnhanceEpisodeRecognizeInputRejectsDifferentTMDBResult(t *testing.T) {
 	}
 }
 
-func TestCollectOrganizeSourceFolderDeleteTargetsSkipsErroredAndDuplicates(t *testing.T) {
-	targets, errorsOut := collectOrganizeSourceFolderDeleteTargets([]Organize115CookieGroup{
-		{FolderID: "100"},
-		{FolderID: " 100 "},
-		{FolderID: "200", Error: "移动文件失败"},
-		{FolderID: "0"},
-		{FolderID: "300"},
-	})
-
-	wantTargets := []string{"100", "300"}
-	if len(targets) != len(wantTargets) {
-		t.Fatalf("len(targets)=%d want=%d targets=%v", len(targets), len(wantTargets), targets)
-	}
-	for i := range wantTargets {
-		if targets[i] != wantTargets[i] {
-			t.Fatalf("targets[%d]=%q want %q; all=%v", i, targets[i], wantTargets[i], targets)
-		}
-	}
-	if len(errorsOut) != 1 {
-		t.Fatalf("len(errorsOut)=%d want=1 errors=%v", len(errorsOut), errorsOut)
-	}
-	if !strings.Contains(errorsOut[0], "200") || !strings.Contains(errorsOut[0], "移动文件失败") {
-		t.Fatalf("unexpected error message: %q", errorsOut[0])
-	}
-}
-
 func TestBuildRecognizeInputsUsesDefaultRegexFallbackBeforeGrandparent(t *testing.T) {
 	inputs := buildRecognizeInputs(
 		"发布组 - 流浪地球-2160p.mkv",
@@ -500,6 +474,18 @@ func TestAttachOrganizeSubtitlesMatchesOnlyItsVideoVersion(t *testing.T) {
 	}
 	if items[2].StrmPath != "" {
 		t.Fatalf("subtitle strm path=%q want empty", items[2].StrmPath)
+	}
+}
+
+func TestFirstOrganizeSubtitleQueueErrorIgnoresVideoAndFindsSubtitle(t *testing.T) {
+	items := []Organize115ItemResult{
+		{FileName: "Movie.mkv", SubtitleError: "视频字段不应参与"},
+		{FileName: "Movie.zh-CN.ass", IsSubtitle: true, SubtitleError: "下载任务入队失败"},
+	}
+
+	got := firstOrganizeSubtitleQueueError(items)
+	if !strings.Contains(got, "Movie.zh-CN.ass") || !strings.Contains(got, "下载任务入队失败") {
+		t.Fatalf("queue error=%q", got)
 	}
 }
 

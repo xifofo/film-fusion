@@ -6,7 +6,9 @@ const (
 	RSSNotificationBaseline = "baseline"
 	RSSNotificationIgnored  = "ignored"
 	RSSNotificationSent     = "sent"
+	RSSNotificationPartial  = "partial"
 	RSSNotificationFailed   = "failed"
+	RSSNotificationSkipped  = "skipped"
 )
 
 // RSSMonitorSetting stores one RSS source managed by FilmFusion.

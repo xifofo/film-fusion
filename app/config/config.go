@@ -11,12 +11,14 @@ import (
 )
 
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server" json:"server"`
-	Site       SiteConfig       `mapstructure:"site" json:"site"`
-	Webhook    WebhookConfig    `mapstructure:"webhook" json:"webhook"`
-	Log        LogConfig        `mapstructure:"log" json:"log"`
-	JWT        JWTConfig        `mapstructure:"jwt" json:"jwt"`
-	Emby       EmbyConfig       `mapstructure:"emby" json:"emby"`
+	Server        ServerConfig       `mapstructure:"server" json:"server"`
+	Site          SiteConfig         `mapstructure:"site" json:"site"`
+	Webhook       WebhookConfig      `mapstructure:"webhook" json:"webhook"`
+	Notifications NotificationConfig `mapstructure:"notifications" json:"notifications"`
+	Log           LogConfig          `mapstructure:"log" json:"log"`
+	JWT           JWTConfig          `mapstructure:"jwt" json:"jwt"`
+	Emby          EmbyConfig         `mapstructure:"emby" json:"emby"`
+	// Telegram 保留旧版配置读写兼容；运行时以 Notifications 为唯一来源。
 	Telegram   TelegramConfig   `mapstructure:"telegram" json:"telegram"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
@@ -35,6 +37,12 @@ const (
 	DefaultLoginBackgroundLimit    = 10
 	DefaultCookie115App            = "alipaymini"
 	MaxWeb115UserAgentLength       = 2048
+	NotificationChannelTelegram    = "telegram"
+	NotificationChannelWebhook     = "webhook"
+	NotificationEventEmbySecurity  = "security.emby_brute_force"
+	NotificationEventAppSecurity   = "security.filmfusion_brute_force"
+	NotificationEventRSSMatched    = "rss.matched"
+	NotificationEventWeb115Invalid = "storage.115_cookie_invalid"
 )
 
 // SiteConfig 保存可安全展示给未登录用户的站点外观配置。
@@ -91,7 +99,72 @@ type JWTConfig struct {
 	Issuer     string `mapstructure:"issuer" json:"issuer"`           // 签发者
 }
 
-// TelegramConfig 控制 Telegram Bot 告警投递及各类安全事件开关。
+// NotificationConfig 将事件路由与具体渠道配置分离。
+// 同一事件可以路由到多个渠道；空渠道列表表示关闭该类通知。
+type NotificationConfig struct {
+	InstanceName string                    `mapstructure:"instance_name" json:"instance_name"`
+	Routes       NotificationRoutesConfig  `mapstructure:"routes" json:"routes"`
+	Telegram     TelegramChannelConfig     `mapstructure:"telegram" json:"telegram"`
+	Webhook      NotificationWebhookConfig `mapstructure:"webhook" json:"webhook"`
+}
+
+type NotificationRoutesConfig struct {
+	EmbyBruteForce      []string `mapstructure:"emby_brute_force" json:"emby_brute_force"`
+	SystemBruteForce    []string `mapstructure:"system_brute_force" json:"system_brute_force"`
+	RSSMatched          []string `mapstructure:"rss_matched" json:"rss_matched"`
+	Web115CookieInvalid []string `mapstructure:"web_115_cookie_invalid" json:"web_115_cookie_invalid"`
+}
+
+func (r NotificationRoutesConfig) Channels(event string) []string {
+	switch event {
+	case NotificationEventEmbySecurity:
+		return append([]string(nil), r.EmbyBruteForce...)
+	case NotificationEventAppSecurity:
+		return append([]string(nil), r.SystemBruteForce...)
+	case NotificationEventRSSMatched:
+		return append([]string(nil), r.RSSMatched...)
+	case NotificationEventWeb115Invalid:
+		return append([]string(nil), r.Web115CookieInvalid...)
+	default:
+		return nil
+	}
+}
+
+func (c NotificationConfig) IsZero() bool {
+	return strings.TrimSpace(c.InstanceName) == "" && c.Telegram.IsZero() && c.Webhook.IsZero() &&
+		len(c.Routes.EmbyBruteForce) == 0 && len(c.Routes.SystemBruteForce) == 0 &&
+		len(c.Routes.RSSMatched) == 0 && len(c.Routes.Web115CookieInvalid) == 0
+}
+
+// TelegramChannelConfig 只包含 Telegram 自身的投递参数。
+type TelegramChannelConfig struct {
+	Enabled         bool   `mapstructure:"enabled" json:"enabled"`
+	BotToken        string `mapstructure:"bot_token" json:"bot_token"`
+	ChatID          string `mapstructure:"chat_id" json:"chat_id"`
+	MessageThreadID int64  `mapstructure:"message_thread_id" json:"message_thread_id"`
+	APIBase         string `mapstructure:"api_base" json:"api_base"`
+	TimeoutSeconds  int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`
+	Silent          bool   `mapstructure:"silent" json:"silent"`
+}
+
+func (c TelegramChannelConfig) IsZero() bool {
+	return !c.Enabled && c.BotToken == "" && c.ChatID == "" && c.MessageThreadID == 0 &&
+		c.APIBase == "" && c.TimeoutSeconds == 0 && !c.Silent
+}
+
+// NotificationWebhookConfig 接收 FilmFusion 统一 JSON 事件。
+type NotificationWebhookConfig struct {
+	Enabled        bool   `mapstructure:"enabled" json:"enabled"`
+	URL            string `mapstructure:"url" json:"url"`
+	Token          string `mapstructure:"token" json:"token"`
+	TimeoutSeconds int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`
+}
+
+func (c NotificationWebhookConfig) IsZero() bool {
+	return !c.Enabled && strings.TrimSpace(c.URL) == "" && c.Token == "" && c.TimeoutSeconds == 0
+}
+
+// TelegramConfig 是旧版扁平 Telegram 配置，仅用于无损迁移和旧前端兼容。
 type TelegramConfig struct {
 	Enabled                bool   `mapstructure:"enabled" json:"enabled"`
 	BotToken               string `mapstructure:"bot_token" json:"bot_token"`
@@ -232,6 +305,7 @@ func Load() *Config {
 	applyLoginSecurityDefaults("server.security", &config.Server.Security)
 	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
 	applyTelegramDefaults(&config.Telegram)
+	applyNotificationDefaults(&config)
 	applyJWTSecret(&config.JWT)
 	config.Server.Cookie115DefaultApp = NormalizeCookie115App(config.Server.Cookie115DefaultApp)
 	config.Server.Web115UserAgent = NormalizeWeb115UserAgent(config.Server.Web115UserAgent)
@@ -248,6 +322,12 @@ func Load() *Config {
 // 115 默认 App 与浏览器 UA 由 system_configs 管理，这里不会再更新对应 YAML 字段。
 // 通过全局 viper 设置各键后 WriteConfig，保持原有 yaml 键名与未管理项。
 func Save(c *Config) error {
+	if c.Notifications.IsZero() {
+		c.Notifications = NotificationConfigFromLegacy(c.Telegram)
+	}
+	NormalizeNotificationConfig(&c.Notifications)
+	c.Telegram = LegacyTelegramFromNotifications(c.Notifications)
+
 	viper.Set("server.port", c.Server.Port)
 	viper.Set("server.username", c.Server.Username)
 	viper.Set("server.password", c.Server.Password)
@@ -282,16 +362,35 @@ func Save(c *Config) error {
 	viper.Set("jwt.expire_time", c.JWT.ExpireTime)
 	viper.Set("jwt.issuer", c.JWT.Issuer)
 
-	viper.Set("telegram.enabled", c.Telegram.Enabled)
-	viper.Set("telegram.bot_token", c.Telegram.BotToken)
-	viper.Set("telegram.chat_id", c.Telegram.ChatID)
-	viper.Set("telegram.message_thread_id", c.Telegram.MessageThreadID)
-	viper.Set("telegram.instance_name", c.Telegram.InstanceName)
-	viper.Set("telegram.api_base", c.Telegram.APIBase)
-	viper.Set("telegram.timeout_seconds", c.Telegram.TimeoutSeconds)
-	viper.Set("telegram.silent", c.Telegram.Silent)
-	viper.Set("telegram.notify_emby_brute_force", c.Telegram.NotifyEmbyBruteForce)
-	viper.Set("telegram.notify_system_brute_force", c.Telegram.NotifySystemBruteForce)
+	viper.Set("notifications.instance_name", c.Notifications.InstanceName)
+	viper.Set("notifications.routes.emby_brute_force", c.Notifications.Routes.EmbyBruteForce)
+	viper.Set("notifications.routes.system_brute_force", c.Notifications.Routes.SystemBruteForce)
+	viper.Set("notifications.routes.rss_matched", c.Notifications.Routes.RSSMatched)
+	viper.Set("notifications.routes.web_115_cookie_invalid", c.Notifications.Routes.Web115CookieInvalid)
+	viper.Set("notifications.telegram.enabled", c.Notifications.Telegram.Enabled)
+	viper.Set("notifications.telegram.bot_token", c.Notifications.Telegram.BotToken)
+	viper.Set("notifications.telegram.chat_id", c.Notifications.Telegram.ChatID)
+	viper.Set("notifications.telegram.message_thread_id", c.Notifications.Telegram.MessageThreadID)
+	viper.Set("notifications.telegram.api_base", c.Notifications.Telegram.APIBase)
+	viper.Set("notifications.telegram.timeout_seconds", c.Notifications.Telegram.TimeoutSeconds)
+	viper.Set("notifications.telegram.silent", c.Notifications.Telegram.Silent)
+	viper.Set("notifications.webhook.enabled", c.Notifications.Webhook.Enabled)
+	viper.Set("notifications.webhook.url", c.Notifications.Webhook.URL)
+	viper.Set("notifications.webhook.token", c.Notifications.Webhook.Token)
+	viper.Set("notifications.webhook.timeout_seconds", c.Notifications.Webhook.TimeoutSeconds)
+
+	// 同步旧键便于旧前端和降级版本读取；当前运行时不会再从这里取值。
+	legacyTelegram := LegacyTelegramFromNotifications(c.Notifications)
+	viper.Set("telegram.enabled", legacyTelegram.Enabled)
+	viper.Set("telegram.bot_token", legacyTelegram.BotToken)
+	viper.Set("telegram.chat_id", legacyTelegram.ChatID)
+	viper.Set("telegram.message_thread_id", legacyTelegram.MessageThreadID)
+	viper.Set("telegram.instance_name", legacyTelegram.InstanceName)
+	viper.Set("telegram.api_base", legacyTelegram.APIBase)
+	viper.Set("telegram.timeout_seconds", legacyTelegram.TimeoutSeconds)
+	viper.Set("telegram.silent", legacyTelegram.Silent)
+	viper.Set("telegram.notify_emby_brute_force", legacyTelegram.NotifyEmbyBruteForce)
+	viper.Set("telegram.notify_system_brute_force", legacyTelegram.NotifySystemBruteForce)
 
 	viper.Set("emby.enabled", c.Emby.Enabled)
 	viper.Set("emby.url", c.Emby.URL)
@@ -569,6 +668,191 @@ func applyTelegramDefaults(settings *TelegramConfig) {
 	}
 }
 
+func defaultNotificationConfig() NotificationConfig {
+	return NotificationConfig{
+		InstanceName: "FilmFusion",
+		Routes: NotificationRoutesConfig{
+			EmbyBruteForce:      []string{NotificationChannelTelegram},
+			SystemBruteForce:    []string{NotificationChannelTelegram},
+			RSSMatched:          []string{NotificationChannelTelegram},
+			Web115CookieInvalid: []string{NotificationChannelTelegram},
+		},
+		Telegram: TelegramChannelConfig{
+			APIBase: "https://api.telegram.org", TimeoutSeconds: 10,
+		},
+		Webhook: NotificationWebhookConfig{TimeoutSeconds: 10},
+	}
+}
+
+// NotificationConfigFromLegacy 把旧版 Telegram 配置映射为完整通知配置。
+func NotificationConfigFromLegacy(legacy TelegramConfig) NotificationConfig {
+	settings := defaultNotificationConfig()
+	settings.InstanceName = strings.TrimSpace(legacy.InstanceName)
+	if settings.InstanceName == "" {
+		settings.InstanceName = "FilmFusion"
+	}
+	settings.Telegram = TelegramChannelConfig{
+		Enabled: legacy.Enabled, BotToken: legacy.BotToken, ChatID: legacy.ChatID,
+		MessageThreadID: legacy.MessageThreadID, APIBase: legacy.APIBase,
+		TimeoutSeconds: legacy.TimeoutSeconds, Silent: legacy.Silent,
+	}
+	if strings.TrimSpace(settings.Telegram.APIBase) == "" {
+		settings.Telegram.APIBase = "https://api.telegram.org"
+	}
+	if settings.Telegram.TimeoutSeconds <= 0 {
+		settings.Telegram.TimeoutSeconds = 10
+	}
+	if !legacy.NotifyEmbyBruteForce {
+		settings.Routes.EmbyBruteForce = []string{}
+	}
+	if !legacy.NotifySystemBruteForce {
+		settings.Routes.SystemBruteForce = []string{}
+	}
+	NormalizeNotificationConfig(&settings)
+	return settings
+}
+
+// MergeLegacyTelegram 让旧前端只更新 Telegram 与旧安全事件开关，保留其它渠道和路由。
+func MergeLegacyTelegram(current NotificationConfig, legacy TelegramConfig) NotificationConfig {
+	current.InstanceName = strings.TrimSpace(legacy.InstanceName)
+	if current.InstanceName == "" {
+		current.InstanceName = "FilmFusion"
+	}
+	current.Telegram = TelegramChannelConfig{
+		Enabled: legacy.Enabled, BotToken: legacy.BotToken, ChatID: legacy.ChatID,
+		MessageThreadID: legacy.MessageThreadID, APIBase: legacy.APIBase,
+		TimeoutSeconds: legacy.TimeoutSeconds, Silent: legacy.Silent,
+	}
+	current.Routes.EmbyBruteForce = setNotificationRouteChannel(
+		current.Routes.EmbyBruteForce, NotificationChannelTelegram, legacy.NotifyEmbyBruteForce,
+	)
+	current.Routes.SystemBruteForce = setNotificationRouteChannel(
+		current.Routes.SystemBruteForce, NotificationChannelTelegram, legacy.NotifySystemBruteForce,
+	)
+	NormalizeNotificationConfig(&current)
+	return current
+}
+
+// LegacyTelegramFromNotifications 生成旧接口兼容视图。
+func LegacyTelegramFromNotifications(settings NotificationConfig) TelegramConfig {
+	return TelegramConfig{
+		Enabled: settings.Telegram.Enabled, BotToken: settings.Telegram.BotToken,
+		ChatID: settings.Telegram.ChatID, MessageThreadID: settings.Telegram.MessageThreadID,
+		InstanceName: settings.InstanceName, APIBase: settings.Telegram.APIBase,
+		TimeoutSeconds: settings.Telegram.TimeoutSeconds, Silent: settings.Telegram.Silent,
+		NotifyEmbyBruteForce:   routeContainsChannel(settings.Routes.EmbyBruteForce, NotificationChannelTelegram),
+		NotifySystemBruteForce: routeContainsChannel(settings.Routes.SystemBruteForce, NotificationChannelTelegram),
+	}
+}
+
+func applyNotificationDefaults(cfg *Config) {
+	if !viper.InConfig("notifications") {
+		cfg.Notifications = NotificationConfigFromLegacy(cfg.Telegram)
+		cfg.Telegram = LegacyTelegramFromNotifications(cfg.Notifications)
+		return
+	}
+
+	defaults := defaultNotificationConfig()
+	settings := &cfg.Notifications
+	if !viper.InConfig("notifications.instance_name") {
+		settings.InstanceName = defaults.InstanceName
+	}
+	if !viper.InConfig("notifications.routes.emby_brute_force") {
+		settings.Routes.EmbyBruteForce = defaults.Routes.EmbyBruteForce
+	}
+	if !viper.InConfig("notifications.routes.system_brute_force") {
+		settings.Routes.SystemBruteForce = defaults.Routes.SystemBruteForce
+	}
+	if !viper.InConfig("notifications.routes.rss_matched") {
+		settings.Routes.RSSMatched = defaults.Routes.RSSMatched
+	}
+	if !viper.InConfig("notifications.routes.web_115_cookie_invalid") {
+		settings.Routes.Web115CookieInvalid = defaults.Routes.Web115CookieInvalid
+	}
+	if !viper.InConfig("notifications.telegram.api_base") {
+		settings.Telegram.APIBase = defaults.Telegram.APIBase
+	}
+	if !viper.InConfig("notifications.telegram.timeout_seconds") {
+		settings.Telegram.TimeoutSeconds = defaults.Telegram.TimeoutSeconds
+	}
+	if !viper.InConfig("notifications.webhook.timeout_seconds") {
+		settings.Webhook.TimeoutSeconds = defaults.Webhook.TimeoutSeconds
+	}
+	NormalizeNotificationConfig(settings)
+	cfg.Telegram = LegacyTelegramFromNotifications(*settings)
+}
+
+// NormalizeNotificationConfig 规范化渠道标识、URL 和事件路由。
+func NormalizeNotificationConfig(settings *NotificationConfig) {
+	if settings == nil {
+		return
+	}
+	settings.InstanceName = strings.TrimSpace(settings.InstanceName)
+	if settings.InstanceName == "" {
+		settings.InstanceName = "FilmFusion"
+	}
+	settings.Telegram.BotToken = strings.TrimSpace(settings.Telegram.BotToken)
+	settings.Telegram.ChatID = strings.TrimSpace(settings.Telegram.ChatID)
+	settings.Telegram.APIBase = strings.TrimRight(strings.TrimSpace(settings.Telegram.APIBase), "/")
+	if settings.Telegram.APIBase == "" {
+		settings.Telegram.APIBase = "https://api.telegram.org"
+	}
+	if settings.Telegram.TimeoutSeconds <= 0 {
+		settings.Telegram.TimeoutSeconds = 10
+	}
+	settings.Webhook.URL = strings.TrimSpace(settings.Webhook.URL)
+	settings.Webhook.Token = strings.TrimSpace(settings.Webhook.Token)
+	if settings.Webhook.TimeoutSeconds <= 0 {
+		settings.Webhook.TimeoutSeconds = 10
+	}
+	settings.Routes.EmbyBruteForce = normalizeNotificationRoute(settings.Routes.EmbyBruteForce)
+	settings.Routes.SystemBruteForce = normalizeNotificationRoute(settings.Routes.SystemBruteForce)
+	settings.Routes.RSSMatched = normalizeNotificationRoute(settings.Routes.RSSMatched)
+	settings.Routes.Web115CookieInvalid = normalizeNotificationRoute(settings.Routes.Web115CookieInvalid)
+}
+
+func normalizeNotificationRoute(channels []string) []string {
+	if channels == nil {
+		return []string{}
+	}
+	result := make([]string, 0, len(channels))
+	seen := make(map[string]struct{}, len(channels))
+	for _, channel := range channels {
+		channel = strings.ToLower(strings.TrimSpace(channel))
+		if channel == "" {
+			continue
+		}
+		if _, ok := seen[channel]; ok {
+			continue
+		}
+		seen[channel] = struct{}{}
+		result = append(result, channel)
+	}
+	return result
+}
+
+func routeContainsChannel(channels []string, channel string) bool {
+	for _, current := range channels {
+		if strings.EqualFold(strings.TrimSpace(current), channel) {
+			return true
+		}
+	}
+	return false
+}
+
+func setNotificationRouteChannel(channels []string, channel string, enabled bool) []string {
+	result := make([]string, 0, len(channels)+1)
+	for _, current := range normalizeNotificationRoute(channels) {
+		if current != channel {
+			result = append(result, current)
+		}
+	}
+	if enabled {
+		result = append(result, channel)
+	}
+	return result
+}
+
 // Viper does not reliably unmarshal nested defaults into a struct when the
 // parent map is absent from an existing config file. Fill only keys that were
 // not explicitly provided so existing zero values keep their meaning.
@@ -648,7 +932,7 @@ func validateConfig(config *Config) error {
 	if err := ValidateEmbySecurity(config.Emby.Security); err != nil {
 		return err
 	}
-	if err := ValidateTelegram(config.Telegram); err != nil {
+	if err := ValidateNotifications(config.Notifications); err != nil {
 		return err
 	}
 	if err := ValidateWebhook(config.Webhook); err != nil {
@@ -783,7 +1067,38 @@ func ValidateLoginSecurity(name string, settings LoginSecurityConfig) error {
 	return nil
 }
 
-func ValidateTelegram(settings TelegramConfig) error {
+// ValidateNotifications 校验事件路由和所有通知渠道。
+func ValidateNotifications(settings NotificationConfig) error {
+	if strings.TrimSpace(settings.InstanceName) == "" {
+		return fmt.Errorf("通知实例名称不能为空")
+	}
+	if len([]rune(settings.InstanceName)) > 120 {
+		return fmt.Errorf("通知实例名称不能超过 120 个字符")
+	}
+	if err := ValidateTelegramChannel(settings.Telegram); err != nil {
+		return err
+	}
+	if err := ValidateNotificationWebhook(settings.Webhook); err != nil {
+		return err
+	}
+	for event, channels := range map[string][]string{
+		NotificationEventEmbySecurity:  settings.Routes.EmbyBruteForce,
+		NotificationEventAppSecurity:   settings.Routes.SystemBruteForce,
+		NotificationEventRSSMatched:    settings.Routes.RSSMatched,
+		NotificationEventWeb115Invalid: settings.Routes.Web115CookieInvalid,
+	} {
+		for _, channel := range channels {
+			switch strings.ToLower(strings.TrimSpace(channel)) {
+			case NotificationChannelTelegram, NotificationChannelWebhook:
+			default:
+				return fmt.Errorf("通知事件 %s 包含未知渠道: %s", event, channel)
+			}
+		}
+	}
+	return nil
+}
+
+func ValidateTelegramChannel(settings TelegramChannelConfig) error {
 	if settings.MessageThreadID < 0 {
 		return fmt.Errorf("Telegram 话题 ID 不能小于 0")
 	}
@@ -802,6 +1117,31 @@ func ValidateTelegram(settings TelegramConfig) error {
 	parsed, err := url.ParseRequestURI(strings.TrimSpace(settings.APIBase))
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return fmt.Errorf("Telegram API 地址无效")
+	}
+	return nil
+}
+
+// ValidateTelegram 保留旧配置校验入口。
+func ValidateTelegram(settings TelegramConfig) error {
+	return ValidateTelegramChannel(NotificationConfigFromLegacy(settings).Telegram)
+}
+
+func ValidateNotificationWebhook(settings NotificationWebhookConfig) error {
+	if strings.ContainsAny(settings.Token, "\r\n") {
+		return fmt.Errorf("通知 Webhook Token 不能包含换行")
+	}
+	if !settings.Enabled {
+		return nil
+	}
+	if settings.TimeoutSeconds <= 0 {
+		return fmt.Errorf("通知 Webhook 请求超时必须大于 0")
+	}
+	parsed, err := url.ParseRequestURI(strings.TrimSpace(settings.URL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("通知 Webhook URL 无效")
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("通知 Webhook URL 不能包含用户名或密码，请使用 Token 字段")
 	}
 	return nil
 }

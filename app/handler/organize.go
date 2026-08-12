@@ -116,23 +116,25 @@ type Organize115CookieGroup struct {
 }
 
 type Organize115CookieResult struct {
-	CloudDirectoryID         uint                     `json:"cloud_directory_id"`
-	CloudStorageID           uint                     `json:"cloud_storage_id"`
-	FolderID                 string                   `json:"folder_id"`
-	FolderIDs                []string                 `json:"folder_ids,omitempty"`
-	MediaType                string                   `json:"media_type,omitempty"`
-	Category                 string                   `json:"category,omitempty"`
-	BestVersionEnabled       bool                     `json:"best_version_enabled,omitempty"`
-	DryRun                   bool                     `json:"dry_run"`
-	Total                    int                      `json:"total"`
-	DirDebug                 []Organize115DirDebug    `json:"dir_debug,omitempty"`
-	Items                    []Organize115ItemResult  `json:"items,omitempty"`
-	TmdbRefs                 []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
-	VersionGroups            []OrganizeVersionGroup   `json:"version_groups,omitempty"`
-	Groups                   []Organize115CookieGroup `json:"groups,omitempty"`
-	SourceFolderDeleted      bool                     `json:"source_folder_deleted,omitempty"`
-	SourceFolderDeletedCount int                      `json:"source_folder_deleted_count,omitempty"`
-	SourceFolderDeleteErrors []string                 `json:"source_folder_delete_errors,omitempty"`
+	CloudDirectoryID               uint                     `json:"cloud_directory_id"`
+	CloudStorageID                 uint                     `json:"cloud_storage_id"`
+	FolderID                       string                   `json:"folder_id"`
+	FolderIDs                      []string                 `json:"folder_ids,omitempty"`
+	MediaType                      string                   `json:"media_type,omitempty"`
+	Category                       string                   `json:"category,omitempty"`
+	BestVersionEnabled             bool                     `json:"best_version_enabled,omitempty"`
+	DryRun                         bool                     `json:"dry_run"`
+	Total                          int                      `json:"total"`
+	DirDebug                       []Organize115DirDebug    `json:"dir_debug,omitempty"`
+	Items                          []Organize115ItemResult  `json:"items,omitempty"`
+	TmdbRefs                       []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
+	VersionGroups                  []OrganizeVersionGroup   `json:"version_groups,omitempty"`
+	Groups                         []Organize115CookieGroup `json:"groups,omitempty"`
+	SourceFolderDeleted            bool                     `json:"source_folder_deleted,omitempty"`
+	SourceFolderDeletedCount       int                      `json:"source_folder_deleted_count,omitempty"`
+	SourceFolderDeletePending      bool                     `json:"source_folder_delete_pending,omitempty"`
+	SourceFolderDeletePendingCount int                      `json:"source_folder_delete_pending_count,omitempty"`
+	SourceFolderDeleteErrors       []string                 `json:"source_folder_delete_errors,omitempty"`
 }
 
 type organizeFactSummary struct {
@@ -1701,26 +1703,80 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	groups := make([]Organize115CookieGroup, 0, len(folderIDs))
 	totalFiles := 0
 	flatDirDebug := make([]Organize115DirDebug, 0)
+	sourceFolderDeletedCount := 0
+	sourceFolderDeletePendingCount := 0
+	sourceFolderDeleteErrors := make([]string, 0)
 
 	for _, folderID := range folderIDs {
+		var sourceFolderDeletionID uint
+		if req.DeleteSourceFolder && !req.DryRun {
+			deleteTaskID, beginErr := h.download115Svc.BeginSourceFolderDeletion(dir.CloudStorageID, folderID)
+			if beginErr != nil {
+				message := fmt.Sprintf("创建延迟删除任务失败，未执行整理并已保留原文件夹: %v", beginErr)
+				sourceFolderDeleteErrors = append(sourceFolderDeleteErrors, fmt.Sprintf("%s: %s", folderID, message))
+				groups = append(groups, Organize115CookieGroup{FolderID: folderID, Error: message})
+				continue
+			}
+			sourceFolderDeletionID = deleteTaskID
+		}
+
 		group := h.processOrganize115CookieFolder(
 			processOrganizeArgs{
-				dir:                dir,
-				storage:            storage,
-				webClient:          webClient,
-				categoryCfg:        categoryCfg,
-				includeExts:        includeExts,
-				excludeExts:        excludeExts,
-				folderID:           folderID,
-				context:            folderContexts[folderID],
-				fileIDs:            fileIDSet,
-				dryRun:             req.DryRun,
-				mediaType:          mediaType,
-				category:           category,
-				bestVersionEnabled: bestVersionEnabled,
-				filename:           filenameProcessor,
+				dir:                    dir,
+				storage:                storage,
+				webClient:              webClient,
+				categoryCfg:            categoryCfg,
+				includeExts:            includeExts,
+				excludeExts:            excludeExts,
+				folderID:               folderID,
+				context:                folderContexts[folderID],
+				fileIDs:                fileIDSet,
+				dryRun:                 req.DryRun,
+				mediaType:              mediaType,
+				category:               category,
+				bestVersionEnabled:     bestVersionEnabled,
+				filename:               filenameProcessor,
+				sourceFolderDeletionID: sourceFolderDeletionID,
 			},
 		)
+		if sourceFolderDeletionID != 0 {
+			queueError := firstOrganizeSubtitleQueueError(group.Items)
+			switch {
+			case strings.TrimSpace(group.Error) != "":
+				if cancelErr := h.download115Svc.CancelSourceFolderDeletion(sourceFolderDeletionID); cancelErr != nil {
+					sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+						fmt.Sprintf("%s: 整理失败且取消延迟删除任务失败，源文件夹不会被删除: %v", folderID, cancelErr))
+				} else {
+					sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+						fmt.Sprintf("%s: 整理未成功，已保留原文件夹: %s", folderID, group.Error))
+				}
+			case queueError != "":
+				if cancelErr := h.download115Svc.CancelSourceFolderDeletion(sourceFolderDeletionID); cancelErr != nil {
+					sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+						fmt.Sprintf("%s: 字幕未全部入队且取消延迟删除任务失败，源文件夹不会被删除: %v", folderID, cancelErr))
+				} else {
+					sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+						fmt.Sprintf("%s: 字幕未全部加入下载队列，已保留原文件夹: %s", folderID, queueError))
+				}
+			default:
+				schedule, armErr := h.download115Svc.ArmSourceFolderDeletion(sourceFolderDeletionID)
+				if schedule.Deleted {
+					sourceFolderDeletedCount++
+				} else if schedule.Pending {
+					sourceFolderDeletePendingCount++
+				}
+				if armErr != nil {
+					if !schedule.Pending && !schedule.Deleted {
+						_ = h.download115Svc.CancelSourceFolderDeletion(sourceFolderDeletionID)
+						sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+							fmt.Sprintf("%s: 启用延迟删除失败，已保留原文件夹: %v", folderID, armErr))
+					} else {
+						sourceFolderDeleteErrors = append(sourceFolderDeleteErrors,
+							fmt.Sprintf("%s: 原文件夹暂未删除，将自动重试: %v", folderID, armErr))
+					}
+				}
+			}
+		}
 		totalFiles += group.Total
 		flatDirDebug = append(flatDirDebug, group.DirDebug...)
 		groups = append(groups, group)
@@ -1729,90 +1785,46 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		bestVersionEnabled: bestVersionEnabled,
 	})
 	versionGroups := buildOrganizeVersionGroups(flatItems)
-	sourceFolderDeletedCount := 0
-	var sourceFolderDeleteErrors []string
-	if req.DeleteSourceFolder && !req.DryRun {
-		sourceFolderDeletedCount, sourceFolderDeleteErrors = h.deleteOrganizeSourceFolders(webClient, groups)
-	}
-
 	primaryFolderID := folderIDs[0]
 
 	return Organize115CookieResult{
-		CloudDirectoryID:         req.CloudDirectoryID,
-		CloudStorageID:           dir.CloudStorageID,
-		FolderID:                 primaryFolderID,
-		FolderIDs:                folderIDs,
-		MediaType:                mediaType,
-		Category:                 category,
-		BestVersionEnabled:       bestVersionEnabled,
-		DryRun:                   req.DryRun,
-		Total:                    totalFiles,
-		DirDebug:                 flatDirDebug,
-		Items:                    flatItems,
-		VersionGroups:            versionGroups,
-		Groups:                   groups,
-		SourceFolderDeleted:      sourceFolderDeletedCount > 0,
-		SourceFolderDeletedCount: sourceFolderDeletedCount,
-		SourceFolderDeleteErrors: sourceFolderDeleteErrors,
+		CloudDirectoryID:               req.CloudDirectoryID,
+		CloudStorageID:                 dir.CloudStorageID,
+		FolderID:                       primaryFolderID,
+		FolderIDs:                      folderIDs,
+		MediaType:                      mediaType,
+		Category:                       category,
+		BestVersionEnabled:             bestVersionEnabled,
+		DryRun:                         req.DryRun,
+		Total:                          totalFiles,
+		DirDebug:                       flatDirDebug,
+		Items:                          flatItems,
+		VersionGroups:                  versionGroups,
+		Groups:                         groups,
+		SourceFolderDeleted:            sourceFolderDeletedCount > 0,
+		SourceFolderDeletedCount:       sourceFolderDeletedCount,
+		SourceFolderDeletePending:      sourceFolderDeletePendingCount > 0,
+		SourceFolderDeletePendingCount: sourceFolderDeletePendingCount,
+		SourceFolderDeleteErrors:       sourceFolderDeleteErrors,
 	}, nil
 }
 
-func (h *OrganizeHandler) deleteOrganizeSourceFolders(webClient *driver.Pan115Client, groups []Organize115CookieGroup) (int, []string) {
-	deletedCount := 0
-	folderIDs, errorsOut := collectOrganizeSourceFolderDeleteTargets(groups)
-
-	for _, folderID := range folderIDs {
-		if err := h.web115Svc.DeleteFilesWithClient(webClient, []string{folderID}); err != nil {
-			errorsOut = append(errorsOut, fmt.Sprintf("%s: %v", folderID, err))
-			h.logger.Warnf("删除整理源文件夹失败 folder_id=%s err=%v", folderID, err)
-			continue
-		}
-		deletedCount++
-	}
-
-	return deletedCount, errorsOut
-}
-
-func collectOrganizeSourceFolderDeleteTargets(groups []Organize115CookieGroup) ([]string, []string) {
-	folderIDs := make([]string, 0)
-	errorsOut := make([]string, 0)
-	seen := make(map[string]struct{})
-
-	for _, group := range groups {
-		folderID := strings.TrimSpace(group.FolderID)
-		if folderID == "" || folderID == "0" {
-			continue
-		}
-		if _, ok := seen[folderID]; ok {
-			continue
-		}
-		seen[folderID] = struct{}{}
-
-		if strings.TrimSpace(group.Error) != "" {
-			errorsOut = append(errorsOut, fmt.Sprintf("%s: 整理未成功，跳过删除原文件夹: %s", folderID, group.Error))
-			continue
-		}
-		folderIDs = append(folderIDs, folderID)
-	}
-
-	return folderIDs, errorsOut
-}
-
 type processOrganizeArgs struct {
-	dir                model.CloudDirectory
-	storage            *model.CloudStorage
-	webClient          *driver.Pan115Client
-	categoryCfg        service.MoviePilotCategoryConfig
-	includeExts        []string
-	excludeExts        []string
-	folderID           string
-	context            Organize115FolderContext
-	fileIDs            map[string]struct{}
-	dryRun             bool
-	mediaType          string
-	category           string
-	bestVersionEnabled bool
-	filename           filenameRegexProcessor
+	dir                    model.CloudDirectory
+	storage                *model.CloudStorage
+	webClient              *driver.Pan115Client
+	categoryCfg            service.MoviePilotCategoryConfig
+	includeExts            []string
+	excludeExts            []string
+	folderID               string
+	context                Organize115FolderContext
+	fileIDs                map[string]struct{}
+	dryRun                 bool
+	mediaType              string
+	category               string
+	bestVersionEnabled     bool
+	filename               filenameRegexProcessor
+	sourceFolderDeletionID uint
 }
 
 type filenameRegexProcessor struct {
@@ -2069,7 +2081,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		}
 	}
 
-	if err := h.enqueueSubtitleDownloads(dir, storage, &results, dryRun); err != nil {
+	if err := h.enqueueSubtitleDownloads(dir, storage, &results, dryRun, args.sourceFolderDeletionID); err != nil {
 		group.Error = err.Error()
 		group.Items = results
 		return group
@@ -3784,7 +3796,7 @@ func (h *OrganizeHandler) populateLocalLibraryStatus(dir model.CloudDirectory, i
 	}
 }
 
-func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, storage *model.CloudStorage, items *[]Organize115ItemResult, dryRun bool) error {
+func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, storage *model.CloudStorage, items *[]Organize115ItemResult, dryRun bool, sourceFolderDeletionID uint) error {
 	if items == nil || len(*items) == 0 {
 		return nil
 	}
@@ -3816,7 +3828,13 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 			continue
 		}
 		downloadPath := pathhelper.SafeFilePathJoin(savePath, item.TargetPath)
-		if err := h.download115Svc.AddDownloadTask(storage.ID, item.PickCode, downloadPath); err != nil {
+		var err error
+		if sourceFolderDeletionID != 0 {
+			err = h.download115Svc.AddDownloadTaskForSourceFolderDeletion(storage.ID, item.PickCode, downloadPath, sourceFolderDeletionID)
+		} else {
+			err = h.download115Svc.AddDownloadTask(storage.ID, item.PickCode, downloadPath)
+		}
+		if err != nil {
 			item.SubtitleError = err.Error()
 			continue
 		}
@@ -3824,6 +3842,18 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 	}
 
 	return nil
+}
+
+func firstOrganizeSubtitleQueueError(items []Organize115ItemResult) string {
+	for _, item := range items {
+		if !isOrganizeSubtitleItem(item) {
+			continue
+		}
+		if message := strings.TrimSpace(item.SubtitleError); message != "" {
+			return fmt.Sprintf("%s: %s", item.FileName, message)
+		}
+	}
+	return ""
 }
 
 func attachOrganizeSubtitles(subtitles []service.Web115File, items *[]Organize115ItemResult) {

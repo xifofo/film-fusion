@@ -147,4 +147,20 @@ func TestAppConfigUpdatePayloadDistinguishesMissingAndEmpty115UserAgent(t *testi
 	if empty.Config.Server.Web115UserAgent != "" {
 		t.Fatalf("empty web_115_user_agent decoded as %q", empty.Config.Server.Web115UserAgent)
 	}
+
+	var notifications appConfigUpdatePayload
+	if err := json.Unmarshal([]byte(`{"config":{"notifications":{"instance_name":"FilmFusion"}}}`), &notifications); err != nil {
+		t.Fatalf("decode notifications payload: %v", err)
+	}
+	if !notifications.notificationsFieldPresent || notifications.telegramFieldPresent {
+		t.Fatalf("notification field presence was not detected: %+v", notifications)
+	}
+
+	var legacy appConfigUpdatePayload
+	if err := json.Unmarshal([]byte(`{"config":{"telegram":{"enabled":true}}}`), &legacy); err != nil {
+		t.Fatalf("decode legacy Telegram payload: %v", err)
+	}
+	if legacy.notificationsFieldPresent || !legacy.telegramFieldPresent {
+		t.Fatalf("legacy Telegram field presence was not detected: %+v", legacy)
+	}
 }

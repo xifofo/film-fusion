@@ -38,8 +38,9 @@ type Server struct {
 	embyProxyServer        *EmbyProxyServer
 	embyLoginProtection    *service.EmbyLoginProtection
 	appLoginProtection     *service.EmbyLoginProtection
-	telegramNotifier       *service.TelegramNotifier
+	notificationService    *service.NotificationService
 	rssMonitorService      *service.RSSMonitorService
+	rssAutomationService   *service.RSSAutomationService
 	taskQueue              *service.PersistentTaskQueue
 }
 
@@ -77,7 +78,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
 	embyMissingService := service.NewEmbyMissingService(cfg, log, embyClient)
-	telegramNotifier := service.NewTelegramNotifier(cfg, log)
+	notificationService := service.NewNotificationService(cfg, log)
 
 	s := &Server{
 		gin: router,
@@ -89,7 +90,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Logger:                 log,
 		tokenRefreshService:    service.NewTokenRefreshService(log),
 		hdhiveRefreshService:   service.NewHDHiveTokenRefreshService(cfg, log),
-		web115KeepAliveService: service.NewWeb115KeepAliveService(cfg, log, telegramNotifier),
+		web115KeepAliveService: service.NewWeb115KeepAliveService(cfg, log, notificationService),
 		download115Service:     download115Service,
 		moviePilotService:      moviePilotService,
 		tmdbService:            tmdbService,
@@ -100,12 +101,13 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		balanceCleanupSvc:      service.NewBalanceCleanupService(log),
 		embyClient:             embyClient,
 		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
-		telegramNotifier:       telegramNotifier,
+		notificationService:    notificationService,
 		taskQueue:              taskQueue,
 	}
-	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.telegramNotifier, s.moviePilotService)
-	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.telegramNotifier)
-	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.telegramNotifier)
+	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.notificationService, s.moviePilotService)
+	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService)
+	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.notificationService)
+	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.notificationService)
 
 	// 设置路由
 	s.setupRoutes()
@@ -163,6 +165,9 @@ func (s *Server) Start() error {
 	// 启动 RSS 增量监控调度
 	s.rssMonitorService.Start()
 
+	// 启动独立的 RSS 自动化流程调度
+	s.rssAutomationService.Start()
+
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Start(); err != nil {
@@ -213,6 +218,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.rssMonitorService.Stop()
 	}
 
+	if s.rssAutomationService != nil {
+		s.rssAutomationService.Stop()
+	}
+
 	// 停止Emby代理服务器
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Stop(ctx); err != nil {
@@ -258,8 +267,9 @@ func (s *Server) setupRoutes() {
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
-	telegramHandler := handler.NewTelegramHandler(s.telegramNotifier)
+	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
+	rssAutomationHandler := handler.NewRSSAutomationHandler(s.rssAutomationService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -331,7 +341,9 @@ func (s *Server) setupRoutes() {
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
 		protected.POST("/site-assets/login-background", appConfigHandler.UploadLoginBackground)
-		protected.POST("/telegram/test", telegramHandler.Test)
+		protected.POST("/notifications/channels/:channel/test", notificationHandler.TestChannel)
+		// 旧版前端兼容入口。
+		protected.POST("/telegram/test", notificationHandler.TestTelegram)
 
 		rssMonitor := protected.Group("/rss-monitor")
 		{
@@ -345,6 +357,26 @@ func (s *Server) setupRoutes() {
 			rssMonitor.PUT("/rules/:id", rssMonitorHandler.UpdateRule)
 			rssMonitor.DELETE("/rules/:id", rssMonitorHandler.DeleteRule)
 			rssMonitor.POST("/rules/test", rssMonitorHandler.TestRule)
+		}
+
+		rssAutomation := protected.Group("/rss-automation")
+		{
+			rssAutomation.GET("", rssAutomationHandler.Dashboard)
+			rssAutomation.POST("/automations", rssAutomationHandler.CreateAutomation)
+			rssAutomation.DELETE("/automations/:id", rssAutomationHandler.DeleteAutomation)
+			rssAutomation.PUT("/sources/:id", rssAutomationHandler.UpdateSource)
+			rssAutomation.POST("/sources/sample", rssAutomationHandler.SampleSource)
+			rssAutomation.POST("/refresh", rssAutomationHandler.Refresh)
+			rssAutomation.POST("/workflows/validate", rssAutomationHandler.ValidateWorkflow)
+			rssAutomation.PUT("/workflows/:id", rssAutomationHandler.UpdateWorkflow)
+			rssAutomation.POST("/targets", rssAutomationHandler.CreateTarget)
+			rssAutomation.PUT("/targets/:id", rssAutomationHandler.UpdateTarget)
+			rssAutomation.DELETE("/targets/:id", rssAutomationHandler.DeleteTarget)
+			rssAutomation.POST("/targets/:id/test", rssAutomationHandler.TestTarget)
+			rssAutomation.GET("/runs", rssAutomationHandler.ListRuns)
+			rssAutomation.GET("/runs/:id", rssAutomationHandler.GetRun)
+			rssAutomation.POST("/runs/:id/retry", rssAutomationHandler.RetryRun)
+			rssAutomation.POST("/runs/:id/cancel", rssAutomationHandler.CancelRun)
 		}
 
 		config := protected.Group("/config")
@@ -430,6 +462,10 @@ func (s *Server) setupRoutes() {
 			// cookie 保活：手动换端续期 + 状态查询
 			web115.POST("/keepalive/refresh", web115CookieHandler.RefreshCookie)
 			web115.GET("/keepalive/status", web115CookieHandler.KeepaliveStatus)
+		}
+		web115Open := protected.Group("/115-open")
+		{
+			web115Open.POST("/dirs", web115CookieHandler.ListDirectoriesOpenAPI)
 		}
 
 		// STRM 相关路由

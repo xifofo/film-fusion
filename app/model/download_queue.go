@@ -6,18 +6,20 @@ import (
 
 // Download115Queue 115Open专用下载队列模型（极简版）
 type Download115Queue struct {
-	ID             uint      `json:"id" gorm:"primarykey"`
-	CloudStorageID uint      `json:"cloud_storage_id" gorm:"not null;index;comment:云存储配置ID"` // 关联的云存储配置ID
-	PickCode       string    `json:"pick_code" gorm:"not null;uniqueIndex"`                  // 115文件的pickcode，唯一索引
-	SavePath       string    `json:"save_path" gorm:"not null"`                              // 保存地址
-	RetryCount     int       `json:"retry_count" gorm:"default:0;comment:重试次数"`              // 当前重试次数
-	MaxRetryCount  int       `json:"max_retry_count" gorm:"default:3;comment:最大重试次数"`        // 最大重试次数
-	LastError      string    `json:"last_error" gorm:"type:text;comment:最后一次错误信息"`           // 最后一次错误信息
-	Status         string    `json:"status" gorm:"size:20;default:pending;comment:状态"`       // 状态：pending, downloading, completed, failed
-	CreatedAt      time.Time `json:"created_at"`
+	ID                     uint      `json:"id" gorm:"primarykey"`
+	CloudStorageID         uint      `json:"cloud_storage_id" gorm:"not null;index;comment:云存储配置ID"` // 关联的云存储配置ID
+	SourceFolderDeletionID *uint     `json:"source_folder_deletion_id,omitempty" gorm:"index;comment:下载完成后触发的源文件夹删除任务ID"`
+	PickCode               string    `json:"pick_code" gorm:"not null;uniqueIndex"`            // 115文件的pickcode，唯一索引
+	SavePath               string    `json:"save_path" gorm:"not null"`                        // 保存地址
+	RetryCount             int       `json:"retry_count" gorm:"default:0;comment:重试次数"`        // 当前重试次数
+	MaxRetryCount          int       `json:"max_retry_count" gorm:"default:3;comment:最大重试次数"`  // 最大重试次数
+	LastError              string    `json:"last_error" gorm:"type:text;comment:最后一次错误信息"`     // 最后一次错误信息
+	Status                 string    `json:"status" gorm:"size:20;default:pending;comment:状态"` // 状态：pending, downloading, completed, failed
+	CreatedAt              time.Time `json:"created_at"`
 
 	// 关联关系
-	CloudStorage *CloudStorage `gorm:"foreignKey:CloudStorageID" json:"cloud_storage,omitempty"`
+	CloudStorage         *CloudStorage                     `gorm:"foreignKey:CloudStorageID" json:"cloud_storage,omitempty"`
+	SourceFolderDeletion *OrganizeSourceFolderDeletionTask `gorm:"foreignKey:SourceFolderDeletionID;constraint:OnUpdate:CASCADE,OnDelete:SET NULL;" json:"-"`
 }
 
 // TableName 指定表名

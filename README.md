@@ -64,6 +64,8 @@ jwt:
 JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工配置。
 115 默认 App 与浏览器 UA 首次从上述 YAML 导入，之后只保存在数据库并通过系统设置维护；UA 暂未接入请求。
 
+通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、RSS 命中和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。
+
 ### Emby 集成配置
 ```yaml
 emby:

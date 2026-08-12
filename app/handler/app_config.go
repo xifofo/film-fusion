@@ -95,17 +95,23 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
 	v.Site = h.currentSiteConfig()
 	v.Server.Cookie115DefaultApp, v.Server.Web115UserAgent = h.current115Settings()
+	if v.Notifications.IsZero() {
+		v.Notifications = config.NotificationConfigFromLegacy(v.Telegram)
+	}
+	v.Telegram = config.LegacyTelegramFromNotifications(v.Notifications)
 	secrets := gin.H{
-		"server.password":           h.cfg.Server.Password != "",
-		"webhook.clouddrive2.token": h.cfg.Webhook.CloudDrive2.Token != "",
-		"emby.api_key":              h.cfg.Emby.APIKey != "",
-		"moviepilot.password":       h.cfg.MoviePilot.Password != "",
-		"tmdb.api_key":              h.cfg.TMDB.APIKey != "",
-		"tmdb.access_token":         h.cfg.TMDB.AccessToken != "",
-		"telegram.bot_token":        h.cfg.Telegram.BotToken != "",
-		"hdhive.api_key":            h.cfg.HDHive.APIKey != "",
-		"hdhive.access_token":       h.cfg.HDHive.AccessToken != "",
-		"hdhive.refresh_token":      h.cfg.HDHive.RefreshToken != "",
+		"server.password":                  h.cfg.Server.Password != "",
+		"webhook.clouddrive2.token":        h.cfg.Webhook.CloudDrive2.Token != "",
+		"emby.api_key":                     h.cfg.Emby.APIKey != "",
+		"moviepilot.password":              h.cfg.MoviePilot.Password != "",
+		"tmdb.api_key":                     h.cfg.TMDB.APIKey != "",
+		"tmdb.access_token":                h.cfg.TMDB.AccessToken != "",
+		"notifications.telegram.bot_token": h.cfg.Notifications.Telegram.BotToken != "",
+		"notifications.webhook.token":      h.cfg.Notifications.Webhook.Token != "",
+		"telegram.bot_token":               h.cfg.Notifications.Telegram.BotToken != "",
+		"hdhive.api_key":                   h.cfg.HDHive.APIKey != "",
+		"hdhive.access_token":              h.cfg.HDHive.AccessToken != "",
+		"hdhive.refresh_token":             h.cfg.HDHive.RefreshToken != "",
 	}
 	v.Server.Password = ""
 	v.Webhook.CloudDrive2.Token = ""
@@ -113,6 +119,8 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v.MoviePilot.Password = ""
 	v.TMDB.APIKey = ""
 	v.TMDB.AccessToken = ""
+	v.Notifications.Telegram.BotToken = ""
+	v.Notifications.Webhook.Token = ""
 	v.Telegram.BotToken = ""
 	v.HDHive.APIKey = ""
 	v.HDHive.AccessToken = ""
@@ -124,6 +132,8 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 type appConfigUpdatePayload struct {
 	Config                      config.Config `json:"config"`
 	web115UserAgentFieldPresent bool
+	notificationsFieldPresent   bool
+	telegramFieldPresent        bool
 }
 
 func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
@@ -141,12 +151,16 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 	}
 
 	var fields struct {
-		Server map[string]json.RawMessage `json:"server"`
+		Server        map[string]json.RawMessage `json:"server"`
+		Notifications json.RawMessage            `json:"notifications"`
+		Telegram      json.RawMessage            `json:"telegram"`
 	}
 	if err := json.Unmarshal(raw.Config, &fields); err != nil {
 		return err
 	}
 	_, p.web115UserAgentFieldPresent = fields.Server["web_115_user_agent"]
+	p.notificationsFieldPresent = len(fields.Notifications) > 0 && string(fields.Notifications) != "null"
+	p.telegramFieldPresent = len(fields.Telegram) > 0 && string(fields.Telegram) != "null"
 	return nil
 }
 
@@ -178,8 +192,12 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if in.Server.Security.IsZero() {
 		in.Server.Security = h.cfg.Server.Security
 	}
-	if in.Telegram.IsZero() {
-		in.Telegram = h.cfg.Telegram
+	if !payload.notificationsFieldPresent {
+		if payload.telegramFieldPresent {
+			in.Notifications = config.MergeLegacyTelegram(h.cfg.Notifications, in.Telegram)
+		} else {
+			in.Notifications = h.cfg.Notifications
+		}
 	}
 
 	// 密钥脱敏：前端留空表示沿用旧值
@@ -203,9 +221,14 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	if strings.TrimSpace(in.TMDB.AccessToken) == "" {
 		in.TMDB.AccessToken = h.cfg.TMDB.AccessToken
 	}
-	if strings.TrimSpace(in.Telegram.BotToken) == "" {
-		in.Telegram.BotToken = h.cfg.Telegram.BotToken
+	if strings.TrimSpace(in.Notifications.Telegram.BotToken) == "" {
+		in.Notifications.Telegram.BotToken = h.cfg.Notifications.Telegram.BotToken
 	}
+	if strings.TrimSpace(in.Notifications.Webhook.Token) == "" {
+		in.Notifications.Webhook.Token = h.cfg.Notifications.Webhook.Token
+	}
+	config.NormalizeNotificationConfig(&in.Notifications)
+	in.Telegram = config.LegacyTelegramFromNotifications(in.Notifications)
 	if strings.TrimSpace(in.HDHive.APIKey) == "" {
 		in.HDHive.APIKey = h.cfg.HDHive.APIKey
 	}
@@ -321,7 +344,7 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
-	if err := config.ValidateTelegram(in.Telegram); err != nil {
+	if err := config.ValidateNotifications(in.Notifications); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
