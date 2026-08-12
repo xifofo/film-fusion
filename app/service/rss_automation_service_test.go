@@ -236,3 +236,38 @@ func TestRSSAutomationOneToOneLifecycle(t *testing.T) {
 		t.Fatalf("删除后仍残留一对一配置: sources=%d workflows=%d", sourceCount, workflowCount)
 	}
 }
+
+func TestSetRSSAutomationEnabledSynchronizesSourceAndWorkflow(t *testing.T) {
+	db := newRSSAutomationTestDB(t)
+	automation := &RSSAutomationService{
+		db: db, sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
+	}
+	created, err := automation.CreateAutomation(RSSAutomationCreateInput{
+		Source: RSSAutomationSourceInput{
+			Name: "动画更新", Enabled: true, FeedURL: "https://example.com/feed.xml",
+			IntervalMinutes: 5, Mapping: DefaultRSSAutomationMapping(),
+		},
+		Workflow: RSSAutomationCreateWorkflowInput{
+			Name: "下载新条目", Enabled: true, Definition: DefaultRSSAutomationDefinition(),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateAutomation() error = %v", err)
+	}
+
+	disabled, err := automation.SetAutomationEnabled(created.Source.ID, false)
+	if err != nil {
+		t.Fatalf("SetAutomationEnabled(false) error = %v", err)
+	}
+	if disabled.Source.Enabled || disabled.Workflow.Enabled {
+		t.Fatalf("automation was not disabled: %#v", disabled)
+	}
+
+	enabled, err := automation.SetAutomationEnabled(created.Source.ID, true)
+	if err != nil {
+		t.Fatalf("SetAutomationEnabled(true) error = %v", err)
+	}
+	if !enabled.Source.Enabled || !enabled.Workflow.Enabled {
+		t.Fatalf("automation was not enabled: %#v", enabled)
+	}
+}

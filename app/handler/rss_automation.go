@@ -19,6 +19,10 @@ type RSSAutomationHandler struct {
 	service *service.RSSAutomationService
 }
 
+type rssAutomationEnabledPayload struct {
+	Enabled *bool `json:"enabled"`
+}
+
 func NewRSSAutomationHandler(automation *service.RSSAutomationService) *RSSAutomationHandler {
 	return &RSSAutomationHandler{service: automation}
 }
@@ -71,6 +75,30 @@ func (h *RSSAutomationHandler) DeleteAutomation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, NewSuccessResponse("RSS 自动化已删除", gin.H{}))
+}
+
+func (h *RSSAutomationHandler) SetAutomationEnabled(c *gin.Context) {
+	id, ok := rssAutomationID(c, "RSS 自动化")
+	if !ok {
+		return
+	}
+	var input rssAutomationEnabledPayload
+	if !bindRSSAutomationJSON(c, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("enabled 不能为空", ""))
+		return
+	}
+	updated, err := h.service.SetAutomationEnabled(id, *input.Enabled)
+	if respondRSSAutomationError(c, err, "更新 RSS 自动化启用状态失败") {
+		return
+	}
+	message := "RSS 自动化已停用"
+	if *input.Enabled {
+		message = "RSS 自动化已启动"
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse(message, updated))
 }
 
 func (h *RSSAutomationHandler) SampleSource(c *gin.Context) {

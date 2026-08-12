@@ -363,6 +363,7 @@ func (s *Server) setupRoutes() {
 		{
 			rssAutomation.GET("", rssAutomationHandler.Dashboard)
 			rssAutomation.POST("/automations", rssAutomationHandler.CreateAutomation)
+			rssAutomation.PATCH("/automations/:id/enabled", rssAutomationHandler.SetAutomationEnabled)
 			rssAutomation.DELETE("/automations/:id", rssAutomationHandler.DeleteAutomation)
 			rssAutomation.PUT("/sources/:id", rssAutomationHandler.UpdateSource)
 			rssAutomation.POST("/sources/sample", rssAutomationHandler.SampleSource)

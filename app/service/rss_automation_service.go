@@ -64,6 +64,11 @@ type RSSAutomationCreateResult struct {
 	Validation RSSAutomationValidationResult `json:"validation"`
 }
 
+type RSSAutomationEnabledResult struct {
+	Source   model.RSSAutomationSource   `json:"source"`
+	Workflow model.RSSAutomationWorkflow `json:"workflow"`
+}
+
 type RSSAutomationTargetInput struct {
 	Name    string         `json:"name"`
 	Type    string         `json:"type"`
@@ -319,6 +324,35 @@ func (s *RSSAutomationService) DeleteAutomation(id uint) error {
 		}
 		return tx.Delete(&source).Error
 	})
+}
+
+func (s *RSSAutomationService) SetAutomationEnabled(id uint, enabled bool) (RSSAutomationEnabledResult, error) {
+	result := RSSAutomationEnabledResult{}
+	if id == 0 {
+		return result, errors.New("RSS 自动化源 ID 无效")
+	}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&result.Source, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("source_id = ?", id).First(&result.Workflow).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("该 RSS 源没有对应流程，数据不满足一对一关系")
+			}
+			return err
+		}
+		if err := tx.Model(&result.Source).Update("enabled", enabled).Error; err != nil {
+			return err
+		}
+		return tx.Model(&result.Workflow).Update("enabled", enabled).Error
+	})
+	if err != nil {
+		return RSSAutomationEnabledResult{}, err
+	}
+	result.Source.Enabled = enabled
+	result.Workflow.Enabled = enabled
+	s.Wake()
+	return result, nil
 }
 
 func (s *RSSAutomationService) UpdateWorkflow(id uint, input RSSAutomationWorkflowInput) (model.RSSAutomationWorkflow, RSSAutomationValidationResult, error) {
