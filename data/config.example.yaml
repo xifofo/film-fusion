@@ -36,6 +36,15 @@ webhook:
     enabled: false
     token: ""  # openssl rand -hex 32
 
+# RSS 生成器的抓取执行面。Docker Compose 会将 worker_url 覆盖为内网服务名。
+# worker_token 只用于 FilmFusion -> Worker 内部鉴权，不要复用管理员密码或 Feed Token。
+rss_generator:
+  worker_url: "http://127.0.0.1:8787"
+  worker_token: ""
+  public_base_url: ""          # 留空返回相对地址，管理页会按当前访问域名展示
+  request_timeout_seconds: 90
+  secret_key_file: "data/rss-generator.key" # Cookie/代理等敏感字段的本地 AES 密钥（0600）
+
 notifications:
   instance_name: "FilmFusion"
   routes:

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"film-fusion/app/database"
 	"film-fusion/app/model"
 )
 
@@ -47,6 +48,83 @@ func TestSampleRSSAutomationSourceReturnsUpToTwentyItems(t *testing.T) {
 	}
 	if parsed.Items[19].Fields["guid"] != "episode-20" {
 		t.Fatalf("unexpected last sample: %#v", parsed.Items[19])
+	}
+}
+
+func TestSampleRSSAutomationSourceUsesDatabaseUserAgent(t *testing.T) {
+	const customUserAgent = "Mozilla/5.0 FilmFusion-RSS-Custom"
+	var receivedUserAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		receivedUserAgent = request.Header.Get("User-Agent")
+		_, _ = w.Write([]byte(`<rss><channel><item><guid>1</guid><title>示例</title></item></channel></rss>`))
+	}))
+	defer server.Close()
+
+	db := newRSSAutomationTestDB(t)
+	if err := database.SaveRSSAutomationSettings(db, customUserAgent); err != nil {
+		t.Fatalf("save RSS automation settings: %v", err)
+	}
+	automation := &RSSAutomationService{
+		db:         db,
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+	_, err := automation.SampleSource(context.Background(), RSSAutomationSourceInput{
+		Name:            "动画更新",
+		FeedURL:         server.URL,
+		IntervalMinutes: 5,
+		Mapping:         DefaultRSSAutomationMapping(),
+	})
+	if err != nil {
+		t.Fatalf("SampleSource() error = %v", err)
+	}
+	if receivedUserAgent != customUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", receivedUserAgent, customUserAgent)
+	}
+}
+
+func TestRefreshRSSAutomationSourceRetriesWithoutBrokenConditionalHeaders(t *testing.T) {
+	const lastModified = "Wed, 12 Aug 2026 06:28:59 GMT"
+	requestCount := 0
+	plainRequestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		requestCount++
+		if request.Header.Get("If-Modified-Since") != "" {
+			http.Error(w, "upstream failed", http.StatusInternalServerError)
+			return
+		}
+		plainRequestCount++
+		w.Header().Set("Last-Modified", lastModified)
+		_, _ = w.Write([]byte(`<rss><channel><title>示例</title><item><guid>1</guid><title>示例条目</title></item></channel></rss>`))
+	}))
+	defer server.Close()
+
+	db := newRSSAutomationTestDB(t)
+	source := model.RSSAutomationSource{
+		Name: "条件请求不兼容源", Enabled: true, Initialized: true,
+		FeedURL: server.URL, IntervalMinutes: 5, MappingJSON: DefaultRSSAutomationMappingJSON(),
+		LastModified: lastModified,
+	}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	automation := &RSSAutomationService{
+		db:         db,
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+	if _, err := automation.refreshAutomationSource(context.Background(), source); err != nil {
+		t.Fatalf("refreshAutomationSource() error = %v", err)
+	}
+	if requestCount != 2 || plainRequestCount != 1 {
+		t.Fatalf("requests = %d, plain requests = %d; want 2 and 1", requestCount, plainRequestCount)
+	}
+	if err := db.First(&source, source.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if source.LastModified != "" || source.ETag != "" {
+		t.Fatalf("broken cache validators were retained: etag=%q last_modified=%q", source.ETag, source.LastModified)
+	}
+	if source.LastError != "" || source.LastSuccessAt == nil {
+		t.Fatalf("fallback success was not recorded: %#v", source)
 	}
 }
 

@@ -1,236 +1,312 @@
-# Film Fusion 部署文档
+# FilmFusion 自建服务器部署
 
-> 一个功能强大的媒体文件管理与自动化处理服务，专为家庭媒体服务器设计。
-> Web 管理界面 + Emby 直链代理 + 115 网盘 + STRM + 观看统计。
+本文档面向希望把 FilmFusion 部署到自己 Linux 服务器、NAS 或家用主机的用户。推荐使用 Docker Compose：FilmFusion 主服务使用发布镜像，RSS 生成器 Worker 从仓库源码构建，两者通过 Compose 内网通信。
 
-- 镜像（Docker Hub）：`kumayi/film-fusion`
-- 源码（GitHub）：`https://github.com/xifofo/film-fusion`
+## 部署结构
 
----
+| 服务 | 端口 | 是否需要对外开放 | 说明 |
+| --- | --- | --- | --- |
+| `film-fusion` | `9000` | 是，或仅交给反向代理 | Web 管理界面、API、公开 RSS 和 Webhook |
+| `film-fusion` | `8097` | 按需 | Emby 直链代理 |
+| `rss-generator-worker` | `8787` | 否 | RSS 抓取与浏览器渲染，仅供 FilmFusion 内网调用 |
 
-## ✨ 功能特性
+FilmFusion 的配置、SQLite 数据库、日志、登录会话密钥、RSS 加密密钥和上传资源都保存在宿主机的 `./data` 目录。RSS Worker 不需要独立持久化目录。
 
-- 🎬 **STRM 文件管理** — 自动生成与管理 STRM 流媒体文件
-- 📺 **Emby 集成与直链代理** — 反代 Emby 播放，按账号走指定 115 存储直链
-- ☁️ **115 网盘集成** — 扫码登录、下载、直链播放，支持多账号
-- 🧩 **Match302 重定向** — 源/子账号池负载均衡 + 秒传缓存与自动清理
-- 🖼️ **媒体库封面生成** — 自动拼接海报生成媒体库封面（支持定时）
-- 🔎 **Emby 缺集扫描** — 扫描缺失剧集并支持重生成 STRM、外部链接查询
-- 📊 **观看记录统计** — 按 Emby 用户隔离的观看数据：总览 / 画廊海报墙 / 日历 / 记录 / 年度报告（含分享图）
-- 🔗 **CloudDrive2 / MoviePilot2 集成** — Webhook 通知联动
-- 🌐 **Web 管理界面** — 直观的配置与管理界面
-- ⚙️ **系统设置在线编辑** — 在网页上编辑 `config.yaml`，多数项保存即时生效（无需重启）
-- 🔐 **JWT 认证** — 安全的用户认证
+## 一、准备服务器
 
----
+服务器需要安装：
 
-## 📦 端口与目录
+- Docker Engine
+- Docker Compose v2（命令为 `docker compose`）
+- Git
+- OpenSSL（用于生成随机密钥）
 
-| 端口 | 用途 | 对应配置 |
-| ---- | ---- | -------- |
-| `9000` | Web 管理界面 / API / **Webhook** | `server.port` |
-| `8097` | Emby 直链播放代理 | `emby.run_proxy_port` |
-
-| 容器路径 | 用途 |
-| -------- | ---- |
-| `/app/data` | 配置文件 `config.yaml`、SQLite 数据库、日志、字体及登录页背景等持久化数据 |
-
-> 数据全部位于 `/app/data`，只需挂载这一个目录即可持久化。后台上传的登录页背景保存在 `/app/data/uploads/login-backgrounds/`。
-
----
-
-## 🚀 快速部署（Docker Compose，推荐）
-
-1. 创建目录并下载所需文件：
+先确认命令可用：
 
 ```bash
-mkdir -p film-fusion/data && cd film-fusion
-curl -O https://raw.githubusercontent.com/xifofo/film-fusion/main/docker-compose.yml
-curl -o data/config.yaml https://raw.githubusercontent.com/xifofo/film-fusion/main/data/config.example.yaml
+docker --version
+docker compose version
+git --version
+openssl version
 ```
 
-2. 编辑 `data/config.yaml`，**至少修改以下项**：
+普通部署不需要在服务器上安装 Go、Node.js 或 pnpm。
+
+## 二、下载部署文件
+
+当前 Compose 包含 RSS Worker 的本地构建上下文，因此需要克隆仓库，不能只下载 `docker-compose.yml`：
+
+```bash
+git clone --depth 1 https://github.com/xifofo/film-fusion.git
+cd film-fusion
+cp data/config.example.yaml data/config.yaml
+cp .env.example .env
+```
+
+`data/config.yaml` 和 `.env` 已被 Git 忽略，后续执行 `git pull` 不会覆盖它们。
+
+## 三、填写必需配置
+
+### 1. 管理员账户
+
+编辑 `data/config.yaml`，至少设置管理员用户名和强密码：
 
 ```yaml
 server:
-  password: "你的管理员密码"          # 初始登录密码
-emby:
-  url: "http://你的Emby:8096"        # Emby 服务器地址
-  api_key: "你的 Emby API Key"        # Emby → 设置 → 高级 → API 密钥
+  port: 9000
+  username: "admin"
+  password: "请替换为强密码"
 ```
 
-JWT 签名密钥由程序自动生成并保存在 `data/.jwt-secret`，无需手工配置。
+管理员密码不能为空，否则服务会拒绝启动。JWT 签名密钥会自动生成到 `data/.jwt-secret`，不需要手工填写。
 
-3. `docker-compose.yml` 示例（已内置，可按需调整挂载）：
+### 2. RSS Worker 内部密钥
+
+生成一份随机密钥：
+
+```bash
+openssl rand -base64 48
+```
+
+把输出填入 `.env`：
+
+```dotenv
+RSS_GENERATOR_WORKER_TOKEN=请粘贴刚才生成的随机值
+RSS_GENERATOR_PUBLIC_BASE_URL=
+```
+
+两项说明：
+
+- `RSS_GENERATOR_WORKER_TOKEN` 只用于 FilmFusion 与 Worker 之间的内部鉴权，不要复用管理员密码，也不要公开。
+- 没有域名时，将 `RSS_GENERATOR_PUBLIC_BASE_URL` 留空；使用 HTTPS 域名后可填写 `https://film.example.com`，不要添加结尾斜杠。
+
+### 3. Emby 地址
+
+如果需要 Emby 集成，继续修改 `data/config.yaml`：
+
+```yaml
+emby:
+  enabled: true
+  url: "http://192.168.1.10:8096"
+  run_proxy_port: 8097
+  api_key: "你的 Emby API Key"
+  admin_user_id: "你的 Emby 管理员用户 ID"
+```
+
+容器内的 `127.0.0.1` 指向 FilmFusion 容器自身，并不指向宿主机。请按实际环境填写：
+
+- Emby 在局域网另一台主机：使用该主机的局域网 IP。
+- Emby 与 FilmFusion 位于同一个 Docker 网络：使用 Emby 的 Compose 服务名和容器端口。
+- 暂时不使用 Emby：将 `emby.enabled` 设为 `false`。
+
+Emby API Key 可在 Emby 管理后台的“设置 → 高级 → API 密钥”中创建。
+
+### 4. 挂载媒体目录（按需）
+
+如果 FilmFusion 需要访问宿主机上的媒体、下载或 CloudDrive2 目录，可新建 `docker-compose.override.yml`，避免直接修改仓库中的 Compose 文件：
 
 ```yaml
 services:
   film-fusion:
-    image: "kumayi/film-fusion:latest"
-    container_name: "film-fusion"
-    restart: unless-stopped
-    ports:
-      - "9000:9000"   # Web / API / Webhook
-      - "8097:8097"   # Emby 直链代理
     volumes:
-      - ./data:/app/data
-      # 如使用本地媒体路径，可按需挂载媒体目录：
-      # - /path/to/media:/mnt/media
-    environment:
-      - TZ=Asia/Shanghai
-      - GIN_MODE=release
+      - /srv/media:/mnt/media
+      - /mnt/clouddrive:/mnt/clouddrive:ro
 ```
 
-4. 启动：
+左侧是宿主机真实路径，右侧是容器内路径。后续在 FilmFusion 中填写的路径必须使用右侧路径；参与同一工作流的 Emby、CloudDrive2 等服务也要采用一致的路径映射。
+
+## 四、校验并启动
+
+先检查 Compose 配置，再分别拉取主服务镜像、构建 Worker：
 
 ```bash
+docker compose config
+docker compose pull film-fusion
+docker compose build --pull rss-generator-worker
+docker compose up -d --no-build
+```
+
+这里对最后一步使用 `--no-build`，是为了确保主服务使用包含 Web 前端的发布镜像。只有准备从源码构建 FilmFusion 时，才需要本地构建主服务镜像。
+
+查看启动结果：
+
+```bash
+docker compose ps
+docker compose logs --tail=100 film-fusion rss-generator-worker
+curl -fsS http://127.0.0.1:9000/api/public-config
+```
+
+正常情况下：
+
+- `film-fusion` 状态为 `Up`。
+- `rss-generator-worker` 状态为 `Up (healthy)`。
+- 最后一条命令返回登录页公开配置 JSON。
+
+然后访问 `http://服务器IP:9000`，使用 `data/config.yaml` 中的管理员账户登录。
+
+## 五、反向代理与 HTTPS
+
+准备公网访问时，建议只让反向代理连接 FilmFusion，并由反向代理负责 HTTPS。以 Caddy 为例：
+
+```caddyfile
+film.example.com {
+    reverse_proxy 127.0.0.1:9000
+}
+```
+
+如果反向代理与 Docker 在同一台服务器，可把管理端口改为仅监听本机：
+
+```yaml
+ports:
+  - "127.0.0.1:9000:9000"
+```
+
+使用域名后，将 `.env` 中的公开 RSS 地址设为同一个 HTTPS 来源：
+
+```dotenv
+RSS_GENERATOR_PUBLIC_BASE_URL=https://film.example.com
+```
+
+修改 `.env` 后重建容器即可生效：
+
+```bash
+docker compose up -d --no-build --force-recreate film-fusion rss-generator-worker
+```
+
+如果还要通过域名访问 Emby 直链代理，需要另外为 `8097` 配置反向代理；否则请按实际客户端网络开放该端口。不要把 RSS Worker 的 `8787` 端口映射到宿主机或公网。
+
+反向代理后如需让登录防护识别真实客户端 IP，只应把实际可信的代理网段加入 `server.security.trusted_proxy_cidrs` 和 `emby.security.trusted_proxy_cidrs`，不要直接信任所有来源。
+
+## 六、Webhook 地址
+
+Webhook 与管理界面共用 `9000` 端口。使用域名时，常用地址为：
+
+- Emby：`https://film.example.com/webhook/emby`
+- CloudDrive2：`https://film.example.com/webhook/clouddrive2/file_notify`
+- MoviePilot2：`https://film.example.com/webhook/movie-pilot/v2`
+
+建议先在“系统设置 → Webhook”中为 CloudDrive2 生成独立 Token 并启用 Bearer Token 鉴权。Webhook Token、RSS Worker Token 和管理员密码应使用三份不同的随机值。
+
+## 七、升级
+
+升级前先备份数据，然后执行：
+
+```bash
+git pull --ff-only
+docker compose pull film-fusion
+docker compose build --pull rss-generator-worker
+docker compose up -d --no-build --remove-orphans
+docker compose ps
+```
+
+`docker compose pull film-fusion` 会拉取 `docker-compose.yml` 中指定的镜像版本；仓库更新了版本号后，先执行 `git pull` 才能获取该版本。
+
+升级完成后检查日志：
+
+```bash
+docker compose logs --tail=100 film-fusion rss-generator-worker
+```
+
+## 八、备份与恢复
+
+需要备份：
+
+- `data/`：配置、SQLite 数据库、JWT/RSS 密钥、日志和上传资源。
+- `.env`：RSS Worker 内部密钥和公开地址。
+- 自己创建的 `docker-compose.override.yml`。
+
+为了得到一致的 SQLite 备份，先短暂停止服务：
+
+```bash
+docker compose stop
+tar -czf ../film-fusion-backup-$(date +%F-%H%M%S).tar.gz data .env docker-compose.override.yml
+docker compose start
+```
+
+如果没有 `docker-compose.override.yml`，请从 `tar` 命令中删去该文件名。备份包含密码和访问密钥，必须放在受保护的位置。
+
+恢复时应先停止服务，把备份中的文件恢复到同一目录，再执行 `docker compose up -d --no-build`。建议使用与备份时相同的 FilmFusion 镜像版本完成首次恢复启动。
+
+## 九、常用命令
+
+```bash
+docker compose ps
+docker compose logs -f film-fusion
+docker compose logs -f rss-generator-worker
+docker compose restart film-fusion
+docker compose stop
+docker compose start
+docker compose down
+```
+
+`docker compose down` 只删除容器和 Compose 网络，不会删除当前使用的 `./data` 绑定目录。不要额外添加 `-v`，也不要手工删除 `data/`。
+
+## 十、常见问题
+
+### Compose 提示必须设置 `RSS_GENERATOR_WORKER_TOKEN`
+
+确认当前目录存在 `.env`，并且其中的 `RSS_GENERATOR_WORKER_TOKEN` 不是空值。修改后重新执行 `docker compose config`。
+
+### FilmFusion 容器反复重启
+
+先查看日志：
+
+```bash
+docker compose logs --tail=200 film-fusion
+```
+
+最常见原因是 `data/config.yaml` 中管理员用户名或密码为空、YAML 缩进错误，或者 `data/` 无法写入。
+
+### 页面能打开，但连接不到 Emby
+
+不要在容器部署中使用 `http://127.0.0.1:8096` 指向宿主机 Emby。改用 Emby 的局域网 IP、同一 Docker 网络中的服务名，或自行配置 `host.docker.internal`。
+
+### RSS Worker 不健康
+
+```bash
+docker compose logs --tail=200 rss-generator-worker
+docker compose build --pull --no-cache rss-generator-worker
+docker compose up -d --no-build rss-generator-worker
+```
+
+Worker 镜像包含 Chromium 及其依赖，首次构建下载量较大。不要为它发布 `8787` 端口。
+
+### 本地构建主服务时提示找不到 `dist`
+
+发布镜像已经包含 Web 前端；普通部署请使用本文的 `pull` + `up --no-build` 流程。源码构建则需要先在兄弟目录 `film-fusion-frontend` 中执行 `pnpm build`，再把前端 `dist/` 内容复制到后端仓库的 `dist/` 后构建镜像。
+
+### 修改配置后没有生效
+
+部分系统设置可热更新，端口、代理启用状态和部分日志配置需要重启：
+
+```bash
+docker compose restart film-fusion
+```
+
+## 安全清单
+
+- 管理员密码、Webhook Token 与 RSS Worker Token 分别使用独立随机值。
+- 公网部署使用 HTTPS，不直接暴露管理端口。
+- 不对外映射 RSS Worker 的 `8787` 端口。
+- 只向可信代理开放 `trusted_proxy_cidrs`。
+- 定期备份 `data/`、`.env` 和 Compose 覆盖文件。
+- 不要把 `data/config.yaml`、`.env`、数据库或备份提交到 Git。
+
+## 源码构建主服务（可选）
+
+只有需要部署尚未发布的代码时才需要这一步。服务器还需安装 Node.js 20.19+ 或 22.12+ 与 pnpm：
+
+```bash
+cd ..
+git clone --depth 1 https://github.com/xifofo/film-fusion-frontend.git
+cd film-fusion-frontend
+pnpm install --frozen-lockfile
+pnpm build
+mkdir -p ../film-fusion/dist
+cp -R dist/. ../film-fusion/dist/
+cd ../film-fusion
+docker compose build --pull film-fusion rss-generator-worker
 docker compose up -d
 ```
 
-5. 浏览器访问 `http://服务器IP:9000`，用 `config.yaml` 中的用户名/密码登录。
-
----
-
-## 🐳 快速部署（docker run）
-
-```bash
-docker run -d \
-  --name film-fusion \
-  --restart unless-stopped \
-  -p 9000:9000 \
-  -p 8097:8097 \
-  -v "$(pwd)/data:/app/data" \
-  -e TZ=Asia/Shanghai \
-  -e GIN_MODE=release \
-  kumayi/film-fusion:latest
-```
-
-> 首次启动若 `data/config.yaml` 不存在，请先放入由 `config.example.yaml` 改写的配置文件。
-
----
-
-## ⚙️ 配置说明（config.yaml）
-
-```yaml
-server:
-  port: 9000                     # Web / API / Webhook 端口
-  username: "admin"              # 初始管理员用户名
-  password: ""                   # 初始管理员密码（务必修改）
-  download_115_concurrency: 1    # 115 下载并发数
-  cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入
-  web_115_user_agent: ""         # 仅首次初始化数据库时导入
-  process_new_media: false       # 是否处理新增媒体事件（Emby webhook）
-
-emby:
-  enabled: true                  # 启用 Emby 代理
-  url: "http://127.0.0.1:8096"   # Emby 地址
-  run_proxy_port: 8097           # Emby 直链代理端口
-  api_key: ""                    # Emby API Key
-  admin_user_id: ""              # Emby 管理员用户 ID（用于预取下一集等）
-  cache_time: 30                 # 直链缓存时间（分钟）
-  add_current_media_info: true   # 播放时预热当前媒体直链
-  add_next_media_info: true      # 预取下一集（需 admin_user_id）
-  cover:                         # 媒体库封面生成器
-    enabled: false
-    cron: ""                     # 如 "0 3 * * *"；为空则仅手动
-    width: 1920
-    height: 1080
-    jpeg_quality: 88
-    poster_count: 9
-    font_cn: "data/assets/fonts/SourceHanSansCN-Bold.otf"
-    font_en: "data/assets/fonts/Inter-Bold.ttf"
-
-moviepilot:
-  api: "http://127.0.0.1:3001"
-  username: ""
-  password: ""
-
-log:
-  level: info                    # debug / info / warn / error / fatal
-  format: json                   # json / text
-  output: file                   # stdout / file
-  max_size: 100                  # MB
-  max_backups: 3
-  max_age: 28                    # 天
-  compress: true
-
-jwt:
-  expire_time: 240               # Token 过期时间（小时）
-  issuer: "film-fusion"
-```
-
-115 默认 App 与浏览器 UA 首次从 YAML 导入，之后由数据库作为唯一持久化来源；UA 暂未接入请求。
-通知配置统一使用 `notifications`，支持 Telegram、通用 JSON Webhook 和按事件多渠道路由；旧版顶层 `telegram` 配置仍可自动导入。
-
-> 获取 Emby API Key：登录 Emby → 设置 → 高级 → API 密钥 → 新建。
-
----
-
-## 🛠️ 在线系统设置（无需手改文件）
-
-进入 Web 界面「**系统设置**」即可在线编辑 `config.yaml`，密钥类字段留空表示不修改。
-
-- **保存即时生效**：通知渠道与事件路由、Emby 连接（地址 / API Key / 管理员 ID）、新媒体与播放开关、封面参数与定时 cron、MoviePilot、会话有效期与签发者、**日志级别**。
-- **需重启生效**（界面会在对应字段标注「需重启」）：HTTP 端口、Emby 代理端口、Emby 代理启用开关、日志格式 / 输出 / 轮转、115 下载并发数。
-
----
-
-## 🔔 Webhook 配置
-
-Webhook 与 Web 界面同端口（默认 `9000`），地址形如 `http://服务器IP:9000/webhook/...`：
-
-- **Emby**：通知中添加 Webhook，地址 `http://服务器IP:9000/webhook/emby`
-  - 入库补充媒体信息：勾选「新媒体已添加」
-  - 观看记录采集：勾选「播放停止 / 标记已播放」等事件
-- **CloudDrive2**：
-  1. FilmFusion 会始终接收 CloudDrive2 Webhook；建议在「系统设置 → Webhook」生成独立 Token，并开启 Bearer Token 鉴权。
-  2. 地址填写 `http://服务器IP:9000/webhook/clouddrive2/file_notify`，并将 CloudDrive2 的 `enabled` 设为 `true`。
-  3. 若 FilmFusion 开启了鉴权，请在 CloudDrive2 的 `[global_params.default_headers]` 中配置 `authorization = "Bearer <Token>"`。
-  4. 不要复用后台密码；公网或不可信网络应通过 HTTPS 反向代理或 VPN 访问。
-- **MoviePilot2**：添加 Webhook 插件（`POST`），地址 `http://服务器IP:9000/webhook/movie-pilot/v2`
-
----
-
-## ⬆️ 升级
-
-```bash
-docker compose pull && docker compose up -d
-# 或 docker run 方式：
-# docker pull kumayi/film-fusion:latest && 重新创建容器
-```
-
----
-
-## 🧰 常用命令
-
-```bash
-docker compose ps                    # 查看状态
-docker compose logs -f film-fusion   # 实时日志
-docker compose restart               # 重启
-docker compose down                  # 停止并移除容器
-```
-
----
-
-## 🔍 故障排查
-
-- **无法访问 Web 界面**：`docker compose ps` 看容器是否运行；确认 `9000` 端口未被占用、未被防火墙拦截。
-- **Emby 直链播放异常**：确认 `8097` 端口已映射、`emby.url` / `api_key` 正确；查看日志。
-- **115 下载失败**：检查授权是否过期；适当降低 `download_115_concurrency`。
-- **年报分享图生成失败**：需配置中文字体 `emby.cover.font_cn`（镜像内置默认字体路径）。
-
----
-
-## 🔐 安全建议
-
-1. 首次部署后立即修改默认密码。
-2. 对外暴露时建议使用反向代理 + HTTPS。
-3. 定期备份 `data` 目录（含数据库与配置）。
-
----
-
-## 📄 开源协议
-
-本项目基于 MIT 协议开源。
-
-**Film Fusion** — 让媒体管理变得简单高效 🎬✨
+后端 Go 编译在 Dockerfile 的 builder 阶段完成，宿主机不需要安装 Go。

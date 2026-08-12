@@ -1,5 +1,7 @@
 services:
   film-fusion:
+    build:
+      context: .
     image: "kumayi/film-fusion:v2.0.1"
     container_name: "film-fusion"
     restart: unless-stopped
@@ -20,9 +22,34 @@ services:
       - TZ=Asia/Shanghai
       # 运行模式（生产环境）
       - GIN_MODE=release
+      # RSS 生成器执行面只通过 Compose 内网访问。
+      - RSS_GENERATOR_WORKER_URL=http://rss-generator-worker:8787
+      - RSS_GENERATOR_WORKER_TOKEN=${RSS_GENERATOR_WORKER_TOKEN:?set RSS_GENERATOR_WORKER_TOKEN in .env}
+      - RSS_GENERATOR_PUBLIC_BASE_URL=${RSS_GENERATOR_PUBLIC_BASE_URL:-}
+    depends_on:
+      rss-generator-worker:
+        condition: service_healthy
     # 网络配置（可选）
     # networks:
     #   - film-fusion-network
+
+  rss-generator-worker:
+    build:
+      context: ./rss-generator-worker
+    image: "film-fusion-rss-generator-worker:local"
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    environment:
+      - NODE_ENV=production
+      - PORT=8787
+      - WORKER_AUTH_TOKEN=${RSS_GENERATOR_WORKER_TOKEN:?set RSS_GENERATOR_WORKER_TOKEN in .env}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
 
 # 网络配置（可选）
 networks:

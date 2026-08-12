@@ -776,7 +776,7 @@ func (s *RSSAutomationService) failRSSAutomationRun(runID uint, runErr error) er
 		}).Error
 }
 
-func (s *RSSAutomationService) ListRuns(status string, limit, offset int) ([]model.RSSAutomationRun, int64, error) {
+func (s *RSSAutomationService) ListRuns(workflowID uint, status string, limit, offset int) ([]model.RSSAutomationRun, int64, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -784,6 +784,9 @@ func (s *RSSAutomationService) ListRuns(status string, limit, offset int) ([]mod
 		offset = 0
 	}
 	query := s.db.Model(&model.RSSAutomationRun{})
+	if workflowID != 0 {
+		query = query.Where("workflow_id = ?", workflowID)
+	}
 	if strings.TrimSpace(status) != "" {
 		query = query.Where("status = ?", strings.TrimSpace(status))
 	}

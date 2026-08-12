@@ -460,8 +460,7 @@ func (s *RSSAutomationService) SampleSource(ctx context.Context, input RSSAutoma
 	if err != nil {
 		return RSSAutomationParsedFeed{}, errors.New("创建 RSS 请求失败")
 	}
-	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5")
-	req.Header.Set("User-Agent", "FilmFusion-RSS-Automation/1.0")
+	s.setRSSAutomationRequestHeaders(req)
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return RSSAutomationParsedFeed{}, fmt.Errorf("请求 RSS 源失败: %w", err)
@@ -530,18 +529,36 @@ func (s *RSSAutomationService) refreshAutomationSource(ctx context.Context, sour
 	if err != nil {
 		return result, err
 	}
-	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5")
-	req.Header.Set("User-Agent", "FilmFusion-RSS-Automation/1.0")
+	s.setRSSAutomationRequestHeaders(req)
 	if source.Initialized && source.ETag != "" {
 		req.Header.Set("If-None-Match", source.ETag)
 	}
 	if source.Initialized && source.LastModified != "" {
 		req.Header.Set("If-Modified-Since", source.LastModified)
 	}
+	hasConditionalHeaders := req.Header.Get("If-None-Match") != "" || req.Header.Get("If-Modified-Since") != ""
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		s.recordRSSAutomationSourceFailure(source.ID, err)
 		return result, fmt.Errorf("请求 RSS 源失败: %w", err)
+	}
+	conditionalFallback := false
+	if hasConditionalHeaders && resp.StatusCode >= http.StatusInternalServerError {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
+		_ = resp.Body.Close()
+
+		fallbackReq, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, source.FeedURL, nil)
+		if requestErr != nil {
+			s.recordRSSAutomationSourceFailure(source.ID, requestErr)
+			return result, requestErr
+		}
+		s.setRSSAutomationRequestHeaders(fallbackReq)
+		resp, err = s.httpClient.Do(fallbackReq)
+		if err != nil {
+			s.recordRSSAutomationSourceFailure(source.ID, err)
+			return result, fmt.Errorf("无条件重试 RSS 源失败: %w", err)
+		}
+		conditionalFallback = true
 	}
 	defer resp.Body.Close()
 	checkedAt := time.Now()
@@ -585,7 +602,14 @@ func (s *RSSAutomationService) refreshAutomationSource(ctx context.Context, sour
 		}
 		result.CreatedRuns += createdRuns
 	}
-	s.recordRSSAutomationSourceSuccess(source.ID, checkedAt, true, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+	newETag := strings.TrimSpace(resp.Header.Get("ETag"))
+	newLastModified := strings.TrimSpace(resp.Header.Get("Last-Modified"))
+	if conditionalFallback {
+		// 该源无法正确处理条件请求；不再保存缓存验证头，避免后续每次先触发一次 5xx。
+		newETag = ""
+		newLastModified = ""
+	}
+	s.recordRSSAutomationSourceSuccess(source.ID, checkedAt, true, newETag, newLastModified)
 	s.wakeExecution()
 	return result, nil
 }
@@ -620,57 +644,86 @@ func (s *RSSAutomationService) createRSSAutomationRuns(entry model.RSSAutomation
 	}
 	created := 0
 	for _, workflow := range workflows {
-		definition, err := ParseRSSAutomationDefinition(workflow.DefinitionJSON)
+		_, runCreated, err := s.createRSSAutomationRun(workflow, entry, false)
 		if err != nil {
 			return created, err
 		}
-		validation := ValidateRSSAutomationDefinition(definition)
-		if !validation.Valid {
-			return created, fmt.Errorf("流程 %s 无效: %s", workflow.Name, strings.Join(validation.Errors, "; "))
-		}
-		var fields map[string]any
-		if err := json.Unmarshal([]byte(entry.FieldsJSON), &fields); err != nil {
-			return created, err
-		}
-		contextJSON, _ := json.Marshal(map[string]any{
-			"item": fields, "vars": map[string]any{}, "nodes": map[string]any{},
-			"entry_id": entry.ID, "source_id": entry.SourceID,
-		})
-		now := time.Now()
-		run := model.RSSAutomationRun{
-			WorkflowID: workflow.ID, WorkflowName: workflow.Name, WorkflowVersion: workflow.Version,
-			EntryID: entry.ID, DefinitionJSON: workflow.DefinitionJSON, ContextJSON: string(contextJSON),
-			Status: model.RSSAutomationRunPending, StartedAt: &now,
-		}
-		err = s.db.Transaction(func(tx *gorm.DB) error {
-			result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&run)
-			if result.Error != nil || result.RowsAffected == 0 {
-				return result.Error
-			}
-			for _, node := range definition.Nodes {
-				maxAttempts := node.MaxAttempts
-				if maxAttempts <= 0 {
-					maxAttempts = 1
-					if isRSSAutomationActionNode(node.Type) {
-						maxAttempts = 3
-					}
-				}
-				nodeRun := model.RSSAutomationNodeRun{
-					RunID: run.ID, NodeID: node.ID, NodeType: node.Type, NodeName: node.Name,
-					Status: model.RSSAutomationNodePending, MaxAttempts: maxAttempts,
-				}
-				if err := tx.Create(&nodeRun).Error; err != nil {
-					return err
-				}
-			}
+		if runCreated {
 			created++
-			return nil
-		})
-		if err != nil {
-			return created, err
 		}
 	}
 	return created, nil
+}
+
+func (s *RSSAutomationService) createRSSAutomationRun(workflow model.RSSAutomationWorkflow, entry model.RSSAutomationEntry, blockEarlierVersions bool) (model.RSSAutomationRun, bool, error) {
+	definition, err := ParseRSSAutomationDefinition(workflow.DefinitionJSON)
+	if err != nil {
+		return model.RSSAutomationRun{}, false, err
+	}
+	validation := ValidateRSSAutomationDefinition(definition)
+	if !validation.Valid {
+		return model.RSSAutomationRun{}, false, fmt.Errorf("流程 %s 无效: %s", workflow.Name, strings.Join(validation.Errors, "; "))
+	}
+	var fields map[string]any
+	decoder := json.NewDecoder(strings.NewReader(entry.FieldsJSON))
+	decoder.UseNumber()
+	if err := decoder.Decode(&fields); err != nil {
+		return model.RSSAutomationRun{}, false, err
+	}
+	contextJSON, _ := json.Marshal(map[string]any{
+		"item": fields, "vars": map[string]any{}, "nodes": map[string]any{},
+		"entry_id": entry.ID, "source_id": entry.SourceID,
+	})
+	now := time.Now()
+	run := model.RSSAutomationRun{
+		WorkflowID: workflow.ID, WorkflowName: workflow.Name, WorkflowVersion: workflow.Version,
+		EntryID: entry.ID, DefinitionJSON: workflow.DefinitionJSON, ContextJSON: string(contextJSON),
+		Status: model.RSSAutomationRunPending, StartedAt: &now,
+	}
+	created := false
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if blockEarlierVersions {
+			var existing int64
+			existingQuery := tx.Model(&model.RSSAutomationRun{}).
+				Where("rss_automation_runs.workflow_id = ?", workflow.ID)
+			if strings.TrimSpace(entry.ContentKey) != "" {
+				existingQuery = existingQuery.
+					Joins("JOIN rss_automation_entries AS existing_entry ON existing_entry.id = rss_automation_runs.entry_id").
+					Where("rss_automation_runs.entry_id = ? OR existing_entry.content_key = ?", entry.ID, entry.ContentKey)
+			} else {
+				existingQuery = existingQuery.Where("rss_automation_runs.entry_id = ?", entry.ID)
+			}
+			if err := existingQuery.Count(&existing).Error; err != nil {
+				return err
+			}
+			if existing > 0 {
+				return nil
+			}
+		}
+		result := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&run)
+		if result.Error != nil || result.RowsAffected == 0 {
+			return result.Error
+		}
+		for _, node := range definition.Nodes {
+			maxAttempts := node.MaxAttempts
+			if maxAttempts <= 0 {
+				maxAttempts = 1
+				if isRSSAutomationActionNode(node.Type) {
+					maxAttempts = 3
+				}
+			}
+			nodeRun := model.RSSAutomationNodeRun{
+				RunID: run.ID, NodeID: node.ID, NodeType: node.Type, NodeName: node.Name,
+				Status: model.RSSAutomationNodePending, MaxAttempts: maxAttempts,
+			}
+			if err := tx.Create(&nodeRun).Error; err != nil {
+				return err
+			}
+		}
+		created = true
+		return nil
+	})
+	return run, created, err
 }
 
 func (s *RSSAutomationService) validateWorkflowInput(input RSSAutomationWorkflowInput) (RSSAutomationWorkflowInput, string, RSSAutomationValidationResult, error) {
@@ -800,6 +853,24 @@ func (s *RSSAutomationService) recordRSSAutomationSourceFailure(sourceID uint, r
 	s.db.Model(&model.RSSAutomationSource{}).Where("id = ?", sourceID).Updates(map[string]any{
 		"last_checked_at": now, "last_error": refreshErr.Error(),
 	})
+}
+
+func (s *RSSAutomationService) setRSSAutomationRequestHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5")
+	req.Header.Set("User-Agent", s.rssAutomationUserAgent())
+}
+
+func (s *RSSAutomationService) rssAutomationUserAgent() string {
+	if s != nil && s.db != nil {
+		settings, err := database.LoadRSSAutomationSettings(s.db)
+		if err == nil {
+			return settings.UserAgent
+		}
+		if s.log != nil {
+			s.log.Warnf("[RSS-AUTOMATION] 读取 User-Agent 配置失败，使用默认值: %v", err)
+		}
+	}
+	return database.DefaultRSSAutomationUserAgent
 }
 
 func (s *RSSAutomationService) recordRSSAutomationSourceSuccess(sourceID uint, checkedAt time.Time, initialized bool, etag, lastModified string) {

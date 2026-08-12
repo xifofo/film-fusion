@@ -15,33 +15,56 @@
 
 ## 🚀 快速部署
 
+推荐使用 Docker Compose。完整的服务器准备、目录挂载、HTTPS、升级、备份与故障排查说明见 [自建服务器部署指南](DEPLOY.md)。
 
 ### Docker Compose 部署
 
-1. **创建目录并下载文件**
+1. **克隆仓库并创建本地配置**
+
 ```bash
-mkdir -p film-fusion/data && cd film-fusion
-curl -O https://raw.githubusercontent.com/xifofo/film-fusion/main/docker-compose.yml
-curl -o data/config.yaml https://raw.githubusercontent.com/xifofo/film-fusion/main/data/config.example.yaml
+git clone --depth 1 https://github.com/xifofo/film-fusion.git
+cd film-fusion
+cp data/config.example.yaml data/config.yaml
+cp .env.example .env
 ```
 
-2. **修改配置文件**
+2. **修改配置文件与 RSS Worker 密钥**
+
 编辑 `data/config.yaml`，必须修改：
+
 ```yaml
 server:
   password: "your-secure-password"  # 管理员密码
+emby:
+  enabled: false                     # 尚未配置 Emby 时先关闭
 ```
 
+再为 FilmFusion 与内部抓取 Worker 生成一份共享随机密钥：
+
+```bash
+openssl rand -base64 48
+```
+
+将命令输出填入 `.env` 的 `RSS_GENERATOR_WORKER_TOKEN`，不要复用管理员密码或公开 Feed Token。没有 HTTPS 域名时，把示例中的 `RSS_GENERATOR_PUBLIC_BASE_URL` 留空。
+
 3. **修改挂载路径**
-编辑 `docker-compose.yml`，修改媒体目录路径：
+
+如需访问宿主机媒体目录，新建 `docker-compose.override.yml`：
+
 ```yaml
-volumes:
-  - /path/to/your/media:/mnt/media  # 修改为实际媒体路径
+services:
+  film-fusion:
+    volumes:
+      - /path/to/your/media:/mnt/media  # 修改为实际媒体路径
 ```
 
 4. **启动服务**
+
 ```bash
-docker-compose up -d
+docker compose config
+docker compose pull film-fusion
+docker compose build --pull rss-generator-worker
+docker compose up -d --no-build
 ```
 
 ## ⚙️ 配置说明
@@ -70,7 +93,7 @@ JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工�
 ```yaml
 emby:
   enabled: true                     # 启用Emby集成
-  url: "http://localhost:8096"      # Emby服务器地址
+  url: "http://192.168.1.10:8096"   # Emby服务器地址；容器中不要用 localhost 指向宿主机
   run_proxy_port: 8097             # 代理服务端口
   api_key: "your-emby-api-key"     # Emby API密钥
   admin_user_id: "user-id"         # Emby管理员用户ID
@@ -98,7 +121,7 @@ emby:
 #### **CloudDrive2**
 FilmFusion 会始终接收 CloudDrive2 Webhook。建议先在「系统设置 → Webhook」生成并保存独立 Token、开启 Bearer Token 鉴权，再在 CloudDrive2 添加 webhook，修改服务地址并启用：
 ```toml
-base_url = "http://xxx.xxx.xxx.xxx:8095/webhook/clouddrive2"
+base_url = "http://xxx.xxx.xxx.xxx:9000/webhook/clouddrive2/file_notify"
 # Whether the webhook is enabled
 enabled = true
 
@@ -111,31 +134,34 @@ authorization = "Bearer <FilmFusion 中生成的 Token>" # FilmFusion 开启鉴�
 
 #### **MoviePilot2**:
 添加 webhook 插件 选择 `POST` 填入以下链接
-`http://xxx.xxx.xxx.xxx:8095/webhook/movie-pilot/v2`
+`http://xxx.xxx.xxx.xxx:9000/webhook/movie-pilot/v2`
 
 #### EMBY 入库补充 媒体信息
 EMBY 通知添加 webhook 勾选 新媒体已添加，填入链接
 
-`http://xxx.xxx.xxx.xxx:8095/webhook/emby`
+`http://xxx.xxx.xxx.xxx:9000/webhook/emby`
 
 
 ## 🛠️ 常用命令
 
 ```bash
 # 查看服务状态
-docker-compose ps
+docker compose ps
 
 # 查看实时日志
-docker-compose logs -f film-fusion
+docker compose logs -f film-fusion
 
 # 重启服务
-docker-compose restart
+docker compose restart
 
 # 更新应用
-docker-compose pull && docker-compose up -d
+git pull --ff-only
+docker compose pull film-fusion
+docker compose build --pull rss-generator-worker
+docker compose up -d --no-build --remove-orphans
 
 # 停止服务
-docker-compose down
+docker compose down
 ```
 
 ## 🔍 故障排除
@@ -145,7 +171,7 @@ docker-compose down
 **Q: 无法访问Web界面**
 ```bash
 # 检查服务状态和端口占用
-docker-compose ps
+docker compose ps
 sudo netstat -tlnp | grep 9000
 ```
 
@@ -156,7 +182,7 @@ sudo netstat -tlnp | grep 9000
 ## 🔐 安全建议
 
 1. **修改默认密码** - 首次部署后立即修改
-2. **使用强密钥** - 设置复杂的JWT密钥
+2. **保护数据目录** - JWT密钥由程序生成并保存在 `data` 中
 3. **启用HTTPS** - 使用反向代理配置SSL
 4. **定期备份** - 备份配置文件和数据库
 

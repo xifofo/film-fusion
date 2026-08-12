@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/netip"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -23,6 +24,10 @@ type Config struct {
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
+	// RSSAutomation 仅作为系统设置 API 的数据库配置视图，不参与 YAML 读写。
+	RSSAutomation RSSAutomationConfig `mapstructure:"-" json:"rss_automation"`
+	// RSSGenerator 配置独立抓取 Worker 与对外订阅地址。
+	RSSGenerator RSSGeneratorConfig `mapstructure:"rss_generator" json:"rss_generator"`
 }
 
 const (
@@ -81,6 +86,21 @@ type ServerConfig struct {
 	Web115UserAgent        string              `mapstructure:"web_115_user_agent" json:"web_115_user_agent"`
 	ProcessNewMedia        bool                `mapstructure:"process_new_media" json:"process_new_media"` // 是否处理新增媒体事件
 	Security               LoginSecurityConfig `mapstructure:"security" json:"security"`                   // FilmFusion 登录防爆破配置
+}
+
+// RSSAutomationConfig 保存由 system_configs 管理的 RSS 自动化请求配置。
+type RSSAutomationConfig struct {
+	UserAgent string `json:"user_agent"`
+}
+
+// RSSGeneratorConfig 保存 RSS 生成器执行面的连接配置。
+// WorkerToken 只用于 FilmFusion 与内网 Worker 之间鉴权，永不向前端返回。
+type RSSGeneratorConfig struct {
+	WorkerURL             string `mapstructure:"worker_url" json:"worker_url"`
+	WorkerToken           string `mapstructure:"worker_token" json:"-"`
+	PublicBaseURL         string `mapstructure:"public_base_url" json:"public_base_url"`
+	RequestTimeoutSeconds int    `mapstructure:"request_timeout_seconds" json:"request_timeout_seconds"`
+	SecretKeyFile         string `mapstructure:"secret_key_file" json:"-"`
 }
 
 type LogConfig struct {
@@ -306,6 +326,7 @@ func Load() *Config {
 	applyLoginSecurityDefaults("emby.security", &config.Emby.Security)
 	applyTelegramDefaults(&config.Telegram)
 	applyNotificationDefaults(&config)
+	applyRSSGeneratorDefaults(&config.RSSGenerator)
 	applyJWTSecret(&config.JWT)
 	config.Server.Cookie115DefaultApp = NormalizeCookie115App(config.Server.Cookie115DefaultApp)
 	config.Server.Web115UserAgent = NormalizeWeb115UserAgent(config.Server.Web115UserAgent)
@@ -479,6 +500,18 @@ func setDefaults() {
 	viper.SetDefault("server.cookie_115_default_app", DefaultCookie115App)
 	viper.SetDefault("server.web_115_user_agent", "")
 	setDefaultLoginSecurity("server.security")
+
+	// RSS 生成器 Worker 默认与 FilmFusion 运行在同一台主机。Docker
+	// 部署可用显式环境变量覆盖，避免依赖 Viper 的嵌套键转换规则。
+	viper.SetDefault("rss_generator.worker_url", "http://127.0.0.1:8787")
+	viper.SetDefault("rss_generator.worker_token", "")
+	viper.SetDefault("rss_generator.public_base_url", "")
+	viper.SetDefault("rss_generator.request_timeout_seconds", 90)
+	viper.SetDefault("rss_generator.secret_key_file", "data/rss-generator.key")
+	_ = viper.BindEnv("rss_generator.worker_url", "RSS_GENERATOR_WORKER_URL")
+	_ = viper.BindEnv("rss_generator.public_base_url", "RSS_GENERATOR_PUBLIC_BASE_URL")
+	_ = viper.BindEnv("rss_generator.request_timeout_seconds", "RSS_GENERATOR_REQUEST_TIMEOUT_SECONDS")
+	_ = viper.BindEnv("rss_generator.secret_key_file", "RSS_GENERATOR_SECRET_KEY_FILE")
 
 	// 登录页公开展示配置
 	viper.SetDefault("site.login_title", DefaultLoginTitle)
@@ -916,6 +949,31 @@ func applySiteDefaults(settings *SiteConfig) {
 	}
 }
 
+// applyRSSGeneratorDefaults also covers existing config files that do not yet
+// contain the new parent map. Viper does not always unmarshal nested defaults
+// into that case, while explicit environment bindings must still take effect.
+func applyRSSGeneratorDefaults(settings *RSSGeneratorConfig) {
+	if strings.TrimSpace(settings.WorkerURL) == "" {
+		settings.WorkerURL = strings.TrimSpace(viper.GetString("rss_generator.worker_url"))
+	}
+	if environmentToken, ok := os.LookupEnv("RSS_GENERATOR_WORKER_TOKEN"); ok {
+		// Read the secret outside Viper so an unrelated config.Save call cannot
+		// serialize an environment-only token back into config.yaml.
+		settings.WorkerToken = environmentToken
+	} else if settings.WorkerToken == "" {
+		settings.WorkerToken = viper.GetString("rss_generator.worker_token")
+	}
+	if strings.TrimSpace(settings.PublicBaseURL) == "" {
+		settings.PublicBaseURL = strings.TrimRight(strings.TrimSpace(viper.GetString("rss_generator.public_base_url")), "/")
+	}
+	if settings.RequestTimeoutSeconds <= 0 {
+		settings.RequestTimeoutSeconds = viper.GetInt("rss_generator.request_timeout_seconds")
+	}
+	if strings.TrimSpace(settings.SecretKeyFile) == "" {
+		settings.SecretKeyFile = strings.TrimSpace(viper.GetString("rss_generator.secret_key_file"))
+	}
+}
+
 // validateConfig 验证配置的有效性
 func validateConfig(config *Config) error {
 	if config.Server.Port == "" {
@@ -937,6 +995,38 @@ func validateConfig(config *Config) error {
 	}
 	if err := ValidateWebhook(config.Webhook); err != nil {
 		return err
+	}
+	if err := ValidateRSSGenerator(config.RSSGenerator); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateRSSGenerator 校验 FilmFusion 与内部执行 Worker 的启动配置。
+func ValidateRSSGenerator(settings RSSGeneratorConfig) error {
+	workerURL, err := url.ParseRequestURI(strings.TrimSpace(settings.WorkerURL))
+	if err != nil || workerURL.Host == "" || (workerURL.Scheme != "http" && workerURL.Scheme != "https") {
+		return fmt.Errorf("RSS 生成器 Worker 地址无效")
+	}
+	if workerURL.User != nil {
+		return fmt.Errorf("RSS 生成器 Worker 地址不能包含用户名或密码")
+	}
+	if strings.ContainsAny(settings.WorkerToken, "\r\n") {
+		return fmt.Errorf("RSS 生成器 Worker Token 不能包含换行")
+	}
+	if settings.RequestTimeoutSeconds <= 0 || settings.RequestTimeoutSeconds > 300 {
+		return fmt.Errorf("RSS 生成器请求超时需在 1 到 300 秒之间")
+	}
+	if strings.TrimSpace(settings.SecretKeyFile) == "" {
+		return fmt.Errorf("RSS 生成器密钥文件路径不能为空")
+	}
+	publicBaseURL := strings.TrimSpace(settings.PublicBaseURL)
+	if publicBaseURL == "" {
+		return nil
+	}
+	parsed, err := url.ParseRequestURI(publicBaseURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("RSS 生成器对外地址必须是不含账号信息的 HTTPS URL")
 	}
 	return nil
 }

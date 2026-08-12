@@ -68,6 +68,9 @@ func AutoMigrate() error {
 		&model.RSSAutomationEntry{},
 		&model.RSSAutomationRun{},
 		&model.RSSAutomationNodeRun{},
+		&model.RSSGeneratorFeedDefinition{},
+		&model.RSSGeneratorFeedAccessToken{},
+		&model.RSSGeneratorFeedCache{},
 	); err != nil {
 		return err
 	}

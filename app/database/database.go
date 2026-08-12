@@ -53,6 +53,12 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 		return err
 	}
 
+	// RSS 自动化请求配置只保存在数据库，缺失时写入程序默认值。
+	if err := InitRSSAutomationSettings(); err != nil {
+		log.Errorf("初始化 RSS 自动化运行配置失败: %v", err)
+		return err
+	}
+
 	// 初始化管理员账户
 	if err := InitAdminUser(cfg, log); err != nil {
 		log.Errorf("初始化管理员账户失败: %v", err)

@@ -5,3 +5,4 @@
 film-fusion
 /dist/*
 .DS_Store
+.env

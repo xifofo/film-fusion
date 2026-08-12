@@ -167,6 +167,35 @@ func (h *RSSAutomationHandler) UpdateWorkflow(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("自动化流程已更新", gin.H{"workflow": updated, "validation": validation}))
 }
 
+func (h *RSSAutomationHandler) ListManualCandidates(c *gin.Context) {
+	id, ok := rssAutomationID(c, "自动化流程")
+	if !ok {
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	result, err := h.service.ListManualCandidates(id, limit)
+	if respondRSSAutomationError(c, err, "获取可手动运行条目失败") {
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("获取可手动运行条目成功", result))
+}
+
+func (h *RSSAutomationHandler) CreateManualRuns(c *gin.Context) {
+	id, ok := rssAutomationID(c, "自动化流程")
+	if !ok {
+		return
+	}
+	var input service.RSSAutomationManualRunInput
+	if !bindRSSAutomationJSON(c, &input) {
+		return
+	}
+	result, err := h.service.CreateManualRuns(id, input)
+	if respondRSSAutomationError(c, err, "创建手动运行失败") {
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("所选条目已加入运行队列", result))
+}
+
 func (h *RSSAutomationHandler) CreateTarget(c *gin.Context) {
 	var input service.RSSAutomationTargetInput
 	if !bindRSSAutomationJSON(c, &input) {
@@ -221,7 +250,17 @@ func (h *RSSAutomationHandler) TestTarget(c *gin.Context) {
 func (h *RSSAutomationHandler) ListRuns(c *gin.Context) {
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
 	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	runs, total, err := h.service.ListRuns(strings.TrimSpace(c.Query("status")), limit, offset)
+	var workflowID uint64
+	rawWorkflowID := strings.TrimSpace(c.Query("workflow_id"))
+	if rawWorkflowID != "" {
+		parsed, parseErr := strconv.ParseUint(rawWorkflowID, 10, 64)
+		if parseErr != nil || parsed == 0 {
+			c.JSON(http.StatusBadRequest, NewErrorResponse("自动化流程 ID 无效", ""))
+			return
+		}
+		workflowID = parsed
+	}
+	runs, total, err := h.service.ListRuns(uint(workflowID), strings.TrimSpace(c.Query("status")), limit, offset)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, NewErrorResponse("获取运行记录失败", err.Error()))
 		return

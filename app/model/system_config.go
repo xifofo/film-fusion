@@ -29,10 +29,11 @@ func (SystemConfig) TableName() string {
 
 // ConfigCategory 配置分类常量
 const (
-	CategorySystem     = "system"     // 系统配置
-	CategorySecurity   = "security"   // 安全配置
-	Category115Open    = "115_open"   // 115开放平台配置
-	CategoryAppearance = "appearance" // 站点外观配置
+	CategorySystem        = "system"         // 系统配置
+	CategorySecurity      = "security"       // 安全配置
+	Category115Open       = "115_open"       // 115开放平台配置
+	CategoryRSSAutomation = "rss_automation" // RSS 自动化配置
+	CategoryAppearance    = "appearance"     // 站点外观配置
 )
 
 // ConfigType 配置类型常量
@@ -65,3 +66,6 @@ const (
 	ConfigKey115CookieDefaultApp = "server.cookie_115_default_app"
 	ConfigKey115WebUserAgent     = "server.web_115_user_agent"
 )
+
+// RSS 自动化运行配置键。只保存在 system_configs，不从 config.yaml 读取或写入。
+const ConfigKeyRSSAutomationUserAgent = "rss_automation.user_agent"

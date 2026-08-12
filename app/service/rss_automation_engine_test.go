@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"film-fusion/app/database"
 	"film-fusion/app/model"
 
 	"gorm.io/driver/sqlite"
@@ -156,10 +157,14 @@ func newRSSAutomationTestDB(t *testing.T) *gorm.DB {
 		t.Fatal(err)
 	}
 	if err := db.AutoMigrate(
+		&model.SystemConfig{},
 		&model.RSSAutomationSource{}, &model.RSSAutomationWorkflow{}, &model.RSSAutomationTarget{},
 		&model.RSSAutomationEntry{}, &model.RSSAutomationRun{}, &model.RSSAutomationNodeRun{},
 		&model.CloudStorage{},
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SaveRSSAutomationSettings(db, database.DefaultRSSAutomationUserAgent); err != nil {
 		t.Fatal(err)
 	}
 	return db

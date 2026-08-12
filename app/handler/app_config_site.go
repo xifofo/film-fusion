@@ -114,6 +114,10 @@ func (h *AppConfigHandler) saveConfigAndSiteSettings(in *config.Config) error {
 		tx.Rollback()
 		return err
 	}
+	if err := database.SaveRSSAutomationSettings(tx, in.RSSAutomation.UserAgent); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := config.Save(in); err != nil {
 		tx.Rollback()
 		return err

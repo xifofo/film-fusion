@@ -41,12 +41,13 @@ type Server struct {
 	notificationService    *service.NotificationService
 	rssMonitorService      *service.RSSMonitorService
 	rssAutomationService   *service.RSSAutomationService
+	rssGeneratorService    *service.RSSGeneratorService
 	taskQueue              *service.PersistentTaskQueue
 }
 
 // NewServer 创建一个新的 Server 实例
 func New(cfg *config.Config, log *logger.Logger) *Server {
-	router := gin.Default()
+	router := newApplicationRouter()
 
 	// 创建115Open下载服务
 	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
@@ -106,6 +107,14 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	}
 	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.notificationService, s.moviePilotService)
 	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService)
+	rssGeneratorService, err := service.NewRSSGeneratorService(database.GetDB(), log, cfg.RSSGenerator)
+	if err != nil {
+		// Stored request credentials cannot be used safely without the dedicated
+		// encryption key. Fail closed instead of starting a partially working
+		// public feed endpoint.
+		log.Fatalf("初始化 RSS 生成器失败: %v", err)
+	}
+	s.rssGeneratorService = rssGeneratorService
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.notificationService)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.notificationService)
 
@@ -124,6 +133,20 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	}
 
 	return s
+}
+
+func newApplicationRouter() *gin.Engine {
+	router := gin.New()
+	router.Use(
+		gin.LoggerWithConfig(gin.LoggerConfig{Skip: func(c *gin.Context) bool {
+			// A public subscription token is a credential. Gin's default logger
+			// includes the full path and query string, so do not write these
+			// requests to the generic access log.
+			return strings.HasPrefix(c.Request.URL.Path, "/rss/s/")
+		}}),
+		gin.Recovery(),
+	)
+	return router
 }
 
 // Start 启动服务器
@@ -270,6 +293,7 @@ func (s *Server) setupRoutes() {
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
 	rssAutomationHandler := handler.NewRSSAutomationHandler(s.rssAutomationService)
+	rssGeneratorHandler := handler.NewRSSGeneratorHandler(s.rssGeneratorService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -304,6 +328,10 @@ func (s *Server) setupRoutes() {
 	api.GET("/public-config", appConfigHandler.GetPublic)
 	api.GET("/public-assets/login-background/:filename", appConfigHandler.GetLoginBackground)
 	api.GET("/public-assets/login-background-emby/:itemID", appConfigHandler.GetEmbyLoginBackground)
+
+	// Public feeds use a dedicated, revocable read-only credential. This route
+	// must remain outside the administrator JWT middleware.
+	s.gin.GET("/rss/s/:token", rssGeneratorHandler.PublicFeed)
 
 	// 认证相关路由（不需要JWT验证）
 	auth := api.Group("/auth")
@@ -370,6 +398,8 @@ func (s *Server) setupRoutes() {
 			rssAutomation.POST("/refresh", rssAutomationHandler.Refresh)
 			rssAutomation.POST("/workflows/validate", rssAutomationHandler.ValidateWorkflow)
 			rssAutomation.PUT("/workflows/:id", rssAutomationHandler.UpdateWorkflow)
+			rssAutomation.GET("/workflows/:id/manual-candidates", rssAutomationHandler.ListManualCandidates)
+			rssAutomation.POST("/workflows/:id/manual-runs", rssAutomationHandler.CreateManualRuns)
 			rssAutomation.POST("/targets", rssAutomationHandler.CreateTarget)
 			rssAutomation.PUT("/targets/:id", rssAutomationHandler.UpdateTarget)
 			rssAutomation.DELETE("/targets/:id", rssAutomationHandler.DeleteTarget)
@@ -378,6 +408,23 @@ func (s *Server) setupRoutes() {
 			rssAutomation.GET("/runs/:id", rssAutomationHandler.GetRun)
 			rssAutomation.POST("/runs/:id/retry", rssAutomationHandler.RetryRun)
 			rssAutomation.POST("/runs/:id/cancel", rssAutomationHandler.CancelRun)
+		}
+
+		rssGenerator := protected.Group("/rss-generator")
+		{
+			rssGenerator.GET("/dashboard", rssGeneratorHandler.Dashboard)
+			rssGenerator.GET("/health", rssGeneratorHandler.Health)
+			rssGenerator.GET("/feeds", rssGeneratorHandler.ListFeeds)
+			rssGenerator.POST("/feeds", rssGeneratorHandler.CreateFeed)
+			rssGenerator.POST("/preview", rssGeneratorHandler.Preview)
+			rssGenerator.GET("/feeds/:id", rssGeneratorHandler.GetFeed)
+			rssGenerator.PUT("/feeds/:id", rssGeneratorHandler.UpdateFeed)
+			rssGenerator.DELETE("/feeds/:id", rssGeneratorHandler.DeleteFeed)
+			rssGenerator.POST("/feeds/:id/preview", rssGeneratorHandler.PreviewSaved)
+			rssGenerator.GET("/feeds/:id/tokens", rssGeneratorHandler.ListTokens)
+			rssGenerator.POST("/feeds/:id/tokens", rssGeneratorHandler.CreateToken)
+			rssGenerator.POST("/feeds/:id/tokens/:token_id/rotate", rssGeneratorHandler.RotateToken)
+			rssGenerator.DELETE("/feeds/:id/tokens/:token_id", rssGeneratorHandler.RevokeToken)
 		}
 
 		config := protected.Group("/config")

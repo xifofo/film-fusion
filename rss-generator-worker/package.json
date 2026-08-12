@@ -1,0 +1,39 @@
+{
+  "name": "@film-fusion/rss-generator-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated declarative feed extraction worker for FilmFusion",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "cheerio": "^1.2.0",
+    "domhandler": "^5.0.3",
+    "hono": "^4.13.1",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.6",
+    "ipaddr.js": "^2.2.0",
+    "iconv-lite": "^0.7.2",
+    "node-fetch": "^3.3.2",
+    "playwright": "^1.62.1",
+    "socks-proxy-agent": "^8.0.5",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.13",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "packageManager": "pnpm@10.17.1"
+}
