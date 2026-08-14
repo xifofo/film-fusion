@@ -99,6 +99,34 @@ func TestRSSGeneratorWorkerTokenIsInternalOnlyInJSON(t *testing.T) {
 	}
 }
 
+func TestSavePersistsRSSGeneratorWorkerToken(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("rss_generator:\n  worker_token: \"\"\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+
+	const token = "saved-worker-token-with-at-least-32-characters"
+	if err := Save(&Config{RSSGenerator: RSSGeneratorConfig{WorkerToken: token}}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	reloaded := viper.New()
+	reloaded.SetConfigFile(path)
+	if err := reloaded.ReadInConfig(); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got := reloaded.GetString("rss_generator.worker_token"); got != token {
+		t.Fatalf("worker token = %q, want %q", got, token)
+	}
+}
+
 func TestValidateRSSGeneratorRejectsUnsafeStartupSettings(t *testing.T) {
 	valid := RSSGeneratorConfig{
 		WorkerURL:             "http://127.0.0.1:8787",

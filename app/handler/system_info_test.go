@@ -62,7 +62,7 @@ func TestSystemInfoReturnsTokenReadErrorWithoutFailingThePage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := NewSystemInfoHandler(fakeSystemInfoRSSGenerator{
 		url:      "http://rss-generator-worker:8787",
-		tokenErr: errors.New("RSS Worker Token 尚未生成"),
+		tokenErr: errors.New("RSS Worker Token 尚未设置"),
 		worker:   service.RSSGeneratorWorkerStatus{Status: "unavailable"},
 	})
 	router := gin.New()
@@ -71,7 +71,7 @@ func TestSystemInfoReturnsTokenReadErrorWithoutFailingThePage(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/system-info", nil))
 
-	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "RSS Worker Token 尚未生成") {
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "RSS Worker Token 尚未设置") {
 		t.Fatalf("unexpected response: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if strings.Contains(recorder.Body.String(), `"token":"`) {

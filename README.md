@@ -38,7 +38,7 @@ emby:
   enabled: false                     # 尚未配置 Emby 时先关闭
 ```
 
-Compose 会在首次启动时自动生成 RSS Worker 内部 Token，并保存在独立命名卷中；不需要创建 `.env`，也不写入 `data/config.yaml`。登录后可在“系统信息”页面查看和复制它。没有 HTTPS 域名时，保持 `rss_generator.public_base_url` 为空即可。
+在 Compose 的 `rss-generator-worker.environment` 中手工填写至少 32 个字符的 `WORKER_AUTH_TOKEN`。首次启动后，登录 FilmFusion，在“系统设置 → RSS 生成器”中填写完全相同的 Token；两边不一致时 Worker 会拒绝请求。没有 HTTPS 域名时，保持 `rss_generator.public_base_url` 为空即可。
 
 RSS Feed 使用统一地址 `/rss/{feedPublicID}.xml`（或 `.atom`）：局域网来源可直接订阅，公网来源必须使用管理页生成的 `?token=...` 地址。订阅 Token 与 RSS Worker 内部 Token 相互独立。
 

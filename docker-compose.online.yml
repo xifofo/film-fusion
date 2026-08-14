@@ -1,47 +1,41 @@
 services:
   film-fusion:
-    build:
-      context: .
-    image: "kumayi/film-fusion:v2.0.1"
+    image: "kumayi/film-fusion:v3.0.8"
     container_name: "film-fusion"
-    restart: unless-stopped
+    # restart: unless-stopped
     ports:
       # Web 管理界面和 API 端口
-      - "9000:9000"
+      - "8095:8095"
       # Emby 代理端口（用于直链播放）
       - "8097:8097"
     volumes:
       # 配置和数据目录
-      - ./data:/app/data
-      # 下载目录（可选，如果需要容器访问本地下载文件）
-      # - /path/to/downloads:/mnt/downloads
-      # CloudDrive2挂载目录（可选）
-      # - /mnt/clouddrive:/mnt/clouddrive:ro
+      - /vol3/1000/Docker/FilmFusion/data:/app/data
+      # 媒体目录
+      - /vol3/1000/MediaSTRM:/MediaSTRM
+      - /vol1/1000/CloudNAS:/CloudNAS
+      - /vol2/1000/Media:/Media
+      - /vol2/1000/Media:/vol2/1000/Media
+      - /vol1/1000/CloudNAS:/vol1/1000/CloudNAS
     environment:
-      # 设置时区
       - TZ=Asia/Shanghai
-      # 运行模式（生产环境）
       - GIN_MODE=release
-      # RSS 生成器执行面只通过 Compose 内网访问。
+      # RSS Worker 只通过 Docker 内部网络访问。
       - RSS_GENERATOR_WORKER_URL=http://rss-generator-worker:8787
     depends_on:
       rss-generator-worker:
         condition: service_healthy
-    # 网络配置（可选）
-    # networks:
-    #   - film-fusion-network
 
   rss-generator-worker:
-    build:
-      context: ./rss-generator-worker
-    image: "film-fusion-rss-generator-worker:local"
+    image: "kumayi/film-fusion-rss-generator-worker:v3.0.8"
+    container_name: "rss-generator-worker"
     restart: unless-stopped
     init: true
     shm_size: "1gb"
     environment:
       - NODE_ENV=production
       - PORT=8787
-      # 必填：至少 32 个字符，并在 FilmFusion「系统设置 → RSS 生成器」中填写相同值。
+      # 必填：至少 32 个字符，并与 FilmFusion「系统设置 → RSS 生成器」中填写的值完全相同。
       - WORKER_AUTH_TOKEN=
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(async r=>{const body=await r.json();if(!r.ok||body.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"]
@@ -50,7 +44,6 @@ services:
       retries: 10
       start_period: 20s
 
-# 网络配置（可选）
 networks:
   default:
     name: film-fusion-network

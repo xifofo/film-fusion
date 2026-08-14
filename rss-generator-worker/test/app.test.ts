@@ -27,21 +27,22 @@ const result: GenerateResult = {
 };
 
 afterEach(() => {
+  delete process.env.WORKER_AUTH_TOKEN;
   delete process.env.WORKER_AUTH_TOKEN_FILE;
 });
 
 describe("worker HTTP API", () => {
-  it("reports an unavailable health state until the token file is configured", async () => {
+  it("reports an unavailable health state until a token is configured", async () => {
     const response = await createApp().request("/health");
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       status: "unavailable",
       auth_configured: false,
-      error: "Worker Token 文件未配置",
+      error: "Worker Token 未配置",
     });
   });
 
-  it("requires the bearer token from the shared secret file", async () => {
+  it("requires the configured bearer token", async () => {
     const generate = vi.fn(async (_request: GenerateRequest) => result);
     const app = createApp({ generate, auth: () => ({ token: "expected" }) });
     const unauthorized = await app.request("/v1/generate", {
@@ -56,6 +57,24 @@ describe("worker HTTP API", () => {
       body: JSON.stringify(validBody),
     });
     expect(authorized.status).toBe(200);
+    expect(generate).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the bearer token from the Compose environment", async () => {
+    process.env.WORKER_AUTH_TOKEN = "compose-worker-token";
+    const generate = vi.fn(async (_request: GenerateRequest) => result);
+    const app = createApp({ generate });
+
+    const response = await app.request("/v1/generate", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer compose-worker-token",
+      },
+      body: JSON.stringify(validBody),
+    });
+
+    expect(response.status).toBe(200);
     expect(generate).toHaveBeenCalledTimes(1);
   });
 

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -24,9 +25,16 @@ type AppConfigHandler struct {
 	emby          *embyhelper.EmbyClient
 	coverSvc      *service.EmbyCoverService
 	tmdbSvc       *service.TMDBService
+	rssGenerator  *service.RSSGeneratorService
 	siteAssetsDir string
 	db            *gorm.DB
 	backgrounds   *loginBackgroundCache
+}
+
+// SetRSSGeneratorService connects the live RSS Worker client so Token changes
+// saved from the settings page take effect without restarting FilmFusion.
+func (h *AppConfigHandler) SetRSSGeneratorService(rssGenerator *service.RSSGeneratorService) {
+	h.rssGenerator = rssGenerator
 }
 
 // NewAppConfigHandler 构造
@@ -113,6 +121,8 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 		"hdhive.api_key":                   h.cfg.HDHive.APIKey != "",
 		"hdhive.access_token":              h.cfg.HDHive.AccessToken != "",
 		"hdhive.refresh_token":             h.cfg.HDHive.RefreshToken != "",
+		"rss_generator.worker_token": h.cfg.RSSGenerator.WorkerToken != "" ||
+			strings.TrimSpace(h.cfg.RSSGenerator.WorkerTokenFile) != "",
 	}
 	v.Server.Password = ""
 	v.Webhook.CloudDrive2.Token = ""
@@ -131,10 +141,12 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 }
 
 type appConfigUpdatePayload struct {
-	Config                      config.Config `json:"config"`
-	web115UserAgentFieldPresent bool
-	notificationsFieldPresent   bool
-	telegramFieldPresent        bool
+	Config                              config.Config `json:"config"`
+	web115UserAgentFieldPresent         bool
+	notificationsFieldPresent           bool
+	telegramFieldPresent                bool
+	rssGeneratorWorkerToken             string
+	rssGeneratorWorkerTokenFieldPresent bool
 }
 
 func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
@@ -155,6 +167,7 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 		Server        map[string]json.RawMessage `json:"server"`
 		Notifications json.RawMessage            `json:"notifications"`
 		Telegram      json.RawMessage            `json:"telegram"`
+		RSSGenerator  map[string]json.RawMessage `json:"rss_generator"`
 	}
 	if err := json.Unmarshal(raw.Config, &fields); err != nil {
 		return err
@@ -162,7 +175,26 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 	_, p.web115UserAgentFieldPresent = fields.Server["web_115_user_agent"]
 	p.notificationsFieldPresent = len(fields.Notifications) > 0 && string(fields.Notifications) != "null"
 	p.telegramFieldPresent = len(fields.Telegram) > 0 && string(fields.Telegram) != "null"
+	if rawToken, ok := fields.RSSGenerator["worker_token"]; ok {
+		p.rssGeneratorWorkerTokenFieldPresent = true
+		if err := json.Unmarshal(rawToken, &p.rssGeneratorWorkerToken); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (p appConfigUpdatePayload) mergedRSSGeneratorConfig(current config.RSSGeneratorConfig) (config.RSSGeneratorConfig, error) {
+	if !p.rssGeneratorWorkerTokenFieldPresent {
+		return current, nil
+	}
+	if strings.ContainsAny(p.rssGeneratorWorkerToken, "\r\n") {
+		return current, errors.New("RSS 生成器 Worker Token 不能包含换行")
+	}
+	if token := strings.TrimSpace(p.rssGeneratorWorkerToken); token != "" {
+		current.WorkerToken = token
+	}
+	return current, nil
 }
 
 // Update PUT /api/app-config 将启动配置保存到 YAML、运行配置保存到数据库，并尽量热重载。
@@ -189,9 +221,14 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		in.RSSAutomation.UserAgent = currentRSSAutomationUserAgent
 	}
 	in.RSSAutomation.UserAgent = database.NormalizeRSSAutomationUserAgent(in.RSSAutomation.UserAgent)
-	// RSS 生成器连接参数不由通用系统设置页编辑。默认部署的 Worker Token
-	// 来自部署层共享文件，只在只读系统信息页中显示。
-	in.RSSGenerator = h.cfg.RSSGenerator
+	// RSS 生成器只有 Worker Token 由系统设置页编辑；地址、超时和密钥文件
+	// 仍沿用启动配置。和其他密钥一样，字段缺失或留空表示保留现值。
+	var err error
+	in.RSSGenerator, err = payload.mergedRSSGeneratorConfig(h.cfg.RSSGenerator)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
 	if in.Emby.ImageOptimization.IsZero() {
 		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
@@ -402,6 +439,9 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	// 就地更新共享配置，使按需读取 cfg 的逻辑立即生效
 	*h.cfg = in
+	if h.rssGenerator != nil {
+		h.rssGenerator.ReloadWorkerAuth(in.RSSGenerator)
+	}
 	// 热重载关键组件：Emby 连接、封面 cron、日志级别
 	h.emby.Reload()
 	h.coverSvc.Restart()

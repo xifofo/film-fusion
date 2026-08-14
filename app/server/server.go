@@ -289,6 +289,7 @@ func (s *Server) setupRoutes() {
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
+	appConfigHandler.SetRSSGeneratorService(s.rssGeneratorService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)

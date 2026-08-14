@@ -94,8 +94,8 @@ type RSSAutomationConfig struct {
 }
 
 // RSSGeneratorConfig 保存 RSS 生成器执行面的客户端连接配置。
-// WorkerToken 仅保留独立部署 Worker 时的兼容入口；默认 Compose 部署从
-// WorkerTokenFile 读取部署层自动生成的共享密钥，两者都不会进入通用配置响应。
+// WorkerToken 由管理员在系统设置页维护且不会进入通用配置响应；
+// WorkerTokenFile 仅保留给现有文件挂载部署兼容使用。
 type RSSGeneratorConfig struct {
 	WorkerURL             string `mapstructure:"worker_url" json:"worker_url"`
 	WorkerToken           string `mapstructure:"worker_token" json:"-"`
@@ -386,6 +386,7 @@ func Save(c *Config) error {
 	viper.Set("jwt.issuer", c.JWT.Issuer)
 
 	viper.Set("rss_generator.worker_url", c.RSSGenerator.WorkerURL)
+	viper.Set("rss_generator.worker_token", c.RSSGenerator.WorkerToken)
 	viper.Set("rss_generator.public_base_url", c.RSSGenerator.PublicBaseURL)
 	viper.Set("rss_generator.request_timeout_seconds", c.RSSGenerator.RequestTimeoutSeconds)
 	viper.Set("rss_generator.secret_key_file", c.RSSGenerator.SecretKeyFile)

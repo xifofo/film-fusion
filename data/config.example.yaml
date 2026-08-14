@@ -37,10 +37,11 @@ webhook:
     enabled: false
     token: ""  # openssl rand -hex 32
 
-# RSS 生成器的抓取执行面。Docker Compose 会覆盖 worker_url，并自动生成内部 Token。
-# 仅连接独立部署的 Worker 时，才需要另行添加 worker_token 客户端凭证。
+# RSS 生成器的抓取执行面。Compose 会覆盖 worker_url；首次启动后请在
+# 「系统设置 → RSS 生成器」填写与 Worker WORKER_AUTH_TOKEN 相同的值。
 rss_generator:
   worker_url: "http://127.0.0.1:8787"
+  worker_token: ""             # 至少 32 个字符；后台读取时不会回显明文
   public_base_url: ""          # 留空返回相对地址，管理页会按当前访问域名展示
   request_timeout_seconds: 90
   secret_key_file: "data/rss-generator.key" # Cookie/代理等敏感字段的本地 AES 密钥（0600）

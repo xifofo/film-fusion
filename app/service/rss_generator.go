@@ -203,15 +203,18 @@ type rssGeneratorRateWindow struct {
 }
 
 type RSSGeneratorService struct {
-	db          *gorm.DB
-	log         *logger.Logger
-	cfg         config.RSSGeneratorConfig
-	httpClient  *http.Client
-	cipher      *rssGeneratorCipher
-	flightMu    sync.Mutex
-	flights     map[string]*rssGeneratorFlight
-	rateMu      sync.Mutex
-	rateWindows map[uint]rssGeneratorRateWindow
+	db              *gorm.DB
+	log             *logger.Logger
+	cfg             config.RSSGeneratorConfig
+	httpClient      *http.Client
+	cipher          *rssGeneratorCipher
+	workerAuthMu    sync.RWMutex
+	workerToken     string
+	workerTokenFile string
+	flightMu        sync.Mutex
+	flights         map[string]*rssGeneratorFlight
+	rateMu          sync.Mutex
+	rateWindows     map[uint]rssGeneratorRateWindow
 }
 
 func NewRSSGeneratorService(db *gorm.DB, log *logger.Logger, cfg config.RSSGeneratorConfig) (*RSSGeneratorService, error) {
@@ -230,9 +233,19 @@ func NewRSSGeneratorService(db *gorm.DB, log *logger.Logger, cfg config.RSSGener
 	}
 	return &RSSGeneratorService{
 		db: db, log: log, cfg: cfg, cipher: cipher,
+		workerToken: cfg.WorkerToken, workerTokenFile: cfg.WorkerTokenFile,
 		httpClient: &http.Client{Timeout: time.Duration(cfg.RequestTimeoutSeconds) * time.Second},
 		flights:    make(map[string]*rssGeneratorFlight), rateWindows: make(map[uint]rssGeneratorRateWindow),
 	}, nil
+}
+
+// ReloadWorkerAuth applies the administrator-managed client credential without
+// rebuilding the service. Existing file-based deployments retain file precedence.
+func (s *RSSGeneratorService) ReloadWorkerAuth(cfg config.RSSGeneratorConfig) {
+	s.workerAuthMu.Lock()
+	s.workerToken = cfg.WorkerToken
+	s.workerTokenFile = cfg.WorkerTokenFile
+	s.workerAuthMu.Unlock()
 }
 
 // WorkerURL 返回 FilmFusion 当前调用的 Worker 地址。它属于主服务的客户端连接信息。
@@ -240,11 +253,14 @@ func (s *RSSGeneratorService) WorkerURL() string {
 	return strings.TrimRight(strings.TrimSpace(s.cfg.WorkerURL), "/")
 }
 
-// WorkerAccessToken 读取当前内部调用凭证。默认 Compose 部署使用只读共享文件，
-// 独立部署则兼容原有 worker_token 客户端配置。每次调用都重新读取文件，以便安全轮换。
+// WorkerAccessToken 读取当前内部调用凭证。默认 Compose 部署由管理员在系统
+// 设置页维护 worker_token；现有文件挂载部署仍可使用文件覆盖并支持在线轮换。
 func (s *RSSGeneratorService) WorkerAccessToken() (string, error) {
-	raw := s.cfg.WorkerToken
-	if path := strings.TrimSpace(s.cfg.WorkerTokenFile); path != "" {
+	s.workerAuthMu.RLock()
+	raw := s.workerToken
+	path := strings.TrimSpace(s.workerTokenFile)
+	s.workerAuthMu.RUnlock()
+	if path != "" {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("读取 RSS Worker Token 文件失败: %w", err)
@@ -257,7 +273,7 @@ func (s *RSSGeneratorService) WorkerAccessToken() (string, error) {
 
 	token := strings.TrimSpace(raw)
 	if token == "" {
-		return "", errors.New("RSS Worker Token 尚未生成")
+		return "", errors.New("RSS Worker Token 尚未设置")
 	}
 	if strings.ContainsAny(token, "\r\n") {
 		return "", errors.New("RSS Worker Token 格式无效")

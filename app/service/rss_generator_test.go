@@ -59,7 +59,7 @@ func validRSSGeneratorTestInput(sourceURL string) RSSGeneratorFeedInput {
 func TestRSSGeneratorWorkerAccessTokenPrefersAndReloadsSharedFile(t *testing.T) {
 	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
 	tokenFile := filepath.Join(t.TempDir(), "worker-token")
-	service.cfg.WorkerTokenFile = tokenFile
+	service.ReloadWorkerAuth(config.RSSGeneratorConfig{WorkerTokenFile: tokenFile})
 
 	if err := os.WriteFile(tokenFile, []byte("first-shared-worker-token"), 0o600); err != nil {
 		t.Fatal(err)
@@ -77,10 +77,19 @@ func TestRSSGeneratorWorkerAccessTokenPrefersAndReloadsSharedFile(t *testing.T) 
 
 func TestRSSGeneratorWorkerAccessTokenReportsMissingSharedFile(t *testing.T) {
 	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
-	service.cfg.WorkerTokenFile = filepath.Join(t.TempDir(), "missing-token")
+	service.ReloadWorkerAuth(config.RSSGeneratorConfig{WorkerTokenFile: filepath.Join(t.TempDir(), "missing-token")})
 
 	if _, err := service.WorkerAccessToken(); err == nil || !strings.Contains(err.Error(), "读取 RSS Worker Token 文件失败") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRSSGeneratorWorkerAccessTokenReloadsSettingsToken(t *testing.T) {
+	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
+	service.ReloadWorkerAuth(config.RSSGeneratorConfig{WorkerToken: "updated-worker-token"})
+
+	if token, err := service.WorkerAccessToken(); err != nil || token != "updated-worker-token" {
+		t.Fatalf("updated token = %q, err = %v", token, err)
 	}
 }
 

@@ -10,7 +10,7 @@
 | `film-fusion` | `8097` | 按需 | Emby 直链代理 |
 | `rss-generator-worker` | `8787` | 否 | RSS 抓取与浏览器渲染，仅供 FilmFusion 内网调用 |
 
-FilmFusion 的配置、SQLite 数据库、日志、登录会话密钥、RSS 加密密钥和上传资源都保存在宿主机的 `./data` 目录。RSS Worker 只有内部 Token 使用 Docker 命名卷持久化，不需要用户准备宿主机目录。
+FilmFusion 的配置、SQLite 数据库、日志、登录会话密钥、RSS 加密密钥和上传资源都保存在宿主机的 `./data` 目录。RSS Worker 内部 Token 由管理员手工配置：Worker 从 Compose 环境变量读取，FilmFusion 从系统设置读取。
 
 ## 一、准备服务器
 
@@ -57,9 +57,18 @@ server:
 
 管理员密码不能为空，否则服务会拒绝启动。JWT 签名密钥会自动生成到 `data/.jwt-secret`，不需要手工填写。
 
-### 2. RSS 生成器公开地址
+### 2. RSS Worker Token 与公开地址
 
-RSS Worker 内部 Token 无需手工配置。Compose 首次启动时会自动生成并保存在独立命名卷中，FilmFusion 与 Worker 仅以只读方式使用；它不会写入 `.env` 或 `data/config.yaml`。登录后可在“系统信息”页面查看和复制。
+编辑 `docker-compose.yml`，为 Worker 填写至少 32 个字符的随机 Token：
+
+```yaml
+services:
+  rss-generator-worker:
+    environment:
+      - WORKER_AUTH_TOKEN=请替换为至少32个字符的随机Token
+```
+
+Token 不会自动生成。启动完成后，登录 FilmFusion，进入“系统设置 → RSS 生成器”，填写与 `WORKER_AUTH_TOKEN` **完全相同**的值并保存。两边不一致时 Worker 会返回鉴权失败。
 
 没有域名时保持公开地址为空：
 
@@ -118,7 +127,7 @@ services:
 先检查 Compose 配置，再分别拉取主服务镜像、构建 Worker：
 
 ```bash
-docker compose config
+docker compose config --quiet
 docker compose pull film-fusion
 docker compose build --pull rss-generator-worker
 docker compose up -d --no-build
@@ -141,6 +150,7 @@ curl -fsS http://127.0.0.1:9000/api/public-config
 - 最后一条命令返回登录页公开配置 JSON。
 
 然后访问 `http://服务器IP:9000`，使用 `data/config.yaml` 中的管理员账户登录。
+首次启动后还需要进入“系统设置 → RSS 生成器”，保存与 Compose 中 `WORKER_AUTH_TOKEN` 相同的 Token；保存后主服务立即使用，无需重启。
 
 ## 五、反向代理与 HTTPS
 
@@ -241,17 +251,17 @@ docker compose down
 
 ## 十、常见问题
 
-### 系统信息页面提示 Worker Token 尚未生成
+### 系统信息页面提示 Worker Token 尚未设置或 Worker 鉴权失败
 
-先检查一次性初始化容器和 Worker：
+先检查 Worker：
 
 ```bash
-docker compose ps -a rss-generator-worker-secret-init rss-generator-worker
-docker compose logs rss-generator-worker-secret-init rss-generator-worker
-docker compose up -d --force-recreate rss-generator-worker-secret-init rss-generator-worker film-fusion
+docker compose ps rss-generator-worker
+docker compose logs rss-generator-worker
+docker compose up -d --no-build --force-recreate rss-generator-worker
 ```
 
-不要把 Token 手工写入 `data/config.yaml`。默认部署会在 `rss-generator-worker-secrets` 命名卷中自动生成并持久化。
+确认 Compose 的 `WORKER_AUTH_TOKEN` 非空且至少 32 个字符，再到“系统设置 → RSS 生成器”重新填写完全相同的值。修改 Compose 环境变量后必须重建 Worker 容器；只修改 FilmFusion 设置无需重启。
 
 ### FilmFusion 容器反复重启
 
@@ -270,7 +280,7 @@ docker compose logs --tail=200 film-fusion
 ### RSS Worker 不健康
 
 ```bash
-docker compose logs --tail=200 rss-generator-worker-secret-init rss-generator-worker
+docker compose logs --tail=200 rss-generator-worker
 docker compose build --pull --no-cache rss-generator-worker
 docker compose up -d --no-build rss-generator-worker film-fusion
 ```
@@ -291,7 +301,7 @@ docker compose restart film-fusion
 
 ## 安全清单
 
-- 管理员密码与 Webhook Token 分别使用独立随机值；RSS Worker Token 由部署层自动生成。
+- 管理员密码、Webhook Token 与 RSS Worker Token 分别使用独立随机值；Worker Token 至少 32 个字符，并在 Compose 与 FilmFusion 设置页保持一致。
 - 公网部署使用 HTTPS，不直接暴露管理端口。
 - 不对外映射 RSS Worker 的 `8787` 端口。
 - 只向可信代理开放 `trusted_proxy_cidrs`。
