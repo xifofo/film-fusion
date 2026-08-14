@@ -13,6 +13,8 @@ services:
     volumes:
       # 配置和数据目录
       - ./data:/app/data
+      # 部署层自动生成的 Worker Token；主服务只读，不写入 config.yaml。
+      - rss-generator-worker-secrets:/run/film-fusion-rss-worker:ro
       # 下载目录（可选，如果需要容器访问本地下载文件）
       # - /path/to/downloads:/mnt/downloads
       # CloudDrive2挂载目录（可选）
@@ -24,14 +26,29 @@ services:
       - GIN_MODE=release
       # RSS 生成器执行面只通过 Compose 内网访问。
       - RSS_GENERATOR_WORKER_URL=http://rss-generator-worker:8787
-      - RSS_GENERATOR_WORKER_TOKEN=${RSS_GENERATOR_WORKER_TOKEN:?set RSS_GENERATOR_WORKER_TOKEN in .env}
-      - RSS_GENERATOR_PUBLIC_BASE_URL=${RSS_GENERATOR_PUBLIC_BASE_URL:-}
+      - RSS_GENERATOR_WORKER_TOKEN_FILE=/run/film-fusion-rss-worker/token
     depends_on:
       rss-generator-worker:
         condition: service_healthy
     # 网络配置（可选）
     # networks:
     #   - film-fusion-network
+
+  rss-generator-worker-secret-init:
+    image: "alpine:3.22"
+    restart: "no"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        if [ ! -s /run/film-fusion-rss-worker/token ]; then
+          umask 077
+          head -c 48 /dev/urandom | base64 | tr -d '\n' > /run/film-fusion-rss-worker/.token.tmp
+          chmod 0444 /run/film-fusion-rss-worker/.token.tmp
+          mv /run/film-fusion-rss-worker/.token.tmp /run/film-fusion-rss-worker/token
+        fi
+    volumes:
+      - rss-generator-worker-secrets:/run/film-fusion-rss-worker
 
   rss-generator-worker:
     build:
@@ -43,9 +60,14 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=8787
-      - WORKER_AUTH_TOKEN=${RSS_GENERATOR_WORKER_TOKEN:?set RSS_GENERATOR_WORKER_TOKEN in .env}
+      - WORKER_AUTH_TOKEN_FILE=/run/film-fusion-rss-worker/token
+    volumes:
+      - rss-generator-worker-secrets:/run/film-fusion-rss-worker:ro
+    depends_on:
+      rss-generator-worker-secret-init:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(async r=>{const body=await r.json();if(!r.ok||body.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 3s
       retries: 10
@@ -55,3 +77,6 @@ services:
 networks:
   default:
     name: film-fusion-network
+
+volumes:
+  rss-generator-worker-secrets:

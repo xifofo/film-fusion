@@ -98,23 +98,32 @@ type RSSAutomationRefreshResult struct {
 }
 
 type RSSAutomationDashboard struct {
-	Sources       []model.RSSAutomationSource   `json:"sources"`
-	Workflows     []model.RSSAutomationWorkflow `json:"workflows"`
-	Targets       []model.RSSAutomationTarget   `json:"targets"`
-	RecentRuns    []model.RSSAutomationRun      `json:"recent_runs"`
-	TotalEntries  int64                         `json:"total_entries"`
-	PendingNodes  int64                         `json:"pending_nodes"`
-	RunningNodes  int64                         `json:"running_nodes"`
-	FailedRuns    int64                         `json:"failed_runs"`
-	SourceRunning bool                          `json:"source_running"`
+	Sources         []model.RSSAutomationSource        `json:"sources"`
+	Workflows       []model.RSSAutomationWorkflow      `json:"workflows"`
+	Targets         []model.RSSAutomationTarget        `json:"targets"`
+	RecentRuns      []model.RSSAutomationRun           `json:"recent_runs"`
+	TotalEntries    int64                              `json:"total_entries"`
+	PendingNodes    int64                              `json:"pending_nodes"`
+	RunningNodes    int64                              `json:"running_nodes"`
+	FailedRuns      int64                              `json:"failed_runs"`
+	SourceRunning   bool                               `json:"source_running"`
+	LegacyMigration RSSAutomationLegacyMigrationStatus `json:"legacy_migration"`
+	NodeProtocols   []RSSAutomationNodeProtocol        `json:"node_protocols"`
 }
 
 type RSSAutomationService struct {
-	db         *gorm.DB
-	log        *logger.Logger
-	notifier   NotificationPublisher
-	web115     *Web115Service
-	httpClient *http.Client
+	db            *gorm.DB
+	log           *logger.Logger
+	notifier      NotificationPublisher
+	web115        *Web115Service
+	httpClient    *http.Client
+	moviePilot    rssAutomationMoviePilotRecognizer
+	cloud115      rssAutomation115Gateway
+	organizer     RSSAutomationOrganizer
+	mediaStatus   RSSAutomationMediaStatusChecker
+	hdhive        RSSAutomationHDHiveGateway
+	emby          RSSAutomationEmbyClient
+	legacyMonitor *RSSMonitorService
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -128,13 +137,17 @@ type RSSAutomationService struct {
 	workers          chan struct{}
 }
 
-func NewRSSAutomationService(log *logger.Logger, notifier NotificationPublisher) *RSSAutomationService {
+func NewRSSAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService, legacyMonitor *RSSMonitorService) *RSSAutomationService {
 	ctx, cancel := context.WithCancel(context.Background())
+	web115 := serviceWeb115ForRSSAutomation(log)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	return &RSSAutomationService{
 		db: database.GetDB(), log: log, notifier: notifier,
-		web115:     serviceWeb115ForRSSAutomation(log),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		ctx:        ctx, cancel: cancel,
+		web115: web115, httpClient: httpClient, moviePilot: moviePilot, legacyMonitor: legacyMonitor,
+		cloud115: &defaultRSSAutomation115Gateway{
+			web115: web115, httpClient: httpClient,
+		},
+		ctx: ctx, cancel: cancel,
 		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
 		workers: make(chan struct{}, defaultRSSAutomationWorkerCount),
 	}
@@ -201,7 +214,11 @@ func (s *RSSAutomationService) Dashboard(limit int) (RSSAutomationDashboard, err
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	dashboard := RSSAutomationDashboard{Sources: []model.RSSAutomationSource{}, Workflows: []model.RSSAutomationWorkflow{}, Targets: []model.RSSAutomationTarget{}, RecentRuns: []model.RSSAutomationRun{}}
+	dashboard := RSSAutomationDashboard{
+		Sources: []model.RSSAutomationSource{}, Workflows: []model.RSSAutomationWorkflow{},
+		Targets: []model.RSSAutomationTarget{}, RecentRuns: []model.RSSAutomationRun{},
+		NodeProtocols: RSSAutomationNodeProtocols(),
+	}
 	if err := s.db.Order("id ASC").Find(&dashboard.Sources).Error; err != nil {
 		return dashboard, err
 	}
@@ -220,6 +237,11 @@ func (s *RSSAutomationService) Dashboard(limit int) (RSSAutomationDashboard, err
 	s.db.Model(&model.RSSAutomationNodeRun{}).Where("status = ?", model.RSSAutomationNodeRunning).Count(&dashboard.RunningNodes)
 	s.db.Model(&model.RSSAutomationRun{}).Where("status IN ?", []string{model.RSSAutomationRunFailed, model.RSSAutomationRunPartial}).Count(&dashboard.FailedRuns)
 	dashboard.SourceRunning = s.sourceRefreshing.Load()
+	legacyMigration, err := s.LegacyMigrationStatus()
+	if err != nil {
+		return dashboard, err
+	}
+	dashboard.LegacyMigration = legacyMigration
 	return dashboard, nil
 }
 
@@ -404,6 +426,15 @@ func (s *RSSAutomationService) CreateTarget(input RSSAutomationTargetInput) (mod
 	return target, nil
 }
 
+func (s *RSSAutomationService) ListTargets() ([]model.RSSAutomationTarget, error) {
+	targets := make([]model.RSSAutomationTarget, 0)
+	if err := s.db.Order("id ASC").Find(&targets).Error; err != nil {
+		return targets, err
+	}
+	redactRSSAutomationTargets(targets)
+	return targets, nil
+}
+
 func (s *RSSAutomationService) UpdateTarget(id uint, input RSSAutomationTargetInput) (model.RSSAutomationTarget, error) {
 	var target model.RSSAutomationTarget
 	if err := s.db.First(&target, id).Error; err != nil {
@@ -583,7 +614,7 @@ func (s *RSSAutomationService) refreshAutomationSource(ctx context.Context, sour
 		if len(parsedItem.Errors) > 0 {
 			continue
 		}
-		entry, created, createErr := s.persistRSSAutomationEntry(source.ID, parsedItem.Fields, checkedAt)
+		entry, created, createErr := s.persistRSSAutomationEntry(source.ID, parsedItem.Fields, checkedAt, result.Baseline)
 		if createErr != nil {
 			s.recordRSSAutomationSourceFailure(source.ID, createErr)
 			return result, createErr
@@ -614,7 +645,7 @@ func (s *RSSAutomationService) refreshAutomationSource(ctx context.Context, sour
 	return result, nil
 }
 
-func (s *RSSAutomationService) persistRSSAutomationEntry(sourceID uint, fields map[string]any, discoveredAt time.Time) (model.RSSAutomationEntry, bool, error) {
+func (s *RSSAutomationService) persistRSSAutomationEntry(sourceID uint, fields map[string]any, discoveredAt time.Time, baseline bool) (model.RSSAutomationEntry, bool, error) {
 	fieldsJSON, err := json.Marshal(fields)
 	if err != nil {
 		return model.RSSAutomationEntry{}, false, err
@@ -625,7 +656,7 @@ func (s *RSSAutomationService) persistRSSAutomationEntry(sourceID uint, fields m
 		GUID: firstRSSAutomationString(fields, "guid"), Title: firstRSSAutomationString(fields, "title"),
 		DetailURL: firstRSSAutomationString(fields, "detail_url"), DownloadURL: firstRSSAutomationString(fields, "download_url"),
 		ContentKey:  rssAutomationContentKey(firstRSSAutomationString(fields, "download_url")),
-		PublishedAt: publishedAt, FieldsJSON: string(fieldsJSON), DiscoveredAt: discoveredAt,
+		PublishedAt: publishedAt, FieldsJSON: string(fieldsJSON), Baseline: baseline, DiscoveredAt: discoveredAt,
 	}
 	result := s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&entry)
 	if result.Error != nil {
@@ -705,16 +736,9 @@ func (s *RSSAutomationService) createRSSAutomationRun(workflow model.RSSAutomati
 			return result.Error
 		}
 		for _, node := range definition.Nodes {
-			maxAttempts := node.MaxAttempts
-			if maxAttempts <= 0 {
-				maxAttempts = 1
-				if isRSSAutomationActionNode(node.Type) {
-					maxAttempts = 3
-				}
-			}
 			nodeRun := model.RSSAutomationNodeRun{
 				RunID: run.ID, NodeID: node.ID, NodeType: node.Type, NodeName: node.Name,
-				Status: model.RSSAutomationNodePending, MaxAttempts: maxAttempts,
+				Status: model.RSSAutomationNodePending, MaxAttempts: rssAutomationNodeMaxAttempts(node),
 			}
 			if err := tx.Create(&nodeRun).Error; err != nil {
 				return err
@@ -926,9 +950,25 @@ func (s *RSSAutomationService) refreshDueRSSAutomationSources() {
 
 func isRSSAutomationActionNode(nodeType string) bool {
 	switch nodeType {
-	case RSSAutomationNodeQBittorrent, RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI, RSSAutomationNodeNotification:
+	case RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
+		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeMediaExists,
+		RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
+		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
+		RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
+		RSSAutomationNodeHTTPRequest, RSSAutomationNodeNotification:
 		return true
 	default:
 		return false
 	}
+}
+
+func rssAutomationNodeMaxAttempts(node RSSAutomationNode) int {
+	if node.MaxAttempts > 0 {
+		return node.MaxAttempts
+	}
+	if isRSSAutomationActionNode(node.Type) && !isRSSAutomationNonRetryableNode(node.Type) {
+		return 3
+	}
+	return 1
 }

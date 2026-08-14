@@ -344,6 +344,77 @@ func previewRSSAutomationActionNode(node RSSAutomationNode, runContext map[strin
 		return map[string]any{
 			"selected_port": "success", "content_key": rssAutomationContentKey(downloadURL), "preview": true,
 		}, nil
+	case RSSAutomationNodeWaitQBittorrent:
+		return map[string]any{
+			"selected_port": "success", "preview": true, "completed": true, "progress": 100,
+			"name": "运行时读取 qBittorrent 任务", "content_path": "/downloads/运行时任务",
+		}, nil
+	case RSSAutomationNodeWait115:
+		return map[string]any{
+			"selected_port": "success", "preview": true, "completed": true,
+			"tasks": []map[string]any{{"status": 2, "file_id": "preview-file", "name": "运行时读取 115 下载结果"}},
+		}, nil
+	case RSSAutomationNodeMoviePilotTitle:
+		input, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "input"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		return map[string]any{
+			"selected_port": "success", "preview": true, "input": input,
+			"tmdb_id": "运行时识别", "title": "运行时识别媒体信息", "poster_url": "运行时识别",
+		}, nil
+	case RSSAutomationNodeMediaExists:
+		return map[string]any{
+			"selected_port": "missing", "preview": true, "exists": false, "local_exists": false,
+		}, nil
+	case RSSAutomationNodeHDHiveQuery:
+		return map[string]any{
+			"selected_port": "found", "preview": true, "resource_count": 1,
+			"selected_slug": "运行时选择资源", "selected_title": "运行时 HDHive 资源",
+		}, nil
+	case RSSAutomationNodeHDHiveUnlock:
+		return map[string]any{
+			"selected_port": "success", "preview": true,
+			"download_url": "https://example.invalid/runtime-resource",
+		}, nil
+	case RSSAutomationNodeMoviePilotRecognize:
+		return map[string]any{
+			"selected_port": "success", "preview": true,
+			"tmdb_id": "运行时识别", "title": "运行时识别媒体信息",
+		}, nil
+	case RSSAutomationNodeOrganizeStrm:
+		return map[string]any{
+			"selected_port": "success", "preview": true,
+			"organized_count": 1, "strm_count": 1,
+			"strm_path": "运行时按目录配置生成",
+		}, nil
+	case RSSAutomationNodeStrmVerify:
+		return map[string]any{
+			"selected_port": "valid", "preview": true, "valid": true,
+			"checked_count": 1, "valid_count": 1, "invalid_count": 0,
+			"strm_path": "运行时校验 STRM 路径",
+		}, nil
+	case RSSAutomationNodeStrmRegenerate:
+		return map[string]any{
+			"selected_port": "success", "preview": true,
+			"regenerated_count": 1, "failed_count": 0,
+			"strm_path": "运行时按上游整理结果重写",
+		}, nil
+	case RSSAutomationNodeEmbyRefreshWait:
+		return map[string]any{
+			"selected_port": "success", "preview": true, "found": true,
+			"emby_item_id": "运行时等待入库", "refresh_requested": true,
+		}, nil
+	case RSSAutomationNodeHTTPRequest:
+		requestURL, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "url"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		return map[string]any{
+			"selected_port": "success", "preview": true, "status_code": 200,
+			"request_host": rssAutomationHTTPRequestHost(requestURL), "content_type": "application/json",
+			"body": "{\"preview\":true}", "json": map[string]any{"preview": true},
+		}, nil
 	case RSSAutomationNodeNotification:
 		message := strings.TrimSpace(renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "message"), runContext))
 		if message == "" {

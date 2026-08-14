@@ -90,7 +90,7 @@ func (s *RSSGeneratorService) WorkerHealth(ctx context.Context) RSSGeneratorWork
 	status := RSSGeneratorWorkerStatus{Status: "unavailable"}
 	healthContext, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(healthContext, http.MethodGet, strings.TrimRight(s.cfg.WorkerURL, "/")+"/health", nil)
+	request, err := http.NewRequestWithContext(healthContext, http.MethodGet, s.WorkerURL()+"/health", nil)
 	if err != nil {
 		status.Error = "Worker 地址无效"
 		return status
@@ -194,14 +194,16 @@ func (s *RSSGeneratorService) generateWithWorker(ctx context.Context, prepared r
 	if err != nil {
 		return RSSGeneratorFeed{}, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.cfg.WorkerURL, "/")+"/v1/generate", bytes.NewReader(encoded))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, s.WorkerURL()+"/v1/generate", bytes.NewReader(encoded))
 	if err != nil {
 		return RSSGeneratorFeed{}, errors.New("RSS Worker 地址无效")
 	}
 	request.Header.Set("Content-Type", "application/json")
-	if token := strings.TrimSpace(s.cfg.WorkerToken); token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
+	token, err := s.WorkerAccessToken()
+	if err != nil {
+		return RSSGeneratorFeed{}, err
 	}
+	request.Header.Set("Authorization", "Bearer "+token)
 	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return RSSGeneratorFeed{}, fmt.Errorf("RSS Worker 请求失败: %w", err)

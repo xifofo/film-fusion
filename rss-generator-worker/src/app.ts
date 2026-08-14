@@ -1,29 +1,23 @@
-import { getConnInfo } from "@hono/node-server/conninfo";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { requestId } from "hono/request-id";
 import { ZodError } from "zod";
+import { readWorkerAuthState, type WorkerAuthState } from "./auth.js";
 import { asWorkerError, WorkerError } from "./errors.js";
 import { generateFeed } from "./generator.js";
 import { generateRequestSchema } from "./schema.js";
-import { isPrivateAddress, redactSecrets, validBearerToken } from "./security.js";
+import { redactSecrets, validBearerToken } from "./security.js";
 import type { GenerateRequest, GenerateResult } from "./types.js";
 
 export interface AppDependencies {
   generate?: (request: GenerateRequest) => Promise<GenerateResult>;
-}
-
-function remoteAddress(context: Parameters<typeof getConnInfo>[0]): string | undefined {
-  try {
-    return getConnInfo(context).remote.address;
-  } catch {
-    return undefined;
-  }
+  auth?: () => WorkerAuthState;
 }
 
 export function createApp(dependencies: AppDependencies = {}) {
   const app = new Hono();
   const generate = dependencies.generate ?? generateFeed;
+  const readAuth = dependencies.auth ?? readWorkerAuthState;
   app.use("*", requestId());
   app.use(
     "/v1/*",
@@ -37,38 +31,35 @@ export function createApp(dependencies: AppDependencies = {}) {
     }),
   );
   app.use("/v1/*", async (context, next) => {
-    const expected = process.env.WORKER_AUTH_TOKEN?.trim();
-    if (expected) {
-      if (!validBearerToken(context.req.header("authorization"), expected)) {
-        return context.json({ error: { code: "UNAUTHORIZED", message: "Invalid worker token" } }, 401);
-      }
-      return next();
-    }
-
-    const address = remoteAddress(context);
-    const explicitDevMode = process.env.WORKER_ALLOW_UNAUTHENTICATED === "true";
-    if (!explicitDevMode || !address || !isPrivateAddress(address)) {
+    const auth = readAuth();
+    if (!auth.token) {
       return context.json(
         {
           error: {
             code: "AUTH_NOT_CONFIGURED",
-            message: "WORKER_AUTH_TOKEN is required for non-private callers",
+            message: auth.error ?? "Worker token is not configured",
           },
         },
         503,
       );
     }
+
+    if (!validBearerToken(context.req.header("authorization"), auth.token)) {
+      return context.json({ error: { code: "UNAUTHORIZED", message: "Invalid worker token" } }, 401);
+    }
     return next();
   });
 
-  app.get("/health", (context) =>
-    context.json({
-      status: "ok",
+  app.get("/health", (context) => {
+    const auth = readAuth();
+    return context.json({
+      status: auth.token ? "ok" : "unavailable",
       service: "rss-generator-worker",
       version: "0.1.0",
-      auth_configured: Boolean(process.env.WORKER_AUTH_TOKEN?.trim()),
-    }),
-  );
+      auth_configured: Boolean(auth.token),
+      ...(auth.error ? { error: auth.error } : {}),
+    });
+  });
 
   app.post("/v1/generate", async (context) => {
     let raw: unknown;

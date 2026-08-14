@@ -2,25 +2,29 @@ package handler
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
 
+	"film-fusion/app/config"
 	"film-fusion/app/service"
 
 	"github.com/gin-gonic/gin"
 )
 
 // RSSGeneratorHandler serves both JWT-protected management actions and the
-// standalone token feed endpoint. Server integration must mount PublicFeed
-// outside the protected route group.
+// standalone feed endpoint. Server integration must mount PublicFeed outside
+// the protected route group.
 type RSSGeneratorHandler struct {
 	service *service.RSSGeneratorService
+	config  *config.Config
 }
 
-func NewRSSGeneratorHandler(generator *service.RSSGeneratorService) *RSSGeneratorHandler {
-	return &RSSGeneratorHandler{service: generator}
+func NewRSSGeneratorHandler(generator *service.RSSGeneratorService, cfg *config.Config) *RSSGeneratorHandler {
+	return &RSSGeneratorHandler{service: generator, config: cfg}
 }
 
 func (h *RSSGeneratorHandler) Dashboard(c *gin.Context) {
@@ -194,7 +198,9 @@ func (h *RSSGeneratorHandler) RevokeToken(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("订阅凭证已撤销", gin.H{}))
 }
 
-// PublicFeed handles GET /rss/s/:token where :token ends in .xml or .atom.
+// PublicFeed handles GET /rss/:feed where :feed is a public feed ID ending in
+// .xml or .atom. Direct LAN clients may omit token; non-LAN clients must send
+// the feed-specific credential as the token query parameter.
 func (h *RSSGeneratorHandler) PublicFeed(c *gin.Context) {
 	// Token URLs are credentials. Keep error responses out of shared caches and
 	// prevent browser navigation from forwarding the subscription URL as Referer.
@@ -202,12 +208,26 @@ func (h *RSSGeneratorHandler) PublicFeed(c *gin.Context) {
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("X-Robots-Tag", "noindex, nofollow")
-	clearToken, format, ok := parseRSSGeneratorPublicToken(c.Param("token"))
+	publicID, format, ok := parseRSSGeneratorFeedPath(c.Param("feed"))
 	if !ok {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	access, err := h.service.ResolvePublicToken(c.Request.Context(), clearToken)
+	query := c.Request.URL.Query()
+	clearToken := ""
+	if values, exists := query["token"]; exists {
+		if len(values) != 1 || strings.TrimSpace(values[0]) == "" {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		clearToken = strings.TrimSpace(values[0])
+	}
+	access, err := h.service.ResolveFeedAccess(
+		c.Request.Context(),
+		publicID,
+		clearToken,
+		rssGeneratorRequestIsLAN(c.Request, h.trustedProxyCIDRs()),
+	)
 	if errors.Is(err, service.ErrRSSGeneratorTokenHidden) {
 		c.Status(http.StatusNotFound)
 		return
@@ -221,8 +241,11 @@ func (h *RSSGeneratorHandler) PublicFeed(c *gin.Context) {
 		c.Status(http.StatusServiceUnavailable)
 		return
 	}
-	rawParams := make(map[string]any, len(c.Request.URL.Query()))
-	for key, values := range c.Request.URL.Query() {
+	rawParams := make(map[string]any, len(query))
+	for key, values := range query {
+		if key == "token" {
+			continue
+		}
 		if len(values) != 1 {
 			c.Status(http.StatusBadRequest)
 			return
@@ -249,14 +272,106 @@ func (h *RSSGeneratorHandler) PublicFeed(c *gin.Context) {
 	c.Data(http.StatusOK, rendered.ContentType, rendered.Body)
 }
 
-func parseRSSGeneratorPublicToken(value string) (string, string, bool) {
+func (h *RSSGeneratorHandler) trustedProxyCIDRs() []string {
+	if h == nil || h.config == nil {
+		return nil
+	}
+	return h.config.Server.Security.TrustedProxyCIDRs
+}
+
+func parseRSSGeneratorFeedPath(value string) (string, string, bool) {
 	if strings.HasSuffix(value, ".xml") {
-		return strings.TrimSuffix(value, ".xml"), "rss", true
+		publicID := strings.TrimSuffix(value, ".xml")
+		return publicID, "rss", publicID != ""
 	}
 	if strings.HasSuffix(value, ".atom") {
-		return strings.TrimSuffix(value, ".atom"), "atom", true
+		publicID := strings.TrimSuffix(value, ".atom")
+		return publicID, "atom", publicID != ""
 	}
 	return "", "", false
+}
+
+func rssGeneratorRequestIsLAN(request *http.Request, trustedProxyCIDRs []string) bool {
+	client, ok := rssGeneratorClientAddress(request, trustedProxyCIDRs)
+	if !ok {
+		return false
+	}
+	return client.IsPrivate() || client.IsLoopback() || client.IsLinkLocalUnicast()
+}
+
+// rssGeneratorClientAddress resolves forwarding headers only when the TCP peer
+// is explicitly trusted. A forwarding header from any other peer fails closed
+// so an unconfigured reverse proxy cannot accidentally turn public requests
+// into LAN requests merely because its backend address is private.
+func rssGeneratorClientAddress(request *http.Request, trustedProxyCIDRs []string) (netip.Addr, bool) {
+	remote, ok := rssGeneratorRemoteAddress(request.RemoteAddr)
+	if !ok {
+		return netip.Addr{}, false
+	}
+	hasForwardedHeader := strings.TrimSpace(request.Header.Get("X-Forwarded-For")) != "" ||
+		strings.TrimSpace(request.Header.Get("X-Real-IP")) != "" ||
+		strings.TrimSpace(request.Header.Get("Forwarded")) != ""
+	if !rssGeneratorAddressInCIDRs(remote, trustedProxyCIDRs) {
+		if hasForwardedHeader {
+			return netip.Addr{}, false
+		}
+		return remote, true
+	}
+
+	candidates := make([]netip.Addr, 0, 4)
+	if forwardedFor := strings.TrimSpace(request.Header.Get("X-Forwarded-For")); forwardedFor != "" {
+		for _, value := range strings.Split(forwardedFor, ",") {
+			candidate, err := netip.ParseAddr(strings.TrimSpace(value))
+			if err != nil {
+				return netip.Addr{}, false
+			}
+			candidates = append(candidates, candidate.Unmap())
+		}
+	} else if realIP := strings.TrimSpace(request.Header.Get("X-Real-IP")); realIP != "" {
+		candidate, err := netip.ParseAddr(realIP)
+		if err != nil {
+			return netip.Addr{}, false
+		}
+		candidates = append(candidates, candidate.Unmap())
+	}
+	if len(candidates) == 0 {
+		return netip.Addr{}, false
+	}
+	for index := len(candidates) - 1; index >= 0; index-- {
+		if !rssGeneratorAddressInCIDRs(candidates[index], trustedProxyCIDRs) {
+			return candidates[index], true
+		}
+	}
+	return candidates[0], true
+}
+
+func rssGeneratorRemoteAddress(value string) (netip.Addr, bool) {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(value))
+	if err != nil {
+		host = strings.TrimSpace(value)
+	}
+	address, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return address.Unmap(), true
+}
+
+func rssGeneratorAddressInCIDRs(address netip.Addr, cidrs []string) bool {
+	address = address.Unmap()
+	for _, raw := range cidrs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(raw); err == nil && prefix.Contains(address) {
+			return true
+		}
+		if trusted, err := netip.ParseAddr(raw); err == nil && trusted.Unmap() == address {
+			return true
+		}
+	}
+	return false
 }
 
 func requestMatchesRSSGeneratorCache(request *http.Request, rendered service.RSSGeneratorRenderedFeed) bool {

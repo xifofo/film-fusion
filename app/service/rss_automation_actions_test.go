@@ -117,6 +117,10 @@ func TestRSSAutomationQBittorrentActionLogsInAndSubmitsResolvedURL(t *testing.T)
 				http.Error(w, "unexpected category: "+got, http.StatusBadRequest)
 				return
 			}
+			if got := r.FormValue("tags"); !strings.Contains(got, "filmfusion-rss-btih:abcdef123456") {
+				http.Error(w, "missing internal tracking tag: "+got, http.StatusBadRequest)
+				return
+			}
 			_, _ = w.Write([]byte("Ok."))
 		default:
 			http.NotFound(w, r)

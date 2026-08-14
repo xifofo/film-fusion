@@ -78,18 +78,21 @@ func (RSSAutomationTarget) TableName() string { return "rss_automation_targets" 
 // removed together with presentation history, preventing old feed items from
 // being executed again after retention cleanup.
 type RSSAutomationEntry struct {
-	ID           uint       `gorm:"primarykey" json:"id"`
-	SourceID     uint       `gorm:"not null;uniqueIndex:idx_rss_auto_source_fingerprint,priority:1;index" json:"source_id"`
-	Fingerprint  string     `gorm:"size:64;not null;uniqueIndex:idx_rss_auto_source_fingerprint,priority:2" json:"-"`
-	GUID         string     `gorm:"size:512;index" json:"guid,omitempty"`
-	Title        string     `gorm:"type:text" json:"title,omitempty"`
-	DetailURL    string     `gorm:"type:text" json:"detail_url,omitempty"`
-	DownloadURL  string     `gorm:"type:text" json:"download_url,omitempty"`
-	ContentKey   string     `gorm:"size:128;index" json:"content_key,omitempty"`
-	PublishedAt  *time.Time `gorm:"index" json:"published_at,omitempty"`
-	FieldsJSON   string     `gorm:"type:text;not null" json:"fields_json"`
-	DiscoveredAt time.Time  `gorm:"index" json:"discovered_at"`
-	CreatedAt    time.Time  `json:"created_at"`
+	ID                 uint       `gorm:"primarykey" json:"id"`
+	SourceID           uint       `gorm:"not null;uniqueIndex:idx_rss_auto_source_fingerprint,priority:1;index" json:"source_id"`
+	Fingerprint        string     `gorm:"size:64;not null;uniqueIndex:idx_rss_auto_source_fingerprint,priority:2" json:"-"`
+	GUID               string     `gorm:"size:512;index" json:"guid,omitempty"`
+	Title              string     `gorm:"type:text" json:"title,omitempty"`
+	DetailURL          string     `gorm:"type:text" json:"detail_url,omitempty"`
+	DownloadURL        string     `gorm:"type:text" json:"download_url,omitempty"`
+	ContentKey         string     `gorm:"size:128;index" json:"content_key,omitempty"`
+	PublishedAt        *time.Time `gorm:"index" json:"published_at,omitempty"`
+	FieldsJSON         string     `gorm:"type:text;not null" json:"fields_json"`
+	Baseline           bool       `gorm:"not null;default:false;index" json:"baseline"`
+	LegacyMatched      bool       `gorm:"not null;default:false;index" json:"-"`
+	LegacyMetadataJSON string     `gorm:"type:text" json:"-"`
+	DiscoveredAt       time.Time  `gorm:"index" json:"discovered_at"`
+	CreatedAt          time.Time  `json:"created_at"`
 }
 
 func (RSSAutomationEntry) TableName() string { return "rss_automation_entries" }
@@ -136,3 +139,18 @@ type RSSAutomationNodeRun struct {
 }
 
 func (RSSAutomationNodeRun) TableName() string { return "rss_automation_node_runs" }
+
+// RSSAutomationLegacyMigration makes migration from the retired RSS monitor
+// idempotent without deleting its source, rule, or history tables.
+type RSSAutomationLegacyMigration struct {
+	ID             uint      `gorm:"primarykey" json:"id"`
+	LegacySourceID uint      `gorm:"not null;uniqueIndex" json:"legacy_source_id"`
+	SourceID       uint      `gorm:"not null;index" json:"source_id"`
+	WorkflowID     uint      `gorm:"not null;index" json:"workflow_id"`
+	MigratedAt     time.Time `gorm:"not null" json:"migrated_at"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (RSSAutomationLegacyMigration) TableName() string {
+	return "rss_automation_legacy_migrations"
+}

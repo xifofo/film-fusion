@@ -12,18 +12,30 @@ import (
 const RSSAutomationSchemaVersion = 1
 
 const (
-	RSSAutomationNodeTrigger           = "trigger"
-	RSSAutomationNodeRegex             = "regex"
-	RSSAutomationNodeKeyword           = "keyword"
-	RSSAutomationNodeConvert           = "convert"
-	RSSAutomationNodeIf                = "if"
-	RSSAutomationNodeParallel          = "parallel"
-	RSSAutomationNodeJoin              = "join"
-	RSSAutomationNodeQBittorrent       = "qbittorrent"
-	RSSAutomationNodeOffline115        = "offline115"
-	RSSAutomationNodeOffline115OpenAPI = "offline115_openapi"
-	RSSAutomationNodeNotification      = "notification"
-	RSSAutomationNodeEnd               = "end"
+	RSSAutomationNodeTrigger             = "trigger"
+	RSSAutomationNodeRegex               = "regex"
+	RSSAutomationNodeKeyword             = "keyword"
+	RSSAutomationNodeConvert             = "convert"
+	RSSAutomationNodeIf                  = "if"
+	RSSAutomationNodeParallel            = "parallel"
+	RSSAutomationNodeJoin                = "join"
+	RSSAutomationNodeQBittorrent         = "qbittorrent"
+	RSSAutomationNodeWaitQBittorrent     = "wait_qbittorrent"
+	RSSAutomationNodeOffline115          = "offline115"
+	RSSAutomationNodeOffline115OpenAPI   = "offline115_openapi"
+	RSSAutomationNodeWait115             = "wait115"
+	RSSAutomationNodeMoviePilotTitle     = "moviepilot_title_recognize"
+	RSSAutomationNodeMediaExists         = "media_exists"
+	RSSAutomationNodeHDHiveQuery         = "hdhive_query"
+	RSSAutomationNodeHDHiveUnlock        = "hdhive_unlock"
+	RSSAutomationNodeMoviePilotRecognize = "moviepilot_recognize"
+	RSSAutomationNodeOrganizeStrm        = "organize_strm"
+	RSSAutomationNodeStrmVerify          = "strm_verify"
+	RSSAutomationNodeStrmRegenerate      = "strm_regenerate"
+	RSSAutomationNodeEmbyRefreshWait     = "emby_refresh_wait"
+	RSSAutomationNodeHTTPRequest         = "http_request"
+	RSSAutomationNodeNotification        = "notification"
+	RSSAutomationNodeEnd                 = "end"
 )
 
 var rssAutomationNodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`)
@@ -158,6 +170,9 @@ func ValidateRSSAutomationDefinition(definition RSSAutomationDefinition) RSSAuto
 		if node.MaxAttempts < 0 || node.MaxAttempts > 10 {
 			result.Errors = append(result.Errors, fmt.Sprintf("节点 %s 的重试次数必须在 0 到 10 之间", node.ID))
 		}
+		if isRSSAutomationNonRetryableNode(node.Type) && node.MaxAttempts > 1 {
+			result.Errors = append(result.Errors, fmt.Sprintf("可能产生重复副作用的节点 %s 不能自动重试", node.ID))
+		}
 		if err := validateRSSAutomationNodeConfig(node); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("节点 %s: %v", node.ID, err))
 		}
@@ -291,6 +306,52 @@ func ValidateRSSAutomationDefinition(definition RSSAutomationDefinition) RSSAuto
 				result.Errors = append(result.Errors, fmt.Sprintf("节点 %s 没有后续节点", id))
 			}
 		}
+		if inCount == 1 {
+			predecessor := nodes[incoming[id][0].Source]
+			sourcePort := strings.ToLower(strings.TrimSpace(incoming[id][0].SourcePort))
+			switch node.Type {
+			case RSSAutomationNodeWaitQBittorrent:
+				if predecessor.Type != RSSAutomationNodeQBittorrent {
+					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须直接连接在 qBittorrent 下载节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须连接 qBittorrent 节点的成功出口", id))
+				}
+			case RSSAutomationNodeWait115:
+				if predecessor.Type != RSSAutomationNodeOffline115 && predecessor.Type != RSSAutomationNodeOffline115OpenAPI {
+					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须直接连接在 115 离线节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接 115 离线节点的成功出口", id))
+				}
+			case RSSAutomationNodeMoviePilotRecognize:
+				if predecessor.Type != RSSAutomationNodeWait115 {
+					result.Errors = append(result.Errors, fmt.Sprintf("MP 媒体识别节点 %s 必须直接连接在等待 115 下载完成节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("MP 媒体识别节点 %s 必须连接等待节点的成功出口", id))
+				}
+			case RSSAutomationNodeOrganizeStrm:
+				if predecessor.Type != RSSAutomationNodeWait115 && predecessor.Type != RSSAutomationNodeMoviePilotRecognize {
+					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须直接连接在等待 115 下载完成或 MP 媒体识别节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须连接上游节点的成功出口", id))
+				}
+			case RSSAutomationNodeHDHiveUnlock:
+				if predecessor.Type != RSSAutomationNodeHDHiveQuery || sourcePort != "found" {
+					result.Errors = append(result.Errors, fmt.Sprintf("HDHive 解锁节点 %s 必须连接资源查询节点的“找到资源”出口", id))
+				}
+			case RSSAutomationNodeStrmVerify:
+				if predecessor.Type != RSSAutomationNodeOrganizeStrm || sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("STRM 校验节点 %s 必须连接整理生成 STRM 节点的成功出口", id))
+				}
+			case RSSAutomationNodeStrmRegenerate:
+				if predecessor.Type != RSSAutomationNodeStrmVerify || sourcePort != "invalid" {
+					result.Errors = append(result.Errors, fmt.Sprintf("STRM 重生成节点 %s 必须连接 STRM 校验节点的“无效”出口", id))
+				}
+			}
+		}
 		if node.Type == RSSAutomationNodeIf {
 			ports := edgePortSet(outgoing[id])
 			if _, ok := ports["true"]; !ok {
@@ -337,11 +398,13 @@ func ValidateRSSAutomationDefinition(definition RSSAutomationDefinition) RSSAuto
 }
 
 func isRSSAutomationNodeType(nodeType string) bool {
+	_, exists := rssAutomationNodeProtocolByType(nodeType)
+	return exists
+}
+
+func isRSSAutomationNonRetryableNode(nodeType string) bool {
 	switch nodeType {
-	case RSSAutomationNodeTrigger, RSSAutomationNodeRegex, RSSAutomationNodeKeyword, RSSAutomationNodeConvert,
-		RSSAutomationNodeIf, RSSAutomationNodeParallel, RSSAutomationNodeJoin,
-		RSSAutomationNodeQBittorrent, RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeNotification, RSSAutomationNodeEnd:
+	case RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeHTTPRequest:
 		return true
 	default:
 		return false
@@ -353,7 +416,13 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 	if port == "always" {
 		switch nodeType {
 		case RSSAutomationNodeRegex, RSSAutomationNodeKeyword, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
-			RSSAutomationNodeQBittorrent, RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI, RSSAutomationNodeNotification:
+			RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+			RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
+			RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeMediaExists,
+			RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
+			RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
+			RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
+			RSSAutomationNodeHTTPRequest, RSSAutomationNodeNotification:
 			return true
 		default:
 			return false
@@ -364,10 +433,20 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 		return port == "true" || port == "false" || port == "failure"
 	case RSSAutomationNodeKeyword:
 		return port == "matched" || port == "unmatched" || port == "failure"
+	case RSSAutomationNodeMediaExists:
+		return port == "exists" || port == "missing" || port == "failure"
+	case RSSAutomationNodeHDHiveQuery:
+		return port == "found" || port == "not_found" || port == "failure"
+	case RSSAutomationNodeStrmVerify:
+		return port == "valid" || port == "invalid" || port == "failure"
 	case RSSAutomationNodeParallel:
 		return strings.HasPrefix(port, "branch-") && len(port) > len("branch-")
 	case RSSAutomationNodeRegex, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
-		RSSAutomationNodeQBittorrent, RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI, RSSAutomationNodeNotification:
+		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
+		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeHDHiveUnlock,
+		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
+		RSSAutomationNodeHTTPRequest, RSSAutomationNodeNotification:
 		return port == "success" || port == "failure"
 	case RSSAutomationNodeTrigger:
 		return port == "next"
@@ -466,6 +545,14 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 		if rssAutomationConfigString(config, "url") == "" {
 			return errors.New("必须配置下载地址变量")
 		}
+	case RSSAutomationNodeWaitQBittorrent:
+		pollSeconds := rssAutomationConfigUint(config, "poll_interval_seconds")
+		if pollSeconds > 0 && (pollSeconds < 5 || pollSeconds > 300) {
+			return errors.New("qBittorrent 检查间隔必须在 5 到 300 秒之间")
+		}
+		if maxWaitMinutes := rssAutomationConfigUint(config, "max_wait_minutes"); maxWaitMinutes > 30*24*60 {
+			return errors.New("qBittorrent 最长等待不能超过 30 天")
+		}
 	case RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI:
 		if rssAutomationConfigUint(config, "cloud_storage_id") == 0 {
 			return errors.New("必须选择 115 账号")
@@ -473,9 +560,118 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 		if rssAutomationConfigString(config, "url") == "" {
 			return errors.New("必须配置下载地址变量")
 		}
+	case RSSAutomationNodeWait115:
+		pollSeconds := rssAutomationConfigUint(config, "poll_interval_seconds")
+		if pollSeconds > 0 && pollSeconds < minRSSAutomation115PollSeconds {
+			return fmt.Errorf("检查间隔不能少于 %d 秒", minRSSAutomation115PollSeconds)
+		}
+		if pollSeconds > maxRSSAutomation115PollSeconds {
+			return fmt.Errorf("检查间隔不能超过 %d 秒", maxRSSAutomation115PollSeconds)
+		}
+		maxWaitMinutes := rssAutomationConfigUint(config, "max_wait_minutes")
+		if maxWaitMinutes > maxRSSAutomation115MaxWaitMinutes {
+			return fmt.Errorf("最长等待不能超过 %d 分钟", maxRSSAutomation115MaxWaitMinutes)
+		}
+	case RSSAutomationNodeMoviePilotTitle:
+		if rssAutomationConfigString(config, "input") == "" {
+			return errors.New("必须配置待识别标题")
+		}
+		fallthrough
+	case RSSAutomationNodeMoviePilotRecognize:
+		tmdbID := rssAutomationConfigString(config, "tmdb_id")
+		if tmdbID != "" && !strings.HasPrefix(tmdbID, "$") && !strings.Contains(tmdbID, "{{") && !rssAutomationTMDBIDPattern.MatchString(tmdbID) {
+			return errors.New("TMDB ID 必须是正整数或流程变量")
+		}
+	case RSSAutomationNodeMediaExists:
+		if rssAutomationConfigUint(config, "cloud_directory_id") == 0 {
+			return errors.New("必须选择用于查重的目录配置")
+		}
+		if rssAutomationConfigString(config, "tmdb_id") == "" {
+			return errors.New("必须配置 TMDB ID")
+		}
+	case RSSAutomationNodeHDHiveQuery:
+		if rssAutomationConfigString(config, "tmdb_id") == "" {
+			return errors.New("必须配置 HDHive 查询使用的 TMDB ID")
+		}
+		if rssAutomationConfigString(config, "media_type") == "" {
+			return errors.New("必须配置 HDHive 查询使用的媒体类型")
+		}
+	case RSSAutomationNodeHDHiveUnlock:
+		if rssAutomationConfigString(config, "slug") == "" {
+			return errors.New("必须配置待解锁资源 slug")
+		}
+	case RSSAutomationNodeOrganizeStrm:
+		if rssAutomationConfigUint(config, "cloud_directory_id") == 0 {
+			return errors.New("必须选择整理目录配置")
+		}
+		switch rssAutomationConfigString(config, "media_type") {
+		case "", "auto", "movie", "tv":
+		default:
+			return errors.New("媒体类型必须是 auto/movie/tv")
+		}
+		if len([]rune(rssAutomationConfigString(config, "category"))) > 200 {
+			return errors.New("媒体分类不能超过 200 个字符")
+		}
+		for _, key := range []string{"best_version_enabled", "delete_source_folder", "filename_regex_enabled"} {
+			if value, exists := config[key]; exists {
+				if _, ok := value.(bool); !ok {
+					return fmt.Errorf("%s 必须是布尔值", key)
+				}
+			}
+		}
+		if rssAutomationConfigBool(config, "filename_regex_enabled") {
+			pattern := rssAutomationConfigString(config, "filename_regex_pattern")
+			if pattern == "" {
+				return errors.New("启用文件名正则后必须填写表达式")
+			}
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("文件名正则表达式无效: %w", err)
+			}
+		}
+	case RSSAutomationNodeStrmVerify:
+		if rssAutomationConfigUint(config, "cloud_directory_id") == 0 {
+			return errors.New("必须选择 STRM 所属目录配置")
+		}
+	case RSSAutomationNodeStrmRegenerate:
+		if rssAutomationConfigUint(config, "cloud_directory_id") == 0 {
+			return errors.New("必须选择 STRM 重生成使用的目录配置")
+		}
+	case RSSAutomationNodeEmbyRefreshWait:
+		if rssAutomationConfigString(config, "tmdb_id") == "" {
+			return errors.New("必须配置等待入库使用的 TMDB ID")
+		}
+		pollSeconds := rssAutomationConfigUint(config, "poll_interval_seconds")
+		if pollSeconds > 0 && (pollSeconds < 5 || pollSeconds > 300) {
+			return errors.New("Emby 检查间隔必须在 5 到 300 秒之间")
+		}
+		if maxWaitMinutes := rssAutomationConfigUint(config, "max_wait_minutes"); maxWaitMinutes > 24*60 {
+			return errors.New("Emby 最长等待不能超过 24 小时")
+		}
+	case RSSAutomationNodeHTTPRequest:
+		method := strings.ToUpper(rssAutomationConfigString(config, "method"))
+		switch method {
+		case "GET", "POST", "PUT", "PATCH", "DELETE":
+		default:
+			return errors.New("HTTP 方法必须是 GET/POST/PUT/PATCH/DELETE")
+		}
+		if rssAutomationConfigString(config, "url") == "" {
+			return errors.New("必须配置 HTTP 请求地址")
+		}
+		if len(rssAutomationConfigString(config, "url")) > 8192 {
+			return errors.New("HTTP 请求地址不能超过 8192 字节")
+		}
+		if len(rssAutomationConfigString(config, "body")) > 1024*1024 {
+			return errors.New("HTTP 请求体不能超过 1 MiB")
+		}
+		if _, err := rssAutomationHTTPHeaders(config); err != nil {
+			return err
+		}
 	case RSSAutomationNodeNotification:
 		if rssAutomationConfigString(config, "message") == "" {
 			return errors.New("通知内容不能为空")
+		}
+		if len(rssAutomationConfigString(config, "image_url")) > 4096 {
+			return errors.New("通知图片地址不能超过 4096 字节")
 		}
 	}
 	return nil

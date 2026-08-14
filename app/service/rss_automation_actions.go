@@ -60,14 +60,21 @@ func (s *RSSAutomationService) executeRSSAutomationQBittorrent(ctx context.Conte
 	if err := validateRSSAutomationDownloadURL(downloadURL); err != nil {
 		return nil, err
 	}
+	contentKey := rssAutomationContentKey(downloadURL)
+	torrentTag := "filmfusion-rss-" + contentKey
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
+	configuredTags := renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "tags"), runContext)
+	allTags := torrentTag
+	if strings.TrimSpace(configuredTags) != "" {
+		allTags = configuredTags + "," + torrentTag
+	}
 	fields := map[string]string{
 		"urls":     downloadURL,
 		"savepath": renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "save_path"), runContext),
 		"category": renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "category"), runContext),
-		"tags":     renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "tags"), runContext),
+		"tags":     allTags,
 	}
 	if rssAutomationConfigBool(node.Config, "paused") {
 		fields["paused"] = "true"
@@ -97,7 +104,7 @@ func (s *RSSAutomationService) executeRSSAutomationQBittorrent(ctx context.Conte
 	}
 	return map[string]any{
 		"target_id": target.ID, "target_name": target.Name,
-		"content_key": rssAutomationContentKey(downloadURL), "submitted": true,
+		"content_key": contentKey, "torrent_tag": torrentTag, "submitted": true,
 	}, nil
 }
 
@@ -234,15 +241,19 @@ func (s *RSSAutomationService) executeRSSAutomationNotification(ctx context.Cont
 	}
 	message := renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "message"), runContext)
 	title := renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "title"), runContext)
+	imageURL := renderRSSAutomationTemplate(rssAutomationConfigString(node.Config, "image_url"), runContext)
 	if strings.TrimSpace(message) == "" {
 		return nil, errors.New("渲染后的通知内容为空")
 	}
+	if len(imageURL) > 4096 {
+		return nil, errors.New("渲染后的通知图片地址超过 4096 字节")
+	}
 	report := s.notifier.Publish(ctx, NotificationEvent{
-		Type: NotificationEventRSSMatched, Title: title, Message: message,
+		Type: NotificationEventRSSMatched, Title: title, Message: message, ImageURL: imageURL,
 		Severity: NotificationSeverityInfo, OccurredAt: time.Now(),
 		Metadata: map[string]string{"source": "rss_automation"},
 	})
-	output := map[string]any{"skipped": report.Skipped, "skip_reason": report.SkipReason, "deliveries": report.Deliveries}
+	output := map[string]any{"skipped": report.Skipped, "skip_reason": report.SkipReason, "deliveries": report.Deliveries, "image_url": imageURL}
 	if report.Skipped {
 		return output, nil
 	}
@@ -307,7 +318,7 @@ func renderRSSAutomationTemplate(template string, runContext map[string]any) str
 func resolveRSSAutomationString(runContext map[string]any, expression string) (string, error) {
 	expression = strings.TrimSpace(expression)
 	if expression == "" {
-		return "", errors.New("变量引用为空")
+		return "", errors.New("输入值为空")
 	}
 	if strings.Contains(expression, "{{") {
 		value := renderRSSAutomationTemplate(expression, runContext)
@@ -316,11 +327,16 @@ func resolveRSSAutomationString(runContext map[string]any, expression string) (s
 		}
 		return value, nil
 	}
-	value, ok := resolveRSSAutomationReference(runContext, expression)
-	if !ok || value == nil {
-		return "", fmt.Errorf("变量 %q 不存在", expression)
+	trimmedReference := strings.TrimPrefix(expression, "$")
+	if strings.HasPrefix(expression, "$") || strings.HasPrefix(trimmedReference, "item.") ||
+		strings.HasPrefix(trimmedReference, "vars.") || strings.HasPrefix(trimmedReference, "nodes.") {
+		value, ok := resolveRSSAutomationReference(runContext, expression)
+		if !ok || value == nil {
+			return "", fmt.Errorf("变量 %q 不存在", expression)
+		}
+		return strings.TrimSpace(fmt.Sprint(value)), nil
 	}
-	return strings.TrimSpace(fmt.Sprint(value)), nil
+	return expression, nil
 }
 
 func resolveRSSAutomationReference(runContext map[string]any, reference string) (any, bool) {

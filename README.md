@@ -25,10 +25,9 @@
 git clone --depth 1 https://github.com/xifofo/film-fusion.git
 cd film-fusion
 cp data/config.example.yaml data/config.yaml
-cp .env.example .env
 ```
 
-2. **修改配置文件与 RSS Worker 密钥**
+2. **修改配置文件**
 
 编辑 `data/config.yaml`，必须修改：
 
@@ -39,13 +38,9 @@ emby:
   enabled: false                     # 尚未配置 Emby 时先关闭
 ```
 
-再为 FilmFusion 与内部抓取 Worker 生成一份共享随机密钥：
+Compose 会在首次启动时自动生成 RSS Worker 内部 Token，并保存在独立命名卷中；不需要创建 `.env`，也不写入 `data/config.yaml`。登录后可在“系统信息”页面查看和复制它。没有 HTTPS 域名时，保持 `rss_generator.public_base_url` 为空即可。
 
-```bash
-openssl rand -base64 48
-```
-
-将命令输出填入 `.env` 的 `RSS_GENERATOR_WORKER_TOKEN`，不要复用管理员密码或公开 Feed Token。没有 HTTPS 域名时，把示例中的 `RSS_GENERATOR_PUBLIC_BASE_URL` 留空。
+RSS Feed 使用统一地址 `/rss/{feedPublicID}.xml`（或 `.atom`）：局域网来源可直接订阅，公网来源必须使用管理页生成的 `?token=...` 地址。订阅 Token 与 RSS Worker 内部 Token 相互独立。
 
 3. **修改挂载路径**
 

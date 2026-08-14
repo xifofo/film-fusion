@@ -205,6 +205,183 @@ func TestRSSAutomationSourcePortsAreNodeSpecific(t *testing.T) {
 	}
 }
 
+func TestValidateRSSAutomationDefinitionAccepts115WaitAndMoviePilotChain(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "offline", Type: RSSAutomationNodeOffline115OpenAPI, Config: map[string]any{
+				"cloud_storage_id": 1, "url": "$item.download_url",
+			}},
+			{ID: "wait", Type: RSSAutomationNodeWait115, Config: map[string]any{
+				"poll_interval_seconds": 30, "max_wait_minutes": 10080,
+			}},
+			{ID: "mp", Type: RSSAutomationNodeMoviePilotRecognize, Config: map[string]any{"tmdb_id": "{{item.tmdb_id}}"}},
+			{ID: "organize", Type: RSSAutomationNodeOrganizeStrm, Config: map[string]any{"cloud_directory_id": 1, "media_type": "auto"}},
+			{ID: "end", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "offline"},
+			{ID: "e2", Source: "offline", SourcePort: "success", Target: "wait"},
+			{ID: "e3", Source: "wait", SourcePort: "success", Target: "mp"},
+			{ID: "e4", Source: "mp", SourcePort: "success", Target: "organize"},
+			{ID: "e5", Source: "organize", SourcePort: "success", Target: "end"},
+		},
+	}
+	result := ValidateRSSAutomationDefinition(definition)
+	if !result.Valid {
+		t.Fatalf("115/MP chain invalid: %#v", result.Errors)
+	}
+	definition.Nodes[4].MaxAttempts = 2
+	result = ValidateRSSAutomationDefinition(definition)
+	if result.Valid || !containsRSSAutomationValidationError(result.Errors, "不能自动重试") {
+		t.Fatalf("organize retry safeguard missing: %#v", result.Errors)
+	}
+}
+
+func TestRSSAutomationNodeMaxAttemptsKeepsSideEffectsSingleAttempt(t *testing.T) {
+	tests := []struct {
+		name string
+		node RSSAutomationNode
+		want int
+	}{
+		{name: "organize", node: RSSAutomationNode{Type: RSSAutomationNodeOrganizeStrm}, want: 1},
+		{name: "strm regenerate", node: RSSAutomationNode{Type: RSSAutomationNodeStrmRegenerate}, want: 1},
+		{name: "http request", node: RSSAutomationNode{Type: RSSAutomationNodeHTTPRequest}, want: 1},
+		{name: "qBittorrent", node: RSSAutomationNode{Type: RSSAutomationNodeQBittorrent}, want: 3},
+		{name: "explicit", node: RSSAutomationNode{Type: RSSAutomationNodeQBittorrent, MaxAttempts: 2}, want: 2},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rssAutomationNodeMaxAttempts(tt.node); got != tt.want {
+				t.Fatalf("rssAutomationNodeMaxAttempts() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateRSSAutomationWait115RejectsTooFrequentPolling(t *testing.T) {
+	err := validateRSSAutomationNodeConfig(RSSAutomationNode{
+		Type: RSSAutomationNodeWait115,
+		Config: map[string]any{
+			"poll_interval_seconds": 1,
+			"max_wait_minutes":      60,
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "不能少于 5 秒") {
+		t.Fatalf("unexpected wait config result: %v", err)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionRequiresMediaNodePredecessors(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "notify", Type: RSSAutomationNodeNotification, Config: map[string]any{"message": "test"}},
+			{ID: "wait", Type: RSSAutomationNodeWait115},
+			{ID: "mp", Type: RSSAutomationNodeMoviePilotRecognize},
+			{ID: "end", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "notify"},
+			{ID: "e2", Source: "notify", SourcePort: "success", Target: "wait"},
+			{ID: "e3", Source: "wait", SourcePort: "success", Target: "mp"},
+			{ID: "e4", Source: "mp", SourcePort: "success", Target: "end"},
+		},
+	}
+	result := ValidateRSSAutomationDefinition(definition)
+	if result.Valid || !containsRSSAutomationValidationError(result.Errors, "必须直接连接在 115 离线节点之后") {
+		t.Fatalf("unexpected validation result: %#v", result)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionAllowsMoviePilotTitleBeforeDownload(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "mp_title", Type: RSSAutomationNodeMoviePilotTitle, Config: map[string]any{"input": "$item.title", "tmdb_id": "{{item.tmdb_id}}"}},
+			{ID: "end_success", Type: RSSAutomationNodeEnd},
+			{ID: "end_failure", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "mp_title"},
+			{ID: "e2", Source: "mp_title", SourcePort: "success", Target: "end_success"},
+			{ID: "e3", Source: "mp_title", SourcePort: "failure", Target: "end_failure"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("title recognition definition invalid: %#v", result.Errors)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionAcceptsSuggestedQBitMediaChain(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "mp_title", Type: RSSAutomationNodeMoviePilotTitle, Config: map[string]any{"input": "$item.title"}},
+			{ID: "dedupe", Type: RSSAutomationNodeMediaExists, Config: map[string]any{
+				"cloud_directory_id": 1, "tmdb_id": "{{nodes.mp_title.output.tmdb_id}}",
+			}},
+			{ID: "query", Type: RSSAutomationNodeHDHiveQuery, Config: map[string]any{
+				"tmdb_id": "{{nodes.mp_title.output.tmdb_id}}", "media_type": "{{nodes.mp_title.output.media_type}}",
+			}},
+			{ID: "unlock", Type: RSSAutomationNodeHDHiveUnlock, Config: map[string]any{"slug": "{{nodes.query.output.selected_slug}}"}},
+			{ID: "qb", Type: RSSAutomationNodeQBittorrent, Config: map[string]any{
+				"target_id": 1, "url": "{{nodes.unlock.output.download_url}}",
+			}},
+			{ID: "wait_qb", Type: RSSAutomationNodeWaitQBittorrent, Config: map[string]any{"poll_interval_seconds": 30}},
+			{ID: "end", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "mp_title"},
+			{ID: "e2", Source: "mp_title", SourcePort: "success", Target: "dedupe"},
+			{ID: "e3", Source: "dedupe", SourcePort: "missing", Target: "query"},
+			{ID: "e4", Source: "query", SourcePort: "found", Target: "unlock"},
+			{ID: "e5", Source: "unlock", SourcePort: "success", Target: "qb"},
+			{ID: "e6", Source: "qb", SourcePort: "success", Target: "wait_qb"},
+			{ID: "e7", Source: "wait_qb", SourcePort: "success", Target: "end"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("suggested qB media chain invalid: %#v", result.Errors)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionAcceptsStrmVerifyAndRegenerateBranches(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "offline", Type: RSSAutomationNodeOffline115OpenAPI, Config: map[string]any{"cloud_storage_id": 1, "url": "$item.download_url"}},
+			{ID: "wait", Type: RSSAutomationNodeWait115},
+			{ID: "organize", Type: RSSAutomationNodeOrganizeStrm, Config: map[string]any{"cloud_directory_id": 1}},
+			{ID: "verify", Type: RSSAutomationNodeStrmVerify, Config: map[string]any{"cloud_directory_id": 1}},
+			{ID: "regenerate", Type: RSSAutomationNodeStrmRegenerate, Config: map[string]any{"cloud_directory_id": 1}},
+			{ID: "end_valid", Type: RSSAutomationNodeEnd},
+			{ID: "end_regenerated", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "offline"},
+			{ID: "e2", Source: "offline", SourcePort: "success", Target: "wait"},
+			{ID: "e3", Source: "wait", SourcePort: "success", Target: "organize"},
+			{ID: "e4", Source: "organize", SourcePort: "success", Target: "verify"},
+			{ID: "e5", Source: "verify", SourcePort: "valid", Target: "end_valid"},
+			{ID: "e6", Source: "verify", SourcePort: "invalid", Target: "regenerate"},
+			{ID: "e7", Source: "regenerate", SourcePort: "success", Target: "end_regenerated"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("STRM verify/regenerate definition invalid: %#v", result.Errors)
+	}
+	definition.Edges[5].SourcePort = "valid"
+	if result := ValidateRSSAutomationDefinition(definition); result.Valid || !containsRSSAutomationValidationError(result.Errors, "“无效”出口") {
+		t.Fatalf("STRM regenerate predecessor safeguard missing: %#v", result.Errors)
+	}
+}
+
 func TestValidateRSSAutomationDefinitionRejectsUnknownTargetPort(t *testing.T) {
 	definition := DefaultRSSAutomationDefinition()
 	definition.Edges[0].TargetPort = "side-door"

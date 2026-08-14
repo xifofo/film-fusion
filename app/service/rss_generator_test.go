@@ -56,6 +56,34 @@ func validRSSGeneratorTestInput(sourceURL string) RSSGeneratorFeedInput {
 	}
 }
 
+func TestRSSGeneratorWorkerAccessTokenPrefersAndReloadsSharedFile(t *testing.T) {
+	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
+	tokenFile := filepath.Join(t.TempDir(), "worker-token")
+	service.cfg.WorkerTokenFile = tokenFile
+
+	if err := os.WriteFile(tokenFile, []byte("first-shared-worker-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := service.WorkerAccessToken(); err != nil || token != "first-shared-worker-token" {
+		t.Fatalf("first token = %q, err = %v", token, err)
+	}
+	if err := os.WriteFile(tokenFile, []byte("rotated-shared-worker-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := service.WorkerAccessToken(); err != nil || token != "rotated-shared-worker-token" {
+		t.Fatalf("rotated token = %q, err = %v", token, err)
+	}
+}
+
+func TestRSSGeneratorWorkerAccessTokenReportsMissingSharedFile(t *testing.T) {
+	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
+	service.cfg.WorkerTokenFile = filepath.Join(t.TempDir(), "missing-token")
+
+	if _, err := service.WorkerAccessToken(); err == nil || !strings.Contains(err.Error(), "读取 RSS Worker Token 文件失败") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestRSSGeneratorSecretsAreEncryptedAndViewsAreFullyRedacted(t *testing.T) {
 	service, db := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
 	input := validRSSGeneratorTestInput("https://source.example")
@@ -136,6 +164,12 @@ func TestRSSGeneratorParametersUseArrayAndValidateBothTemplateForms(t *testing.T
 	badURLTemplate.SourceURLTemplate = "https://source.example/{{json.params.category}}"
 	if _, err := service.CreateFeed(badURLTemplate); err == nil || !strings.Contains(err.Error(), "{{params.name}}") {
 		t.Fatalf("URL should reject JSON placeholder: %v", err)
+	}
+	reservedToken := validRSSGeneratorTestInput("https://source.example")
+	reservedToken.Slug = "reserved-token-parameter"
+	reservedToken.Parameters = []RSSGeneratorParameterDefinition{{Name: "token", Type: "string"}}
+	if _, err := service.CreateFeed(reservedToken); err == nil || !strings.Contains(err.Error(), "订阅鉴权保留") {
+		t.Fatalf("token query parameter should be reserved: %v", err)
 	}
 }
 
@@ -268,7 +302,7 @@ func TestRSSGeneratorTokenLifecycleNeverStoresCleartext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(created.Token, "ffrss_") || created.RSSURL != "/rss/s/"+created.Token+".xml" {
+	if !strings.HasPrefix(created.Token, "ffrss_") || created.RSSURL != "/rss/"+feed.PublicID+".xml?token="+created.Token {
 		t.Fatalf("unexpected token result: %+v", created)
 	}
 	var stored model.RSSGeneratorFeedAccessToken
@@ -288,6 +322,39 @@ func TestRSSGeneratorTokenLifecycleNeverStoresCleartext(t *testing.T) {
 	}
 	if _, err := service.RotateToken(feed.ID, stored.ID); !errors.Is(err, ErrRSSGeneratorTokenHidden) {
 		t.Fatalf("expired token should not rotate: %v", err)
+	}
+}
+
+func TestRSSGeneratorFeedAccessAllowsLANAndRequiresMatchingQueryTokenOutsideLAN(t *testing.T) {
+	service, _ := newRSSGeneratorTestService(t, "http://127.0.0.1:8787")
+	first, err := service.CreateFeed(validRSSGeneratorTestInput("https://source.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput := validRSSGeneratorTestInput("https://other.example")
+	secondInput.Slug = "other-feed"
+	second, err := service.CreateFeed(secondInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.CreateToken(first.ID, RSSGeneratorTokenInput{Name: "公网阅读器"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.ResolveFeedAccess(context.Background(), first.PublicID, "", false); !errors.Is(err, ErrRSSGeneratorTokenHidden) {
+		t.Fatalf("public request without token error=%v", err)
+	}
+	lanAccess, err := service.ResolveFeedAccess(context.Background(), first.PublicID, "", true)
+	if err != nil || !lanAccess.LAN || lanAccess.Feed.ID != first.ID {
+		t.Fatalf("LAN access=%+v err=%v", lanAccess, err)
+	}
+	if _, err := service.ResolveFeedAccess(context.Background(), second.PublicID, token.Token, false); !errors.Is(err, ErrRSSGeneratorTokenHidden) {
+		t.Fatalf("cross-feed token error=%v", err)
+	}
+	publicAccess, err := service.ResolveFeedAccess(context.Background(), first.PublicID, token.Token, false)
+	if err != nil || publicAccess.LAN || publicAccess.Token.ID != token.Record.ID {
+		t.Fatalf("public access=%+v err=%v", publicAccess, err)
 	}
 }
 
@@ -355,8 +422,8 @@ func TestRSSGeneratorCacheSeparatesTokensAndHitsWithinToken(t *testing.T) {
 	}
 	firstToken, _ := service.CreateToken(feed.ID, RSSGeneratorTokenInput{Name: "一"})
 	secondToken, _ := service.CreateToken(feed.ID, RSSGeneratorTokenInput{Name: "二"})
-	firstAccess, _ := service.ResolvePublicToken(context.Background(), firstToken.Token)
-	secondAccess, _ := service.ResolvePublicToken(context.Background(), secondToken.Token)
+	firstAccess, _ := service.ResolveFeedAccess(context.Background(), feed.PublicID, firstToken.Token, false)
+	secondAccess, _ := service.ResolveFeedAccess(context.Background(), feed.PublicID, secondToken.Token, false)
 	params := map[string]any{"category": "movie"}
 	first, err := service.RenderPublic(context.Background(), firstAccess, "rss", params)
 	if err != nil {
@@ -396,7 +463,7 @@ func TestRSSGeneratorCacheSingleflightCoalescesConcurrentMisses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	access, err := service.ResolvePublicToken(context.Background(), token.Token)
+	access, err := service.ResolveFeedAccess(context.Background(), feed.PublicID, token.Token, false)
 	if err != nil {
 		t.Fatal(err)
 	}

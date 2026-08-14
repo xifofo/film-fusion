@@ -15,20 +15,21 @@ No authentication is required. It reports process health and whether worker auth
 Use the internal service token:
 
 ```http
-Authorization: Bearer <WORKER_AUTH_TOKEN>
+Authorization: Bearer <configured worker token>
 Content-Type: application/json
 ```
 
-`WORKER_AUTH_TOKEN` must be configured in production. With no token, calls are accepted **only** when `WORKER_ALLOW_UNAUTHENTICATED=true` and the immediate caller has a loopback/private address. This mode is for local development and a trusted private Docker network only.
+The Worker always requires authentication. It reads the token from the private file named by `WORKER_AUTH_TOKEN_FILE`; there is no token-valued environment variable and no unauthenticated fallback.
 
-Recommended Go configuration:
+An independently deployed FilmFusion client can use:
 
-```dotenv
-RSS_GENERATOR_WORKER_URL=http://rss-generator-worker:8787
-RSS_GENERATOR_WORKER_TOKEN=<same value as WORKER_AUTH_TOKEN>
+```yaml
+rss_generator:
+  worker_url: "http://rss-generator-worker:8787"
+  worker_token: "a-random-secret-with-at-least-32-characters"
 ```
 
-The exact Go environment variable names are owned by the FilmFusion integration; the HTTP contract is the base URL plus bearer token shown above.
+The default Compose deployment does not use that YAML field. A one-shot deployment service generates the token into a private named volume; FilmFusion and the Worker both mount the resulting file read-only. The administrator can inspect it from FilmFusion's “系统信息” page.
 
 ## Request contract
 
@@ -266,13 +267,27 @@ SSRF checks protect the worker itself. The Go layer should additionally allow on
 ## Run locally
 
 ```bash
-cp .env.example .env
 pnpm install
 pnpm exec playwright install chromium
-WORKER_AUTH_TOKEN='replace-me' pnpm dev
+mkdir -p .runtime
+openssl rand -base64 48 | tr -d '\n' > .runtime/worker-token
+chmod 600 .runtime/worker-token
 ```
 
-Node.js 20 or later is required. The service does not automatically load `.env`; inject variables through your process manager, Compose, or shell.
+Start the Go service from the backend root with the same read-only token file:
+
+```bash
+RSS_GENERATOR_WORKER_TOKEN_FILE="$PWD/rss-generator-worker/.runtime/worker-token" go run . server
+```
+
+In a second terminal, start the Worker:
+
+```bash
+cd rss-generator-worker
+WORKER_AUTH_TOKEN_FILE="$PWD/.runtime/worker-token" pnpm dev
+```
+
+Node.js 20 or later is required. These environment variables contain only a file path, not the token value; no `.env` file is loaded or required.
 
 Validate without launching a browser:
 
@@ -290,7 +305,8 @@ Unit tests use mocks and pure extraction helpers, so they do not require a downl
 docker build -t film-fusion-rss-generator-worker .
 docker run --rm \
   -p 127.0.0.1:8787:8787 \
-  -e WORKER_AUTH_TOKEN='replace-with-a-random-secret' \
+  -e WORKER_AUTH_TOKEN_FILE=/run/film-fusion-rss-worker/token \
+  -v /absolute/path/to/worker-token:/run/film-fusion-rss-worker/token:ro \
   film-fusion-rss-generator-worker
 ```
 

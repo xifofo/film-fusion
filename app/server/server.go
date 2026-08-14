@@ -106,7 +106,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		taskQueue:              taskQueue,
 	}
 	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.notificationService, s.moviePilotService)
-	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService)
+	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService, s.moviePilotService, s.rssMonitorService)
 	rssGeneratorService, err := service.NewRSSGeneratorService(database.GetDB(), log, cfg.RSSGenerator)
 	if err != nil {
 		// Stored request credentials cannot be used safely without the dedicated
@@ -142,7 +142,7 @@ func newApplicationRouter() *gin.Engine {
 			// A public subscription token is a credential. Gin's default logger
 			// includes the full path and query string, so do not write these
 			// requests to the generic access log.
-			return strings.HasPrefix(c.Request.URL.Path, "/rss/s/")
+			return strings.HasPrefix(c.Request.URL.Path, "/rss/")
 		}}),
 		gin.Recovery(),
 	)
@@ -293,7 +293,8 @@ func (s *Server) setupRoutes() {
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
 	rssAutomationHandler := handler.NewRSSAutomationHandler(s.rssAutomationService)
-	rssGeneratorHandler := handler.NewRSSGeneratorHandler(s.rssGeneratorService)
+	rssGeneratorHandler := handler.NewRSSGeneratorHandler(s.rssGeneratorService, s.Config)
+	systemInfoHandler := handler.NewSystemInfoHandler(s.rssGeneratorService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -305,6 +306,9 @@ func (s *Server) setupRoutes() {
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.tmdbService, s.download115Service, s.embyClient)
+	s.rssAutomationService.SetOrganizer(organizeHandler)
+	s.rssAutomationService.SetMediaStatusChecker(organizeHandler)
+	s.rssAutomationService.SetEmbyClient(s.embyClient)
 	organizePreviewQueue := service.NewOrganizePreviewQueue(s.Logger, organizeHandler.ProcessPreviewTask)
 	organizeHandler.SetPreviewQueue(organizePreviewQueue)
 	s.organizePreviewQueue = organizePreviewQueue
@@ -318,6 +322,7 @@ func (s *Server) setupRoutes() {
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
 	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger, s.hdhiveRefreshService)
+	s.rssAutomationService.SetHDHiveGateway(hdhiveHandler)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 
@@ -329,9 +334,10 @@ func (s *Server) setupRoutes() {
 	api.GET("/public-assets/login-background/:filename", appConfigHandler.GetLoginBackground)
 	api.GET("/public-assets/login-background-emby/:itemID", appConfigHandler.GetEmbyLoginBackground)
 
-	// Public feeds use a dedicated, revocable read-only credential. This route
-	// must remain outside the administrator JWT middleware.
-	s.gin.GET("/rss/s/:token", rssGeneratorHandler.PublicFeed)
+	// LAN clients may use the feed URL directly. Requests resolved to any other
+	// network must provide a dedicated, revocable read-only token in the query.
+	// This route must remain outside the administrator JWT middleware.
+	s.gin.GET("/rss/:feed", rssGeneratorHandler.PublicFeed)
 
 	// 认证相关路由（不需要JWT验证）
 	auth := api.Group("/auth")
@@ -363,6 +369,7 @@ func (s *Server) setupRoutes() {
 	{
 		// 用户相关
 		protected.GET("/me", authHandler.Me)
+		protected.GET("/system-info", systemInfoHandler.Get)
 
 		// 系统配置相关路由
 		// 应用配置（config.yaml 在线编辑 + 热重载）
@@ -390,6 +397,8 @@ func (s *Server) setupRoutes() {
 		rssAutomation := protected.Group("/rss-automation")
 		{
 			rssAutomation.GET("", rssAutomationHandler.Dashboard)
+			rssAutomation.GET("/node-protocols", rssAutomationHandler.NodeProtocols)
+			rssAutomation.POST("/legacy-migration", rssAutomationHandler.MigrateLegacyMonitor)
 			rssAutomation.POST("/automations", rssAutomationHandler.CreateAutomation)
 			rssAutomation.PATCH("/automations/:id/enabled", rssAutomationHandler.SetAutomationEnabled)
 			rssAutomation.DELETE("/automations/:id", rssAutomationHandler.DeleteAutomation)
@@ -400,14 +409,26 @@ func (s *Server) setupRoutes() {
 			rssAutomation.PUT("/workflows/:id", rssAutomationHandler.UpdateWorkflow)
 			rssAutomation.GET("/workflows/:id/manual-candidates", rssAutomationHandler.ListManualCandidates)
 			rssAutomation.POST("/workflows/:id/manual-runs", rssAutomationHandler.CreateManualRuns)
+			rssAutomation.GET("/targets", rssAutomationHandler.ListTargets)
 			rssAutomation.POST("/targets", rssAutomationHandler.CreateTarget)
 			rssAutomation.PUT("/targets/:id", rssAutomationHandler.UpdateTarget)
 			rssAutomation.DELETE("/targets/:id", rssAutomationHandler.DeleteTarget)
 			rssAutomation.POST("/targets/:id/test", rssAutomationHandler.TestTarget)
+			rssAutomation.GET("/entries", rssAutomationHandler.ListEntries)
 			rssAutomation.GET("/runs", rssAutomationHandler.ListRuns)
 			rssAutomation.GET("/runs/:id", rssAutomationHandler.GetRun)
 			rssAutomation.POST("/runs/:id/retry", rssAutomationHandler.RetryRun)
 			rssAutomation.POST("/runs/:id/cancel", rssAutomationHandler.CancelRun)
+		}
+
+		// 下载器账号由独立设置页管理；旧的 RSS 自动化目标接口继续保留兼容。
+		downloaders := protected.Group("/downloaders")
+		{
+			downloaders.GET("", rssAutomationHandler.ListTargets)
+			downloaders.POST("", rssAutomationHandler.CreateTarget)
+			downloaders.PUT("/:id", rssAutomationHandler.UpdateTarget)
+			downloaders.DELETE("/:id", rssAutomationHandler.DeleteTarget)
+			downloaders.POST("/:id/test", rssAutomationHandler.TestTarget)
 		}
 
 		rssGenerator := protected.Group("/rss-generator")

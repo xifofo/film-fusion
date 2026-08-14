@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -36,6 +37,7 @@ var (
 	ErrRSSGeneratorTokenHidden    = errors.New("RSS 订阅凭证不存在")
 	ErrRSSGeneratorRateLimited    = errors.New("RSS 订阅请求过于频繁")
 	rssGeneratorSlugPattern       = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,119}$`)
+	rssGeneratorPublicIDPattern   = regexp.MustCompile(`^[A-Za-z0-9_-]{16,32}$`)
 	rssGeneratorParamPattern      = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]{0,127}$`)
 	rssGeneratorHeaderPattern     = regexp.MustCompile(`^[!#$%&'*+.^_` + "`" + `|~0-9A-Za-z-]+$`)
 	rssGeneratorURLTemplateToken  = regexp.MustCompile(`\{\{params\.([A-Za-z_][A-Za-z0-9_-]*)\}\}`)
@@ -231,6 +233,36 @@ func NewRSSGeneratorService(db *gorm.DB, log *logger.Logger, cfg config.RSSGener
 		httpClient: &http.Client{Timeout: time.Duration(cfg.RequestTimeoutSeconds) * time.Second},
 		flights:    make(map[string]*rssGeneratorFlight), rateWindows: make(map[uint]rssGeneratorRateWindow),
 	}, nil
+}
+
+// WorkerURL 返回 FilmFusion 当前调用的 Worker 地址。它属于主服务的客户端连接信息。
+func (s *RSSGeneratorService) WorkerURL() string {
+	return strings.TrimRight(strings.TrimSpace(s.cfg.WorkerURL), "/")
+}
+
+// WorkerAccessToken 读取当前内部调用凭证。默认 Compose 部署使用只读共享文件，
+// 独立部署则兼容原有 worker_token 客户端配置。每次调用都重新读取文件，以便安全轮换。
+func (s *RSSGeneratorService) WorkerAccessToken() (string, error) {
+	raw := s.cfg.WorkerToken
+	if path := strings.TrimSpace(s.cfg.WorkerTokenFile); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("读取 RSS Worker Token 文件失败: %w", err)
+		}
+		if len(data) > 512 {
+			return "", errors.New("RSS Worker Token 文件内容过长")
+		}
+		raw = string(data)
+	}
+
+	token := strings.TrimSpace(raw)
+	if token == "" {
+		return "", errors.New("RSS Worker Token 尚未生成")
+	}
+	if strings.ContainsAny(token, "\r\n") {
+		return "", errors.New("RSS Worker Token 格式无效")
+	}
+	return token, nil
 }
 
 func (s *RSSGeneratorService) Dashboard(ctx context.Context) (RSSGeneratorDashboard, error) {
@@ -728,6 +760,9 @@ func validateRSSGeneratorParameters(parameters []RSSGeneratorParameterDefinition
 		name := definition.Name
 		if !rssGeneratorParamPattern.MatchString(name) {
 			return nil, fmt.Errorf("参数名 %q 无效", name)
+		}
+		if strings.EqualFold(name, "token") {
+			return nil, errors.New("参数名 token 由订阅鉴权保留")
 		}
 		if _, exists := schema[name]; exists {
 			return nil, fmt.Errorf("参数名 %q 重复", name)

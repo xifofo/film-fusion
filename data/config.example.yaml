@@ -6,7 +6,8 @@ server:
   cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入；之后在系统设置中维护
   web_115_user_agent: ""       # 仅首次初始化数据库时导入；之后在系统设置中维护
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
-  # FilmFusion 管理后台登录防爆破。直连时 trusted_proxy_cidrs 保持为空。
+  # FilmFusion 管理后台登录防爆破与 RSS 局域网免 Token 共用真实来源 IP 解析。
+  # 直连时 trusted_proxy_cidrs 保持为空；经过代理时仅填写实际代理 IP/CIDR。
   security:
     enabled: true
     window_minutes: 10
@@ -36,11 +37,10 @@ webhook:
     enabled: false
     token: ""  # openssl rand -hex 32
 
-# RSS 生成器的抓取执行面。Docker Compose 会将 worker_url 覆盖为内网服务名。
-# worker_token 只用于 FilmFusion -> Worker 内部鉴权，不要复用管理员密码或 Feed Token。
+# RSS 生成器的抓取执行面。Docker Compose 会覆盖 worker_url，并自动生成内部 Token。
+# 仅连接独立部署的 Worker 时，才需要另行添加 worker_token 客户端凭证。
 rss_generator:
   worker_url: "http://127.0.0.1:8787"
-  worker_token: ""
   public_base_url: ""          # 留空返回相对地址，管理页会按当前访问域名展示
   request_timeout_seconds: 90
   secret_key_file: "data/rss-generator.key" # Cookie/代理等敏感字段的本地 AES 密钥（0600）

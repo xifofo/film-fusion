@@ -93,11 +93,13 @@ type RSSAutomationConfig struct {
 	UserAgent string `json:"user_agent"`
 }
 
-// RSSGeneratorConfig 保存 RSS 生成器执行面的连接配置。
-// WorkerToken 只用于 FilmFusion 与内网 Worker 之间鉴权，永不向前端返回。
+// RSSGeneratorConfig 保存 RSS 生成器执行面的客户端连接配置。
+// WorkerToken 仅保留独立部署 Worker 时的兼容入口；默认 Compose 部署从
+// WorkerTokenFile 读取部署层自动生成的共享密钥，两者都不会进入通用配置响应。
 type RSSGeneratorConfig struct {
 	WorkerURL             string `mapstructure:"worker_url" json:"worker_url"`
 	WorkerToken           string `mapstructure:"worker_token" json:"-"`
+	WorkerTokenFile       string `mapstructure:"-" json:"-"`
 	PublicBaseURL         string `mapstructure:"public_base_url" json:"public_base_url"`
 	RequestTimeoutSeconds int    `mapstructure:"request_timeout_seconds" json:"request_timeout_seconds"`
 	SecretKeyFile         string `mapstructure:"secret_key_file" json:"-"`
@@ -383,6 +385,11 @@ func Save(c *Config) error {
 	viper.Set("jwt.expire_time", c.JWT.ExpireTime)
 	viper.Set("jwt.issuer", c.JWT.Issuer)
 
+	viper.Set("rss_generator.worker_url", c.RSSGenerator.WorkerURL)
+	viper.Set("rss_generator.public_base_url", c.RSSGenerator.PublicBaseURL)
+	viper.Set("rss_generator.request_timeout_seconds", c.RSSGenerator.RequestTimeoutSeconds)
+	viper.Set("rss_generator.secret_key_file", c.RSSGenerator.SecretKeyFile)
+
 	viper.Set("notifications.instance_name", c.Notifications.InstanceName)
 	viper.Set("notifications.routes.emby_brute_force", c.Notifications.Routes.EmbyBruteForce)
 	viper.Set("notifications.routes.system_brute_force", c.Notifications.Routes.SystemBruteForce)
@@ -472,7 +479,9 @@ func Save(c *Config) error {
 		if path == "" {
 			path = "data/config.yaml"
 		}
-		return viper.WriteConfigAs(path)
+		if err := viper.WriteConfigAs(path); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -956,12 +965,11 @@ func applyRSSGeneratorDefaults(settings *RSSGeneratorConfig) {
 	if strings.TrimSpace(settings.WorkerURL) == "" {
 		settings.WorkerURL = strings.TrimSpace(viper.GetString("rss_generator.worker_url"))
 	}
-	if environmentToken, ok := os.LookupEnv("RSS_GENERATOR_WORKER_TOKEN"); ok {
-		// Read the secret outside Viper so an unrelated config.Save call cannot
-		// serialize an environment-only token back into config.yaml.
-		settings.WorkerToken = environmentToken
-	} else if settings.WorkerToken == "" {
+	if settings.WorkerToken == "" {
 		settings.WorkerToken = viper.GetString("rss_generator.worker_token")
+	}
+	if strings.TrimSpace(settings.WorkerTokenFile) == "" {
+		settings.WorkerTokenFile = strings.TrimSpace(os.Getenv("RSS_GENERATOR_WORKER_TOKEN_FILE"))
 	}
 	if strings.TrimSpace(settings.PublicBaseURL) == "" {
 		settings.PublicBaseURL = strings.TrimRight(strings.TrimSpace(viper.GetString("rss_generator.public_base_url")), "/")
@@ -1011,8 +1019,15 @@ func ValidateRSSGenerator(settings RSSGeneratorConfig) error {
 	if workerURL.User != nil {
 		return fmt.Errorf("RSS 生成器 Worker 地址不能包含用户名或密码")
 	}
+	workerToken := strings.TrimSpace(settings.WorkerToken)
 	if strings.ContainsAny(settings.WorkerToken, "\r\n") {
 		return fmt.Errorf("RSS 生成器 Worker Token 不能包含换行")
+	}
+	if workerToken != "" && len([]byte(workerToken)) < 32 {
+		return fmt.Errorf("RSS 生成器 Worker Token 至少需要 32 个字符")
+	}
+	if len([]byte(workerToken)) > 512 {
+		return fmt.Errorf("RSS 生成器 Worker Token 不能超过 512 个字符")
 	}
 	if settings.RequestTimeoutSeconds <= 0 || settings.RequestTimeoutSeconds > 300 {
 		return fmt.Errorf("RSS 生成器请求超时需在 1 到 300 秒之间")

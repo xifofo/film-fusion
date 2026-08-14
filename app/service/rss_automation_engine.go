@@ -23,6 +23,18 @@ type RSSAutomationRunDetail struct {
 	NodeRuns []model.RSSAutomationNodeRun `json:"node_runs"`
 }
 
+type rssAutomationNodeDeferred struct {
+	delay   time.Duration
+	message string
+}
+
+func (d *rssAutomationNodeDeferred) Error() string {
+	if d == nil || strings.TrimSpace(d.message) == "" {
+		return "节点等待外部状态更新"
+	}
+	return d.message
+}
+
 func (s *RSSAutomationService) executionScheduleLoop() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(300 * time.Millisecond)
@@ -282,12 +294,36 @@ func (s *RSSAutomationService) executeRSSAutomationNode(ctx context.Context, run
 	case RSSAutomationNodeQBittorrent:
 		output, err := s.executeRSSAutomationQBittorrent(ctx, node, runContext)
 		return withRSSAutomationSelectedPort(output, err), err
+	case RSSAutomationNodeWaitQBittorrent:
+		return s.executeRSSAutomationWaitQBittorrent(ctx, nodeRun, node, definition, runContext)
 	case RSSAutomationNodeOffline115:
 		output, err := s.executeRSSAutomationOffline115(ctx, node, runContext)
 		return withRSSAutomationSelectedPort(output, err), err
 	case RSSAutomationNodeOffline115OpenAPI:
 		output, err := s.executeRSSAutomationOffline115OpenAPI(ctx, node, runContext)
 		return withRSSAutomationSelectedPort(output, err), err
+	case RSSAutomationNodeWait115:
+		return s.executeRSSAutomationWait115(ctx, nodeRun, node, definition, runContext)
+	case RSSAutomationNodeMoviePilotTitle:
+		return s.executeRSSAutomationMoviePilotTitleRecognize(ctx, node, runContext)
+	case RSSAutomationNodeMediaExists:
+		return s.executeRSSAutomationMediaExists(ctx, node, runContext)
+	case RSSAutomationNodeHDHiveQuery:
+		return s.executeRSSAutomationHDHiveQuery(ctx, node, runContext)
+	case RSSAutomationNodeHDHiveUnlock:
+		return s.executeRSSAutomationHDHiveUnlock(ctx, node, runContext)
+	case RSSAutomationNodeMoviePilotRecognize:
+		return s.executeRSSAutomationMoviePilotRecognize(ctx, node, definition, runContext)
+	case RSSAutomationNodeOrganizeStrm:
+		return s.executeRSSAutomationOrganizeStrm(ctx, node, definition, runContext)
+	case RSSAutomationNodeStrmVerify:
+		return s.executeRSSAutomationStrmVerify(ctx, node, definition, runContext)
+	case RSSAutomationNodeStrmRegenerate:
+		return s.executeRSSAutomationStrmRegenerate(ctx, node, definition, runContext)
+	case RSSAutomationNodeEmbyRefreshWait:
+		return s.executeRSSAutomationEmbyRefreshWait(ctx, nodeRun, node, runContext)
+	case RSSAutomationNodeHTTPRequest:
+		return s.executeRSSAutomationHTTPRequest(ctx, node, runContext)
 	case RSSAutomationNodeNotification:
 		output, err := s.executeRSSAutomationNotification(ctx, node, runContext)
 		return withRSSAutomationSelectedPort(output, err), err
@@ -471,6 +507,11 @@ func (s *RSSAutomationService) completeRSSAutomationNode(nodeRun model.RSSAutoma
 	if output == nil {
 		output = map[string]any{}
 	}
+	var deferred *rssAutomationNodeDeferred
+	if errors.As(executeErr, &deferred) {
+		s.deferRSSAutomationNode(nodeRun, output, deferred)
+		return
+	}
 	if executeErr != nil {
 		output["selected_port"] = "failure"
 	}
@@ -507,6 +548,35 @@ func (s *RSSAutomationService) completeRSSAutomationNode(nodeRun model.RSSAutoma
 		return
 	}
 	_ = s.finalizeRSSAutomationRun(nodeRun.RunID)
+}
+
+func (s *RSSAutomationService) deferRSSAutomationNode(nodeRun model.RSSAutomationNodeRun, output map[string]any, deferred *rssAutomationNodeDeferred) {
+	if output == nil {
+		output = map[string]any{}
+	}
+	delete(output, "selected_port")
+	outputJSON, _ := json.Marshal(output)
+	delay := defaultRSSAutomation115PollSeconds * time.Second
+	message := "节点等待外部状态更新"
+	if deferred != nil {
+		if deferred.delay > 0 {
+			delay = deferred.delay
+		}
+		if strings.TrimSpace(deferred.message) != "" {
+			message = deferred.message
+		}
+	}
+	next := time.Now().Add(delay)
+	_ = s.retryRSSAutomationDatabaseOperation(func() error {
+		return s.db.Model(&model.RSSAutomationNodeRun{}).
+			Where("id = ? AND status = ?", nodeRun.ID, model.RSSAutomationNodeRunning).
+			Updates(map[string]any{
+				"status": model.RSSAutomationNodePending, "next_attempt_at": next,
+				"started_at": nil, "completed_at": nil, "output_json": string(outputJSON),
+				"error_message": message,
+				"attempt":       gorm.Expr("CASE WHEN attempt > 0 THEN attempt - 1 ELSE 0 END"),
+			}).Error
+	})
 }
 
 func (s *RSSAutomationService) buildRSSAutomationRunContext(run model.RSSAutomationRun) (map[string]any, error) {
@@ -585,14 +655,13 @@ func evaluateRSSAutomationCondition(raw any, runContext map[string]any) (bool, e
 		matched, err := evaluateRSSAutomationCondition(value, runContext)
 		return !matched, err
 	}
-	leftRef := strings.TrimSpace(fmt.Sprint(firstRSSAutomationConditionValue(condition, "field", "left")))
+	leftExpression := firstRSSAutomationConditionValue(condition, "field", "left")
+	leftRef := strings.TrimSpace(fmt.Sprint(leftExpression))
 	operator := strings.ToLower(strings.TrimSpace(fmt.Sprint(firstRSSAutomationConditionValue(condition, "operator", "op"))))
 	right := firstRSSAutomationConditionValue(condition, "value", "right")
-	left, leftExists := resolveRSSAutomationReference(runContext, leftRef)
-	if text, ok := right.(string); ok && strings.HasPrefix(strings.TrimSpace(text), "$") {
-		if resolved, exists := resolveRSSAutomationReference(runContext, text); exists {
-			right = resolved
-		}
+	left, leftExists := resolveRSSAutomationConditionOperand(runContext, leftExpression)
+	if resolved, exists := resolveRSSAutomationConditionOperand(runContext, right); exists {
+		right = resolved
 	}
 	switch operator {
 	case "exists":
@@ -650,6 +719,37 @@ func evaluateRSSAutomationCondition(raw any, runContext map[string]any) (bool, e
 		return false, nil
 	default:
 		return false, fmt.Errorf("不支持的条件操作符 %q", operator)
+	}
+}
+
+func resolveRSSAutomationConditionOperand(runContext map[string]any, raw any) (any, bool) {
+	switch typed := raw.(type) {
+	case string:
+		expression := strings.TrimSpace(typed)
+		if parts := rssAutomationTemplatePattern.FindStringSubmatch(expression); len(parts) == 2 && parts[0] == expression {
+			return resolveRSSAutomationReference(runContext, parts[1])
+		}
+		trimmedReference := strings.TrimPrefix(expression, "$")
+		if strings.HasPrefix(expression, "$") || strings.HasPrefix(trimmedReference, "item.") ||
+			strings.HasPrefix(trimmedReference, "vars.") || strings.HasPrefix(trimmedReference, "nodes.") {
+			return resolveRSSAutomationReference(runContext, expression)
+		}
+		if strings.Contains(expression, "{{") {
+			return renderRSSAutomationTemplate(expression, runContext), true
+		}
+		return typed, true
+	case []any:
+		resolved := make([]any, 0, len(typed))
+		for _, item := range typed {
+			value, exists := resolveRSSAutomationConditionOperand(runContext, item)
+			if !exists {
+				return nil, false
+			}
+			resolved = append(resolved, value)
+		}
+		return resolved, true
+	default:
+		return raw, raw != nil
 	}
 }
 
@@ -949,6 +1049,9 @@ func (s *RSSAutomationService) requeueRSSAutomationNodeAfterDatabaseError(nodeRu
 
 func rssAutomationNodeTimeout(node RSSAutomationNode) time.Duration {
 	seconds := 30
+	if node.Type == RSSAutomationNodeOrganizeStrm {
+		seconds = 600
+	}
 	if value := rssAutomationConfigUint(node.Config, "timeout_seconds"); value > 0 && value <= 600 {
 		seconds = int(value)
 	}

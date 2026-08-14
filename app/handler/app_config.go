@@ -189,8 +189,8 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		in.RSSAutomation.UserAgent = currentRSSAutomationUserAgent
 	}
 	in.RSSAutomation.UserAgent = database.NormalizeRSSAutomationUserAgent(in.RSSAutomation.UserAgent)
-	// RSS 生成器 Worker 是启动期内部基础设施，系统设置页不编辑也不覆盖它。
-	// 特别是 WorkerToken 的 json:"-" 会使任何 API 载荷都无法写入该密钥。
+	// RSS 生成器连接参数不由通用系统设置页编辑。默认部署的 Worker Token
+	// 来自部署层共享文件，只在只读系统信息页中显示。
 	in.RSSGenerator = h.cfg.RSSGenerator
 	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
 	if in.Emby.ImageOptimization.IsZero() {
@@ -280,6 +280,10 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	if err := database.ValidateRSSAutomationUserAgent(in.RSSAutomation.UserAgent); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	if err := config.ValidateRSSGenerator(in.RSSGenerator); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}

@@ -10,12 +10,21 @@ import (
 	"github.com/spf13/viper"
 )
 
-func TestRSSGeneratorConfigSupportsExplicitEnvironmentOverrides(t *testing.T) {
+func TestRSSGeneratorConfigSupportsSharedTokenFileAndLegacyYAMLToken(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 	viper.AutomaticEnv()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("rss_generator:\n  worker_token: yaml-worker-secret-with-at-least-32-characters\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	viper.SetConfigFile(path)
+	if err := viper.ReadInConfig(); err != nil {
+		t.Fatalf("read config: %v", err)
+	}
 	t.Setenv("RSS_GENERATOR_WORKER_URL", "http://rss-generator-worker:8787")
-	t.Setenv("RSS_GENERATOR_WORKER_TOKEN", "internal-worker-secret")
+	t.Setenv("RSS_GENERATOR_WORKER_TOKEN_FILE", "/run/film-fusion-rss-worker/token")
 	t.Setenv("RSS_GENERATOR_PUBLIC_BASE_URL", "https://feeds.example.com")
 	t.Setenv("RSS_GENERATOR_REQUEST_TIMEOUT_SECONDS", "45")
 
@@ -27,7 +36,8 @@ func TestRSSGeneratorConfigSupportsExplicitEnvironmentOverrides(t *testing.T) {
 	applyRSSGeneratorDefaults(&cfg.RSSGenerator)
 
 	if cfg.RSSGenerator.WorkerURL != "http://rss-generator-worker:8787" ||
-		cfg.RSSGenerator.WorkerToken != "internal-worker-secret" ||
+		cfg.RSSGenerator.WorkerToken != "yaml-worker-secret-with-at-least-32-characters" ||
+		cfg.RSSGenerator.WorkerTokenFile != "/run/film-fusion-rss-worker/token" ||
 		cfg.RSSGenerator.PublicBaseURL != "https://feeds.example.com" ||
 		cfg.RSSGenerator.RequestTimeoutSeconds != 45 ||
 		cfg.RSSGenerator.SecretKeyFile != "data/rss-generator.key" {
@@ -37,8 +47,11 @@ func TestRSSGeneratorConfigSupportsExplicitEnvironmentOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal viper settings: %v", err)
 	}
-	if strings.Contains(string(settingsJSON), "internal-worker-secret") {
-		t.Fatalf("environment-only worker token entered serializable Viper settings: %s", settingsJSON)
+	if !strings.Contains(string(settingsJSON), "yaml-worker-secret-with-at-least-32-characters") {
+		t.Fatalf("config.yaml worker token was not loaded into Viper settings: %s", settingsJSON)
+	}
+	if strings.Contains(string(settingsJSON), "/run/film-fusion-rss-worker/token") {
+		t.Fatalf("runtime-only worker token path entered serializable Viper settings: %s", settingsJSON)
 	}
 }
 
@@ -71,7 +84,8 @@ func TestApplyRSSGeneratorDefaultsSupportsExistingConfigWithoutParentMap(t *test
 func TestRSSGeneratorWorkerTokenIsInternalOnlyInJSON(t *testing.T) {
 	settings := RSSGeneratorConfig{
 		WorkerURL:             "http://127.0.0.1:8787",
-		WorkerToken:           "internal-worker-secret",
+		WorkerToken:           "internal-worker-secret-with-at-least-32-characters",
+		WorkerTokenFile:       "/run/film-fusion-rss-worker/token",
 		PublicBaseURL:         "https://feeds.example.com",
 		RequestTimeoutSeconds: 90,
 	}
@@ -88,7 +102,7 @@ func TestRSSGeneratorWorkerTokenIsInternalOnlyInJSON(t *testing.T) {
 func TestValidateRSSGeneratorRejectsUnsafeStartupSettings(t *testing.T) {
 	valid := RSSGeneratorConfig{
 		WorkerURL:             "http://127.0.0.1:8787",
-		WorkerToken:           "internal-worker-secret",
+		WorkerToken:           "internal-worker-secret-with-at-least-32-characters",
 		PublicBaseURL:         "https://feeds.example.com",
 		RequestTimeoutSeconds: 90,
 		SecretKeyFile:         "data/rss-generator.key",
@@ -100,6 +114,7 @@ func TestValidateRSSGeneratorRejectsUnsafeStartupSettings(t *testing.T) {
 	cases := []RSSGeneratorConfig{
 		{WorkerURL: "file:///tmp/socket", RequestTimeoutSeconds: 90, SecretKeyFile: "data/rss-generator.key"},
 		{WorkerURL: "http://user:pass@worker:8787", RequestTimeoutSeconds: 90, SecretKeyFile: "data/rss-generator.key"},
+		{WorkerURL: "http://worker:8787", WorkerToken: "too-short", RequestTimeoutSeconds: 90, SecretKeyFile: "data/rss-generator.key"},
 		{WorkerURL: "http://worker:8787", WorkerToken: "bad\r\ntoken", RequestTimeoutSeconds: 90, SecretKeyFile: "data/rss-generator.key"},
 		{WorkerURL: "http://worker:8787", RequestTimeoutSeconds: 0, SecretKeyFile: "data/rss-generator.key"},
 		{WorkerURL: "http://worker:8787", PublicBaseURL: "http://feeds.example.com", RequestTimeoutSeconds: 90, SecretKeyFile: "data/rss-generator.key"},

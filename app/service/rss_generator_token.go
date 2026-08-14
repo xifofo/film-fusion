@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ type RSSGeneratorTokenView struct {
 type RSSGeneratorPublicAccess struct {
 	Token model.RSSGeneratorFeedAccessToken
 	Feed  model.RSSGeneratorFeedDefinition
+	LAN   bool
 }
 
 func (s *RSSGeneratorService) ListTokens(feedID uint) ([]RSSGeneratorTokenView, error) {
@@ -62,7 +64,8 @@ func (s *RSSGeneratorService) ListTokens(feedID uint) ([]RSSGeneratorTokenView, 
 }
 
 func (s *RSSGeneratorService) CreateToken(feedID uint, input RSSGeneratorTokenInput) (RSSGeneratorTokenResult, error) {
-	if _, err := s.loadFeed(feedID); err != nil {
+	feed, err := s.loadFeed(feedID)
+	if err != nil {
 		return RSSGeneratorTokenResult{}, err
 	}
 	name, rateLimit, err := validateRSSGeneratorTokenInput(input)
@@ -80,10 +83,14 @@ func (s *RSSGeneratorService) CreateToken(feedID uint, input RSSGeneratorTokenIn
 	if err := s.db.Create(&record).Error; err != nil {
 		return RSSGeneratorTokenResult{}, err
 	}
-	return s.tokenResult(record, clear), nil
+	return s.tokenResult(feed, record, clear), nil
 }
 
 func (s *RSSGeneratorService) RotateToken(feedID, tokenID uint) (RSSGeneratorTokenResult, error) {
+	feed, err := s.loadFeed(feedID)
+	if err != nil {
+		return RSSGeneratorTokenResult{}, err
+	}
 	var record model.RSSGeneratorFeedAccessToken
 	if err := s.db.Where("id = ? AND feed_id = ?", tokenID, feedID).First(&record).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return RSSGeneratorTokenResult{}, ErrRSSGeneratorTokenHidden
@@ -113,7 +120,7 @@ func (s *RSSGeneratorService) RotateToken(feedID, tokenID uint) (RSSGeneratorTok
 	s.rateMu.Lock()
 	delete(s.rateWindows, tokenID)
 	s.rateMu.Unlock()
-	return s.tokenResult(record, clear), nil
+	return s.tokenResult(feed, record, clear), nil
 }
 
 func (s *RSSGeneratorService) RevokeToken(feedID, tokenID uint) error {
@@ -138,13 +145,28 @@ func (s *RSSGeneratorService) RevokeToken(feedID, tokenID uint) error {
 	})
 }
 
-func (s *RSSGeneratorService) ResolvePublicToken(ctx context.Context, clear string) (RSSGeneratorPublicAccess, error) {
+// ResolveFeedAccess resolves a public feed ID first, then either accepts a
+// trusted LAN request without a token or validates the feed-specific query
+// token for every other network.
+func (s *RSSGeneratorService) ResolveFeedAccess(ctx context.Context, publicID, clear string, allowLAN bool) (RSSGeneratorPublicAccess, error) {
+	if !rssGeneratorPublicIDPattern.MatchString(publicID) {
+		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
+	}
+	var feed model.RSSGeneratorFeedDefinition
+	if err := s.db.WithContext(ctx).Where("public_id = ? AND enabled = ?", publicID, true).First(&feed).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
+	} else if err != nil {
+		return RSSGeneratorPublicAccess{}, err
+	}
+	if allowLAN {
+		return RSSGeneratorPublicAccess{Feed: feed, LAN: true}, nil
+	}
 	if len(clear) < 24 || len(clear) > 128 || !strings.HasPrefix(clear, "ffrss_") {
 		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
 	}
 	hash := hashRSSGeneratorToken(clear)
 	var token model.RSSGeneratorFeedAccessToken
-	if err := s.db.WithContext(ctx).Where("token_hash = ?", hash).First(&token).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+	if err := s.db.WithContext(ctx).Where("token_hash = ? AND feed_id = ?", hash, feed.ID).First(&token).Error; errors.Is(err, gorm.ErrRecordNotFound) {
 		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
 	} else if err != nil {
 		return RSSGeneratorPublicAccess{}, err
@@ -152,12 +174,6 @@ func (s *RSSGeneratorService) ResolvePublicToken(ctx context.Context, clear stri
 	now := time.Now()
 	if token.RevokedAt != nil || (token.ExpiresAt != nil && !token.ExpiresAt.After(now)) {
 		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
-	}
-	var feed model.RSSGeneratorFeedDefinition
-	if err := s.db.WithContext(ctx).Where("id = ? AND enabled = ?", token.FeedID, true).First(&feed).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorTokenHidden
-	} else if err != nil {
-		return RSSGeneratorPublicAccess{}, err
 	}
 	if !s.allowRSSGeneratorToken(token.ID, token.RateLimitPerMinute, now) {
 		return RSSGeneratorPublicAccess{}, ErrRSSGeneratorRateLimited
@@ -229,10 +245,11 @@ func hashRSSGeneratorToken(clear string) string {
 	return hex.EncodeToString(digest[:])
 }
 
-func (s *RSSGeneratorService) tokenResult(record model.RSSGeneratorFeedAccessToken, clear string) RSSGeneratorTokenResult {
+func (s *RSSGeneratorService) tokenResult(feed model.RSSGeneratorFeedDefinition, record model.RSSGeneratorFeedAccessToken, clear string) RSSGeneratorTokenResult {
 	base := strings.TrimRight(strings.TrimSpace(s.cfg.PublicBaseURL), "/")
-	rssPath := "/rss/s/" + clear + ".xml"
-	atomPath := "/rss/s/" + clear + ".atom"
+	query := "?token=" + url.QueryEscape(clear)
+	rssPath := "/rss/" + feed.PublicID + ".xml" + query
+	atomPath := "/rss/" + feed.PublicID + ".atom" + query
 	if base != "" {
 		rssPath = base + rssPath
 		atomPath = base + atomPath
@@ -256,5 +273,8 @@ func rssGeneratorTokenView(record model.RSSGeneratorFeedAccessToken) RSSGenerato
 }
 
 func (access RSSGeneratorPublicAccess) authContext() string {
+	if access.LAN {
+		return "lan"
+	}
 	return fmt.Sprintf("token:%d:%s", access.Token.ID, access.Token.TokenHash)
 }

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { GenerateRequest, GenerateResult } from "../src/types.js";
@@ -24,21 +27,23 @@ const result: GenerateResult = {
 };
 
 afterEach(() => {
-  delete process.env.WORKER_AUTH_TOKEN;
-  delete process.env.WORKER_ALLOW_UNAUTHENTICATED;
+  delete process.env.WORKER_AUTH_TOKEN_FILE;
 });
 
 describe("worker HTTP API", () => {
-  it("exposes an unauthenticated health endpoint", async () => {
+  it("reports an unavailable health state until the token file is configured", async () => {
     const response = await createApp().request("/health");
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "ok" });
+    await expect(response.json()).resolves.toMatchObject({
+      status: "unavailable",
+      auth_configured: false,
+      error: "Worker Token 文件未配置",
+    });
   });
 
-  it("requires the configured bearer token", async () => {
-    process.env.WORKER_AUTH_TOKEN = "expected";
+  it("requires the bearer token from the shared secret file", async () => {
     const generate = vi.fn(async (_request: GenerateRequest) => result);
-    const app = createApp({ generate });
+    const app = createApp({ generate, auth: () => ({ token: "expected" }) });
     const unauthorized = await app.request("/v1/generate", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -54,7 +59,7 @@ describe("worker HTTP API", () => {
     expect(generate).toHaveBeenCalledTimes(1);
   });
 
-  it("does not allow unauthenticated mode unless it is explicitly enabled", async () => {
+  it("never enables an unauthenticated fallback", async () => {
     const app = createApp({ generate: async () => result });
     const response = await app.request("/v1/generate", {
       method: "POST",
@@ -65,9 +70,43 @@ describe("worker HTTP API", () => {
     await expect(response.json()).resolves.toMatchObject({ error: { code: "AUTH_NOT_CONFIGURED" } });
   });
 
+  it("reloads a rotated token file without restarting the Worker", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "film-fusion-worker-auth-"));
+    const tokenFile = join(directory, "token");
+    process.env.WORKER_AUTH_TOKEN_FILE = tokenFile;
+    writeFileSync(tokenFile, "first-token", { mode: 0o600 });
+    const generate = vi.fn(async (_request: GenerateRequest) => result);
+    const app = createApp({ generate });
+
+    const first = await app.request("/v1/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer first-token" },
+      body: JSON.stringify(validBody),
+    });
+    expect(first.status).toBe(200);
+
+    writeFileSync(tokenFile, "rotated-token", { mode: 0o600 });
+    const stale = await app.request("/v1/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer first-token" },
+      body: JSON.stringify(validBody),
+    });
+    expect(stale.status).toBe(401);
+    const rotated = await app.request("/v1/generate", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer rotated-token" },
+      body: JSON.stringify(validBody),
+    });
+    expect(rotated.status).toBe(200);
+
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   it("returns structured 422 validation failures", async () => {
-    process.env.WORKER_AUTH_TOKEN = "expected";
-    const app = createApp({ generate: async () => result });
+    const app = createApp({
+      generate: async () => result,
+      auth: () => ({ token: "expected" }),
+    });
     const response = await app.request("/v1/generate", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer expected" },

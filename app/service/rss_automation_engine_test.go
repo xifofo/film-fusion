@@ -149,6 +149,32 @@ func TestExecuteRSSAutomationKeywordNodeModes(t *testing.T) {
 	}
 }
 
+func TestEvaluateRSSAutomationConditionSupportsUnifiedTemplateReferences(t *testing.T) {
+	contextValue := map[string]any{
+		"item": map[string]any{"title": "Example 2160p"},
+		"vars": map[string]any{"minimum": 1000},
+		"nodes": map[string]any{
+			"mp": map[string]any{"output": map[string]any{"tmdb_id": "1396"}},
+		},
+	}
+	tests := []struct {
+		name      string
+		condition map[string]any
+	}{
+		{name: "template field", condition: map[string]any{"field": "{{item.title}}", "operator": "contains", "value": "2160p"}},
+		{name: "template right value", condition: map[string]any{"field": "$nodes.mp.output.tmdb_id", "operator": "eq", "value": "{{nodes.mp.output.tmdb_id}}"}},
+		{name: "template list item", condition: map[string]any{"field": "$vars.minimum", "operator": "in", "value": []any{999, "{{vars.minimum}}"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			matched, err := evaluateRSSAutomationCondition(test.condition, contextValue)
+			if err != nil || !matched {
+				t.Fatalf("condition result = %v, %v", matched, err)
+			}
+		})
+	}
+}
+
 func newRSSAutomationTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	dsn := fmt.Sprintf("file:rss-automation-%d?mode=memory&cache=shared", time.Now().UnixNano())

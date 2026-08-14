@@ -320,8 +320,8 @@ func stripRSSGeneratorTokenFromURL(raw string) string {
 	if err != nil {
 		return raw
 	}
-	if strings.HasPrefix(parsed.Path, "/rss/s/") {
-		return ""
-	}
-	return raw
+	query := parsed.Query()
+	query.Del("token")
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }

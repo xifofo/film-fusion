@@ -18,10 +18,10 @@ func TestApplicationRouterDoesNotLogPublicFeedToken(t *testing.T) {
 	var output bytes.Buffer
 	gin.DefaultWriter = &output
 	router := newApplicationRouter()
-	router.GET("/rss/s/:token", func(c *gin.Context) { c.Status(http.StatusOK) })
+	router.GET("/rss/:feed", func(c *gin.Context) { c.Status(http.StatusOK) })
 	router.GET("/health-test", func(c *gin.Context) { c.Status(http.StatusOK) })
 
-	secretPath := "/rss/s/ffrss_super-secret.xml?user=alice"
+	secretPath := "/rss/feed-public-id.xml?token=ffrss_super-secret&user=alice"
 	request := httptest.NewRequest(http.MethodGet, secretPath, nil)
 	router.ServeHTTP(httptest.NewRecorder(), request)
 	if strings.Contains(output.String(), "ffrss_super-secret") || strings.Contains(output.String(), "user=alice") {

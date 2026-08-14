@@ -50,6 +50,15 @@ func (h *RSSAutomationHandler) CreateAutomation(c *gin.Context) {
 	c.JSON(http.StatusCreated, NewSuccessResponse("RSS 自动化已创建", created))
 }
 
+func (h *RSSAutomationHandler) MigrateLegacyMonitor(c *gin.Context) {
+	result, err := h.service.MigrateLegacyMonitor()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("迁移旧版 RSS 监控失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("旧版 RSS 监控已迁移并停用", result))
+}
+
 func (h *RSSAutomationHandler) UpdateSource(c *gin.Context) {
 	id, ok := rssAutomationID(c, "RSS 自动化源")
 	if !ok {
@@ -209,6 +218,18 @@ func (h *RSSAutomationHandler) CreateTarget(c *gin.Context) {
 	c.JSON(http.StatusCreated, NewSuccessResponse("下载目标已创建", created))
 }
 
+func (h *RSSAutomationHandler) ListTargets(c *gin.Context) {
+	targets, err := h.service.ListTargets()
+	if respondRSSAutomationError(c, err, "获取下载器列表失败") {
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("获取下载器列表成功", targets))
+}
+
+func (h *RSSAutomationHandler) NodeProtocols(c *gin.Context) {
+	c.JSON(http.StatusOK, NewSuccessResponse("获取节点变量协议成功", service.RSSAutomationNodeProtocols()))
+}
+
 func (h *RSSAutomationHandler) UpdateTarget(c *gin.Context) {
 	id, ok := rssAutomationID(c, "下载目标")
 	if !ok {
@@ -266,6 +287,27 @@ func (h *RSSAutomationHandler) ListRuns(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, NewSuccessResponse("获取运行记录成功", gin.H{"items": runs, "total": total}))
+}
+
+func (h *RSSAutomationHandler) ListEntries(c *gin.Context) {
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	var sourceID uint64
+	rawSourceID := strings.TrimSpace(c.Query("source_id"))
+	if rawSourceID != "" {
+		parsed, parseErr := strconv.ParseUint(rawSourceID, 10, 64)
+		if parseErr != nil || parsed == 0 {
+			c.JSON(http.StatusBadRequest, NewErrorResponse("RSS 自动化源 ID 无效", ""))
+			return
+		}
+		sourceID = parsed
+	}
+	result, err := h.service.ListEntryHistory(strings.TrimSpace(c.Query("filter")), uint(sourceID), limit, offset)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("获取 RSS 条目记录失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("获取 RSS 条目记录成功", result))
 }
 
 func (h *RSSAutomationHandler) GetRun(c *gin.Context) {
