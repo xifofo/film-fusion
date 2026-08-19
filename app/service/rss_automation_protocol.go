@@ -83,6 +83,9 @@ var rssAutomationNodeProtocols = []RSSAutomationNodeProtocol{
 		rssAutomationVariable("submitted", "boolean", "已提交", "任务是否已提交给 qBittorrent。", true),
 	}},
 	{Type: RSSAutomationNodeWaitQBittorrent, Label: "等待 qBittorrent 完成", Inputs: []RSSAutomationVariableProtocol{}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("target_id", "integer", "下载器 ID", "任务所在的 qBittorrent 下载器 ID。", 1),
+		rssAutomationVariable("target_name", "string", "下载器名称", "任务所在的 qBittorrent 下载器名称。", "家庭 NAS qB"),
+		rssAutomationVariable("torrent_tag", "string", "跟踪标签", "FilmFusion 提交任务时附加的内部跟踪标签。", "filmfusion-rss-e3b0c442"),
 		rssAutomationVariable("completed", "boolean", "是否完成", "qBittorrent 下载是否完成。", true),
 		rssAutomationVariable("progress", "number", "下载进度", "0 到 100 的下载进度。", 100),
 		rssAutomationVariable("state", "string", "任务状态", "qBittorrent 返回的任务状态。", "uploading"),
@@ -90,8 +93,33 @@ var rssAutomationNodeProtocols = []RSSAutomationNodeProtocol{
 		rssAutomationVariable("name", "string", "任务名称", "qBittorrent 任务名称。", "Example.Movie.2026"),
 		rssAutomationVariable("save_path", "string", "保存目录", "qBittorrent 保存目录。", "/downloads/movies"),
 		rssAutomationVariable("content_path", "string", "完成路径", "下载完成后的文件或文件夹路径。", "/downloads/movies/Example.Movie.2026"),
+		rssAutomationVariable("content_type", "string", "完成路径类型", "下载结果是 file 或 dir。", "dir"),
+		rssAutomationVariable("file_count", "integer", "任务文件数", "Torrent 中包含的文件数量。", 12),
 		rssAutomationVariable("size", "integer", "文件大小", "任务总字节数。", 10737418240),
 		rssAutomationVariable("ratio", "number", "分享率", "当前上传分享率。", 1.25),
+	}},
+	{Type: RSSAutomationNodeMoviePilotTransfer, Label: "MP2 整理入库", Inputs: []RSSAutomationVariableProtocol{
+		rssAutomationTemplateVariable("source_path", "string", "MP2 可见源路径", "留空使用上游 qB 完成路径；容器挂载不同可显式改写。", "{{nodes.wait_qb.output.content_path}}", false),
+		rssAutomationTemplateVariable("tmdb_id", "string", "辅助 TMDB ID", "可选；提供后由 MP2 按指定媒体辅助识别整理。", "1396", false),
+	}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("organized", "boolean", "整理成功", "MP2 同步整理调用是否成功完成。", true),
+		rssAutomationVariable("source_path", "string", "整理源路径", "MP2 实际收到的文件或目录路径。", "/downloads/Example.Movie.2026"),
+		rssAutomationVariable("content_type", "string", "源路径类型", "整理源是 file 或 dir。", "dir"),
+		rssAutomationVariable("tmdb_id", "string", "辅助 TMDB ID", "本次整理使用的辅助 TMDB ID。", "1396"),
+		rssAutomationVariable("media_type", "string", "媒体类型", "本次整理指定的 auto/movie/tv。", "movie"),
+		rssAutomationVariable("hash", "string", "Torrent Hash", "整理完成后继续传递的 qBittorrent 任务哈希。", "0123456789abcdef"),
+		rssAutomationVariable("target_id", "integer", "下载器 ID", "整理完成后继续传递的 qBittorrent 下载器 ID。", 1),
+		rssAutomationVariable("target_name", "string", "下载器名称", "整理完成后继续传递的 qBittorrent 下载器名称。", "家庭 NAS qB"),
+		rssAutomationVariable("message", "string", "MP2 消息", "MoviePilot 返回的整理结果消息。", "整理完成"),
+	}},
+	{Type: RSSAutomationNodeDeleteQBittorrent, Label: "删除 qB 做种任务", Inputs: []RSSAutomationVariableProtocol{}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("deleted", "boolean", "删除成功", "qBittorrent 做种任务是否已删除。", true),
+		rssAutomationVariable("already_missing", "boolean", "原本已不存在", "执行时任务是否已经不在 qBittorrent 中。", false),
+		rssAutomationVariable("delete_files", "boolean", "同时删除文件", "是否要求 qBittorrent 一并删除下载数据。", false),
+		rssAutomationVariable("hash", "string", "Torrent Hash", "被删除的 qBittorrent 任务哈希。", "0123456789abcdef"),
+		rssAutomationVariable("target_id", "integer", "下载器 ID", "执行删除的 qBittorrent 下载器 ID。", 1),
+		rssAutomationVariable("target_name", "string", "下载器名称", "执行删除的 qBittorrent 下载器名称。", "家庭 NAS qB"),
+		rssAutomationVariable("deleted_at", "datetime", "删除时间", "实际向 qBittorrent 提交删除的时间。", "2026-08-16T12:00:00Z"),
 	}},
 	{Type: RSSAutomationNodeOffline115, Label: "115 云下载（Cookie）", Inputs: []RSSAutomationVariableProtocol{
 		rssAutomationTemplateVariable("url", "string", "下载地址", "提交到 115 的下载地址。", "$item.download_url", true),
@@ -111,6 +139,12 @@ var rssAutomationNodeProtocols = []RSSAutomationNodeProtocol{
 		rssAutomationVariable("tasks", "array", "完成任务", "115 云下载任务详情。", []any{}),
 	}},
 	{Type: RSSAutomationNodeMoviePilotTitle, Label: "MP 标题识别", Inputs: rssAutomationRecognitionInputs("$item.title"), Outputs: rssAutomationRecognitionOutputs()},
+	{Type: RSSAutomationNodeFilmFusionRecognize, Label: "FilmFusion 本地识别", Inputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("recognition_mode", "string", "识别模式", "title 识别发布标题；file 递归识别等待节点返回的 115 下载文件。", "title"),
+		rssAutomationTemplateVariable("input", "string", "待识别标题", "发布标题模式的输入，可引用 RSS 字段、流程变量或上游输出。", "$item.title", false),
+		rssAutomationTemplateVariable("tmdb_id", "string", "辅助 TMDB ID", "可选；提供后会在本地识别输入中加入 TMDB 标记并校验识别结果。", "1396", false),
+		rssAutomationVariable("lookup_tmdb", "boolean", "查询 TMDB", "是否在本地解析后使用 FilmFusion 的 TMDB 配置补全媒体信息。", true),
+	}, Outputs: rssAutomationLocalRecognitionOutputs()},
 	{Type: RSSAutomationNodeMediaExists, Label: "本地 / Emby 查重", Inputs: []RSSAutomationVariableProtocol{
 		rssAutomationTemplateVariable("tmdb_id", "string", "TMDB ID", "用于查找本地目录和 Emby 项目。", "{{nodes.mp_title.output.tmdb_id}}", true),
 		rssAutomationTemplateVariable("title", "string", "媒体标题", "用于计算目标目录。", "{{nodes.mp_title.output.title}}", false),
@@ -254,6 +288,39 @@ func rssAutomationRecognitionOutputs() []RSSAutomationVariableProtocol {
 		rssAutomationVariable("rating", "number", "评分", "识别结果中的评分。", 9.5),
 		rssAutomationVariable("quality", "string", "质量", "识别出的资源质量。", "2160p"),
 		rssAutomationVariable("poster_url", "string", "海报地址", "TMDB 海报或背景图地址。", "https://image.tmdb.org/example.jpg"),
+	}
+}
+
+func rssAutomationLocalRecognitionOutputs() []RSSAutomationVariableProtocol {
+	return []RSSAutomationVariableProtocol{
+		rssAutomationVariable("engine", "string", "识别引擎", "固定为 local，表示本次没有调用 MoviePilot。", "local"),
+		rssAutomationVariable("mode", "string", "实际模式", "本次执行使用的 title 或 file 模式。", "title"),
+		rssAutomationVariable("recognize_input", "string", "实际识别输入", "应用辅助 TMDB 标记后送入本地识别内核的文本。", "示例剧.S01E01.{tmdb-1396}.mkv"),
+		rssAutomationVariable("processed_input", "string", "词表处理结果", "按已保存识别词处理后的标题或路径。", "示例剧.S01E01.2160p.mkv"),
+		rssAutomationVariable("requested_tmdb_id", "string", "辅助 TMDB ID", "本次配置并解析出的辅助 TMDB ID；未配置时为空。", "1396"),
+		rssAutomationVariable("tmdb_id", "string", "TMDB ID", "本地标记解析或 TMDB 匹配得到的 TMDB ID。", "1396"),
+		rssAutomationVariable("title", "string", "媒体标题", "识别词处理与本地解析得到的媒体标题。", "绝命毒师"),
+		rssAutomationVariable("year", "string", "年份", "本地解析或 TMDB 匹配得到的年份。", "2008"),
+		rssAutomationVariable("media_type", "string", "媒体类型", "movie、tv 或 unknown。", "tv"),
+		rssAutomationVariable("season_episode", "string", "季集信息", "本地解析得到的季集信息。", "S01E01"),
+		rssAutomationVariable("category", "string", "媒体分类", "TMDB 匹配补全的媒体分类；纯本地解析时可为空。", "欧美剧"),
+		rssAutomationVariable("rating", "number", "评分", "TMDB 匹配补全的评分；纯本地解析时为 0。", 9.5),
+		rssAutomationVariable("quality", "string", "质量", "本地解析得到的分辨率或资源质量。", "2160p"),
+		rssAutomationVariable("poster_url", "string", "海报地址", "TMDB 匹配得到的海报或背景图地址。", "https://image.tmdb.org/t/p/w780/example.jpg"),
+		rssAutomationVariable("tmdb_status", "string", "TMDB 状态", "matched、not_found、not_configured、failed 或 skipped。", "matched"),
+		rssAutomationVariable("warning", "string", "识别提示", "TMDB 不可用等非阻断提示。", "TMDB 未配置，已返回纯本地解析结果"),
+		rssAutomationVariable("applied_words", "array", "命中识别词", "本次实际命中的 FilmFusion 本地识别词。", []string{"广告 => "}),
+		rssAutomationVariable("meta_info", "object", "本地解析详情", "本地媒体元数据解析结果。", map[string]any{"name": "绝命毒师", "media_type": "tv"}),
+		rssAutomationVariable("media_info", "object", "媒体信息", "本地解析与可选 TMDB 匹配后的统一媒体实体。", map[string]any{"title": "绝命毒师", "tmdb_id": "1396"}),
+		rssAutomationVariable("word_result", "object", "识别词轨迹", "识别词处理前后文本和逐条执行轨迹。", map[string]any{"processed": "绝命毒师.S01E01"}),
+		rssAutomationVariable("candidates", "array", "TMDB 候选", "本地 TMDB 匹配时参与选择的候选列表。", []any{}),
+		rssAutomationVariable("raw", "object", "原始结果", "本地识别内核返回的兼容原始结构。", map[string]any{"engine": "local"}),
+		rssAutomationVariable("total_files", "integer", "媒体文件数", "文件模式在 115 下载结果中找到的视频文件数量。", 1),
+		rssAutomationVariable("recognized_count", "integer", "识别文件数", "文件模式成功完成本地解析的视频文件数量。", 1),
+		rssAutomationVariable("failed_count", "integer", "识别失败数", "文件模式未能完成本地解析的视频文件数量。", 0),
+		rssAutomationVariable("items", "array", "识别结果", "文件模式下每个视频文件的本地识别详情。", []any{}),
+		rssAutomationVariable("failed_items", "array", "识别失败明细", "文件模式下未能识别的文件及原因。", []any{}),
+		rssAutomationVariable("partial", "boolean", "部分识别", "文件模式是否只有部分文件识别成功。", false),
 	}
 }
 

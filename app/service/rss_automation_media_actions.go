@@ -41,7 +41,7 @@ var (
 )
 
 type rssAutomationMoviePilotRecognizer interface {
-	RSSMediaRecognizer
+	RSSAutomationMediaRecognizer
 	RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error)
 }
 
@@ -777,8 +777,8 @@ func rssAutomationFileNameWithTMDB(fileName, tmdbID string) string {
 }
 
 func rssAutomationMoviePilotOutput(file rssAutomation115MediaFile, recognizeInput string, info MoviePilotMediaInfo) map[string]any {
-	posterURL := rssTMDBImageURL(rssFirstNonEmpty(info.BackdropPath, info.PosterPath))
-	quality := extractRSSQuality(strings.TrimSpace(info.ResourceType + " " + info.ResourcePix + " " + file.Name))
+	posterURL := rssAutomationTMDBImageURL(firstRSSAutomationNonEmpty(info.BackdropPath, info.PosterPath))
+	quality := extractRSSAutomationQuality(strings.TrimSpace(info.ResourceType + " " + info.ResourcePix + " " + file.Name))
 	return map[string]any{
 		"file_id": file.FileID, "file_name": file.Name, "file_path": file.Path,
 		"recognize_input": recognizeInput,

@@ -363,6 +363,24 @@ func previewRSSAutomationActionNode(node RSSAutomationNode, runContext map[strin
 			"selected_port": "success", "preview": true, "input": input,
 			"tmdb_id": "运行时识别", "title": "运行时识别媒体信息", "poster_url": "运行时识别",
 		}, nil
+	case RSSAutomationNodeFilmFusionRecognize:
+		mode := rssAutomationFilmFusionRecognitionMode(node)
+		if mode == MediaRecognitionModeFile {
+			return map[string]any{
+				"selected_port": "success", "preview": true, "engine": "local", "mode": mode,
+				"title": "运行时递归识别 115 视频文件", "total_files": 1, "recognized_count": 1,
+				"failed_count": 0, "items": []any{}, "failed_items": []any{}, "partial": false,
+			}, nil
+		}
+		input, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "input"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		return map[string]any{
+			"selected_port": "success", "preview": true, "engine": "local", "mode": mode,
+			"input": input, "recognize_input": input, "title": "运行时本地解析媒体信息",
+			"tmdb_status": "运行时按配置查询", "applied_words": []any{},
+		}, nil
 	case RSSAutomationNodeMediaExists:
 		return map[string]any{
 			"selected_port": "missing", "preview": true, "exists": false, "local_exists": false,

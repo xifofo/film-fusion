@@ -65,6 +65,10 @@ func (h *SystemConfigHandler) GetConfigCategories(c *gin.Context) {
 			Description: "RSS 自动化配置",
 		},
 		{
+			Key:         model.CategoryMediaRecognition,
+			Description: "本地媒体识别配置",
+		},
+		{
 			Key:         model.CategoryAppearance,
 			Description: "站点外观配置",
 		},

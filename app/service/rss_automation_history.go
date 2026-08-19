@@ -8,6 +8,13 @@ import (
 	"film-fusion/app/model"
 )
 
+const (
+	rssAutomationNotificationSent    = "sent"
+	rssAutomationNotificationPartial = "partial"
+	rssAutomationNotificationFailed  = "failed"
+	rssAutomationNotificationSkipped = "skipped"
+)
+
 type RSSAutomationEntryHistoryItem struct {
 	Entry              model.RSSAutomationEntry `json:"entry"`
 	SourceName         string                   `json:"source_name"`
@@ -148,9 +155,9 @@ func (s *RSSAutomationService) ListEntryHistory(filter string, sourceID uint, li
 
 func rssAutomationHistoryActionTypes() []string {
 	return []string{
-		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeMediaExists,
+		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
 		RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
 		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
 		RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
@@ -195,7 +202,7 @@ func applyRSSAutomationNodeHistory(item *RSSAutomationEntryHistoryItem, nodeRuns
 		if _, action := actionTypes[nodeRun.NodeType]; action && (nodeRun.Status == model.RSSAutomationNodeSucceeded || nodeRun.Status == model.RSSAutomationNodeFailed) {
 			item.Matched = true
 		}
-		if nodeRun.NodeType == RSSAutomationNodeMoviePilotTitle || nodeRun.NodeType == RSSAutomationNodeMoviePilotRecognize {
+		if nodeRun.NodeType == RSSAutomationNodeMoviePilotTitle || nodeRun.NodeType == RSSAutomationNodeMoviePilotRecognize || nodeRun.NodeType == RSSAutomationNodeFilmFusionRecognize {
 			applyRSSAutomationRecognitionOutput(item, nodeRun)
 		}
 		if nodeRun.NodeType == RSSAutomationNodeNotification {
@@ -221,7 +228,7 @@ func applyRSSAutomationRecognitionOutput(item *RSSAutomationEntryHistoryItem, no
 	item.TMDBID = firstRSSAutomationHistoryString(rssAutomationAnyString(output["tmdb_id"]), item.TMDBID)
 	item.PosterURL = firstRSSAutomationHistoryString(
 		rssAutomationAnyString(output["poster_url"]),
-		rssTMDBImageURL(firstRSSAutomationHistoryString(rssAutomationAnyString(output["backdrop_path"]), rssAutomationAnyString(output["poster_path"]))),
+		rssAutomationTMDBImageURL(firstRSSAutomationHistoryString(rssAutomationAnyString(output["backdrop_path"]), rssAutomationAnyString(output["poster_path"]))),
 		item.PosterURL,
 	)
 	if rating, ok := rssAutomationNumber(output["rating"]); ok && rating > 0 {
@@ -234,22 +241,22 @@ func applyRSSAutomationNotificationOutput(item *RSSAutomationEntryHistoryItem, n
 	var output map[string]any
 	_ = json.Unmarshal([]byte(nodeRun.OutputJSON), &output)
 	if nodeRun.Status == model.RSSAutomationNodeFailed {
-		item.NotificationStatus = model.RSSNotificationFailed
+		item.NotificationStatus = rssAutomationNotificationFailed
 		item.NotificationError = nodeRun.ErrorMessage
 		return
 	}
 	if skipped, _ := output["skipped"].(bool); skipped {
-		item.NotificationStatus = model.RSSNotificationSkipped
+		item.NotificationStatus = rssAutomationNotificationSkipped
 		item.NotificationError = rssAutomationAnyString(output["skip_reason"])
 		return
 	}
 	if partial, _ := output["partial"].(bool); partial {
-		item.NotificationStatus = model.RSSNotificationPartial
+		item.NotificationStatus = rssAutomationNotificationPartial
 		item.NotificationError = rssAutomationAnyString(output["warning"])
 		return
 	}
 	if nodeRun.Status == model.RSSAutomationNodeSucceeded {
-		item.NotificationStatus = model.RSSNotificationSent
+		item.NotificationStatus = rssAutomationNotificationSent
 	}
 }
 

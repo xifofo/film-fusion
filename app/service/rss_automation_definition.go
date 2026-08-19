@@ -21,10 +21,13 @@ const (
 	RSSAutomationNodeJoin                = "join"
 	RSSAutomationNodeQBittorrent         = "qbittorrent"
 	RSSAutomationNodeWaitQBittorrent     = "wait_qbittorrent"
+	RSSAutomationNodeDeleteQBittorrent   = "delete_qbittorrent"
 	RSSAutomationNodeOffline115          = "offline115"
 	RSSAutomationNodeOffline115OpenAPI   = "offline115_openapi"
 	RSSAutomationNodeWait115             = "wait115"
 	RSSAutomationNodeMoviePilotTitle     = "moviepilot_title_recognize"
+	RSSAutomationNodeFilmFusionRecognize = "filmfusion_recognize"
+	RSSAutomationNodeMoviePilotTransfer  = "moviepilot_transfer"
 	RSSAutomationNodeMediaExists         = "media_exists"
 	RSSAutomationNodeHDHiveQuery         = "hdhive_query"
 	RSSAutomationNodeHDHiveUnlock        = "hdhive_unlock"
@@ -317,6 +320,23 @@ func ValidateRSSAutomationDefinition(definition RSSAutomationDefinition) RSSAuto
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须连接 qBittorrent 节点的成功出口", id))
 				}
+			case RSSAutomationNodeMoviePilotTransfer:
+				if predecessor.Type != RSSAutomationNodeWaitQBittorrent {
+					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须直接连接在等待 qBittorrent 完成节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须连接等待 qBittorrent 节点的成功出口", id))
+				}
+			case RSSAutomationNodeDeleteQBittorrent:
+				if predecessor.Type != RSSAutomationNodeWaitQBittorrent && predecessor.Type != RSSAutomationNodeMoviePilotTransfer {
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 必须连接在等待 qBittorrent 完成或 MP2 整理节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 必须连接上游节点的成功出口", id))
+				}
+				if rssAutomationConfigBool(node.Config, "delete_files") && predecessor.Type != RSSAutomationNodeMoviePilotTransfer {
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 只有在 MP2 整理成功后才能同时删除下载文件", id))
+				}
 			case RSSAutomationNodeWait115:
 				if predecessor.Type != RSSAutomationNodeOffline115 && predecessor.Type != RSSAutomationNodeOffline115OpenAPI {
 					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须直接连接在 115 离线节点之后", id))
@@ -331,9 +351,22 @@ func ValidateRSSAutomationDefinition(definition RSSAutomationDefinition) RSSAuto
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("MP 媒体识别节点 %s 必须连接等待节点的成功出口", id))
 				}
+			case RSSAutomationNodeFilmFusionRecognize:
+				if rssAutomationFilmFusionRecognitionMode(node) == MediaRecognitionModeFile {
+					if predecessor.Type != RSSAutomationNodeWait115 {
+						result.Errors = append(result.Errors, fmt.Sprintf("FilmFusion 本地识别节点 %s 的 115 下载文件模式必须直接连接在等待 115 下载完成节点之后", id))
+					}
+					if sourcePort != "success" {
+						result.Errors = append(result.Errors, fmt.Sprintf("FilmFusion 本地识别节点 %s 的 115 下载文件模式必须连接等待节点的成功出口", id))
+					}
+				}
 			case RSSAutomationNodeOrganizeStrm:
-				if predecessor.Type != RSSAutomationNodeWait115 && predecessor.Type != RSSAutomationNodeMoviePilotRecognize {
-					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须直接连接在等待 115 下载完成或 MP 媒体识别节点之后", id))
+				validPredecessor := predecessor.Type == RSSAutomationNodeWait115 || predecessor.Type == RSSAutomationNodeMoviePilotRecognize
+				if predecessor.Type == RSSAutomationNodeFilmFusionRecognize {
+					validPredecessor = rssAutomationFilmFusionRecognitionMode(predecessor) == MediaRecognitionModeFile
+				}
+				if !validPredecessor {
+					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须直接连接在等待 115 下载完成、MP 媒体识别或 115 下载文件模式的 FilmFusion 本地识别节点之后", id))
 				}
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须连接上游节点的成功出口", id))
@@ -404,7 +437,8 @@ func isRSSAutomationNodeType(nodeType string) bool {
 
 func isRSSAutomationNonRetryableNode(nodeType string) bool {
 	switch nodeType {
-	case RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeHTTPRequest:
+	case RSSAutomationNodeDeleteQBittorrent, RSSAutomationNodeMoviePilotTransfer,
+		RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeHTTPRequest:
 		return true
 	default:
 		return false
@@ -416,9 +450,9 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 	if port == "always" {
 		switch nodeType {
 		case RSSAutomationNodeRegex, RSSAutomationNodeKeyword, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
-			RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+			RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 			RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-			RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeMediaExists,
+			RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
 			RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
 			RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
 			RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
@@ -442,9 +476,9 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 	case RSSAutomationNodeParallel:
 		return strings.HasPrefix(port, "branch-") && len(port) > len("branch-")
 	case RSSAutomationNodeRegex, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
-		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeHDHiveUnlock,
+		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeHDHiveUnlock,
 		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
 		RSSAutomationNodeHTTPRequest, RSSAutomationNodeNotification:
 		return port == "success" || port == "failure"
@@ -553,6 +587,12 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 		if maxWaitMinutes := rssAutomationConfigUint(config, "max_wait_minutes"); maxWaitMinutes > 30*24*60 {
 			return errors.New("qBittorrent 最长等待不能超过 30 天")
 		}
+	case RSSAutomationNodeDeleteQBittorrent:
+		if value, exists := config["delete_files"]; exists {
+			if _, ok := value.(bool); !ok {
+				return errors.New("同时删除下载文件配置必须是布尔值")
+			}
+		}
 	case RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI:
 		if rssAutomationConfigUint(config, "cloud_storage_id") == 0 {
 			return errors.New("必须选择 115 账号")
@@ -581,6 +621,50 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 		tmdbID := rssAutomationConfigString(config, "tmdb_id")
 		if tmdbID != "" && !strings.HasPrefix(tmdbID, "$") && !strings.Contains(tmdbID, "{{") && !rssAutomationTMDBIDPattern.MatchString(tmdbID) {
 			return errors.New("TMDB ID 必须是正整数或流程变量")
+		}
+	case RSSAutomationNodeFilmFusionRecognize:
+		mode := rssAutomationFilmFusionRecognitionMode(node)
+		configuredMode := strings.ToLower(rssAutomationConfigString(config, "recognition_mode"))
+		if configuredMode != "" && configuredMode != MediaRecognitionModeTitle && configuredMode != MediaRecognitionModeFile {
+			return errors.New("本地识别模式必须是 title/file")
+		}
+		if mode == MediaRecognitionModeTitle && rssAutomationConfigString(config, "input") == "" {
+			return errors.New("发布标题模式必须配置待识别标题")
+		}
+		if value, exists := config["lookup_tmdb"]; exists {
+			if _, ok := value.(bool); !ok {
+				return errors.New("查询 TMDB 配置必须是布尔值")
+			}
+		}
+		tmdbID := rssAutomationConfigString(config, "tmdb_id")
+		if tmdbID != "" && !strings.HasPrefix(tmdbID, "$") && !strings.Contains(tmdbID, "{{") && !rssAutomationTMDBIDPattern.MatchString(tmdbID) {
+			return errors.New("TMDB ID 必须是正整数或流程变量")
+		}
+	case RSSAutomationNodeMoviePilotTransfer:
+		tmdbID := rssAutomationConfigString(config, "tmdb_id")
+		if tmdbID != "" && !strings.HasPrefix(tmdbID, "$") && !strings.Contains(tmdbID, "{{") && !rssAutomationTMDBIDPattern.MatchString(tmdbID) {
+			return errors.New("TMDB ID 必须是正整数或流程变量")
+		}
+		switch rssAutomationConfigString(config, "file_type") {
+		case "", "auto", "file", "dir":
+		default:
+			return errors.New("MP2 整理源类型必须是 auto/file/dir")
+		}
+		switch rssAutomationConfigString(config, "media_type") {
+		case "", "auto", "movie", "tv":
+		default:
+			return errors.New("MP2 整理媒体类型必须是 auto/movie/tv")
+		}
+		if len([]rune(rssAutomationConfigString(config, "source_path"))) > 4096 {
+			return errors.New("MP2 可见源路径不能超过 4096 个字符")
+		}
+		if len([]rune(rssAutomationConfigString(config, "transfer_type"))) > 64 {
+			return errors.New("MP2 整理方式不能超过 64 个字符")
+		}
+		if value, exists := config["scrape"]; exists {
+			if _, ok := value.(bool); !ok {
+				return errors.New("MP2 刮削配置必须是布尔值")
+			}
 		}
 	case RSSAutomationNodeMediaExists:
 		if rssAutomationConfigUint(config, "cloud_directory_id") == 0 {

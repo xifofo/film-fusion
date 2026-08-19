@@ -296,6 +296,12 @@ func (s *RSSAutomationService) executeRSSAutomationNode(ctx context.Context, run
 		return withRSSAutomationSelectedPort(output, err), err
 	case RSSAutomationNodeWaitQBittorrent:
 		return s.executeRSSAutomationWaitQBittorrent(ctx, nodeRun, node, definition, runContext)
+	case RSSAutomationNodeMoviePilotTransfer:
+		output, err := s.executeRSSAutomationMoviePilotTransfer(ctx, node, definition, runContext)
+		return withRSSAutomationSelectedPort(output, err), err
+	case RSSAutomationNodeDeleteQBittorrent:
+		output, err := s.executeRSSAutomationDeleteQBittorrent(ctx, node, definition, runContext)
+		return withRSSAutomationSelectedPort(output, err), err
 	case RSSAutomationNodeOffline115:
 		output, err := s.executeRSSAutomationOffline115(ctx, node, runContext)
 		return withRSSAutomationSelectedPort(output, err), err
@@ -306,6 +312,8 @@ func (s *RSSAutomationService) executeRSSAutomationNode(ctx context.Context, run
 		return s.executeRSSAutomationWait115(ctx, nodeRun, node, definition, runContext)
 	case RSSAutomationNodeMoviePilotTitle:
 		return s.executeRSSAutomationMoviePilotTitleRecognize(ctx, node, runContext)
+	case RSSAutomationNodeFilmFusionRecognize:
+		return s.executeRSSAutomationFilmFusionRecognize(ctx, node, definition, runContext)
 	case RSSAutomationNodeMediaExists:
 		return s.executeRSSAutomationMediaExists(ctx, node, runContext)
 	case RSSAutomationNodeHDHiveQuery:
@@ -1049,7 +1057,7 @@ func (s *RSSAutomationService) requeueRSSAutomationNodeAfterDatabaseError(nodeRu
 
 func rssAutomationNodeTimeout(node RSSAutomationNode) time.Duration {
 	seconds := 30
-	if node.Type == RSSAutomationNodeOrganizeStrm {
+	if node.Type == RSSAutomationNodeOrganizeStrm || node.Type == RSSAutomationNodeMoviePilotTransfer {
 		seconds = 600
 	}
 	if value := rssAutomationConfigUint(node.Config, "timeout_seconds"); value > 0 && value <= 600 {

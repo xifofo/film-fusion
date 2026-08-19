@@ -29,11 +29,12 @@ func (SystemConfig) TableName() string {
 
 // ConfigCategory 配置分类常量
 const (
-	CategorySystem        = "system"         // 系统配置
-	CategorySecurity      = "security"       // 安全配置
-	Category115Open       = "115_open"       // 115开放平台配置
-	CategoryRSSAutomation = "rss_automation" // RSS 自动化配置
-	CategoryAppearance    = "appearance"     // 站点外观配置
+	CategorySystem           = "system"            // 系统配置
+	CategorySecurity         = "security"          // 安全配置
+	Category115Open          = "115_open"          // 115开放平台配置
+	CategoryRSSAutomation    = "rss_automation"    // RSS 自动化配置
+	CategoryMediaRecognition = "media_recognition" // 本地媒体识别配置
+	CategoryAppearance       = "appearance"        // 站点外观配置
 )
 
 // ConfigType 配置类型常量
@@ -69,3 +70,9 @@ const (
 
 // RSS 自动化运行配置键。只保存在 system_configs，不从 config.yaml 读取或写入。
 const ConfigKeyRSSAutomationUserAgent = "rss_automation.user_agent"
+
+// 本地媒体识别配置键。识别词与分类配置只保存在 system_configs，不依赖 MoviePilot 配置。
+const (
+	ConfigKeyMediaRecognitionWords      = "media_recognition.words"
+	ConfigKeyMediaRecognitionCategories = "media_recognition.categories"
+)

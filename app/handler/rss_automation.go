@@ -12,9 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// RSSAutomationHandler exposes the new workflow-based RSS module. It is kept
-// separate from RSSMonitorHandler so the legacy monitor API and data stay
-// untouched.
+// RSSAutomationHandler exposes the workflow-based RSS automation module.
 type RSSAutomationHandler struct {
 	service *service.RSSAutomationService
 }
@@ -48,15 +46,6 @@ func (h *RSSAutomationHandler) CreateAutomation(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, NewSuccessResponse("RSS 自动化已创建", created))
-}
-
-func (h *RSSAutomationHandler) MigrateLegacyMonitor(c *gin.Context) {
-	result, err := h.service.MigrateLegacyMonitor()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, NewErrorResponse("迁移旧版 RSS 监控失败", err.Error()))
-		return
-	}
-	c.JSON(http.StatusOK, NewSuccessResponse("旧版 RSS 监控已迁移并停用", result))
 }
 
 func (h *RSSAutomationHandler) UpdateSource(c *gin.Context) {
@@ -224,6 +213,14 @@ func (h *RSSAutomationHandler) ListTargets(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, NewSuccessResponse("获取下载器列表成功", targets))
+}
+
+func (h *RSSAutomationHandler) ListTargetStatuses(c *gin.Context) {
+	statuses, err := h.service.ListTargetStatuses(c.Request.Context())
+	if respondRSSAutomationError(c, err, "获取下载器实时状态失败") {
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("获取下载器实时状态成功", statuses))
 }
 
 func (h *RSSAutomationHandler) NodeProtocols(c *gin.Context) {

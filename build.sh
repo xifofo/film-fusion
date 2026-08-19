@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# 一键打包 film-fusion 主程序与 RSS Generator Worker 镜像：
+# 一键打包 film-fusion 镜像：
 #   1) 进入前端目录构建（pnpm build）
 #   2) 拷贝前端 dist 到后端 dist
-#   3) docker build 主程序多平台镜像（默认推送到 registry）
-#   4) docker build Worker 多平台镜像（默认推送到 registry）
+#   3) docker build 多平台镜像（默认推送到 registry）
 #
 # 用法:
-#   ./build.sh v3.0.8              # 默认：构建 + 推送两张镜像，各包含 v3.0.8 和 latest
-#   ./build.sh v3.0.8 --no-push    # 构建两张镜像但不推送（本地校验用）
+#   ./build.sh v3.0.8              # 默认：构建 + 推送 v3.0.8 和 latest
+#   ./build.sh v3.0.8 --no-push    # 仅构建，不推送（本地校验用）
 #
 # 可通过环境变量覆盖默认行为:
-#   IMAGE_REPO=kumayi/film-fusion                              # 主程序镜像仓库
-#   WORKER_IMAGE_REPO=kumayi/film-fusion-rss-generator-worker # Worker 镜像仓库
-#   FRONTEND_DIR=../film-fusion-frontend                       # 前端代码目录
-#   WORKER_DIR=./rss-generator-worker                          # Worker 构建上下文
-#   PLATFORMS=linux/amd64,linux/arm64                          # 目标平台
-#   DOCKER_BUILD_ARGS="--no-cache"                             # 额外透传给两次 docker build
-#   TAG_LATEST=0                                               # 关闭两个镜像的 latest tag
+#   IMAGE_REPO=kumayi/film-fusion             # 镜像仓库
+#   FRONTEND_DIR=../film-fusion-frontend      # 前端代码目录
+#   PLATFORMS=linux/amd64,linux/arm64         # 目标平台
+#   DOCKER_BUILD_ARGS="--no-cache"            # 额外透传给 docker build
+#   TAG_LATEST=0                              # 关闭 latest tag
 
 set -euo pipefail
 
@@ -38,9 +35,6 @@ esac
 IMAGE_REPO="${IMAGE_REPO:-kumayi/film-fusion}"
 IMAGE="${IMAGE_REPO}:${VERSION}"
 IMAGE_LATEST="${IMAGE_REPO}:latest"
-WORKER_IMAGE_REPO="${WORKER_IMAGE_REPO:-kumayi/film-fusion-rss-generator-worker}"
-WORKER_IMAGE="${WORKER_IMAGE_REPO}:${VERSION}"
-WORKER_IMAGE_LATEST="${WORKER_IMAGE_REPO}:latest"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 DOCKER_BUILD_ARGS="${DOCKER_BUILD_ARGS:-}"
 # 是否同时打 latest tag（默认开启，可用 TAG_LATEST=0 关闭）
@@ -49,7 +43,6 @@ TAG_LATEST="${TAG_LATEST:-1}"
 BACKEND_DIR="$(cd "$(dirname "$0")" && pwd)"
 FRONTEND_DIR_DEFAULT="$BACKEND_DIR/../film-fusion-frontend"
 FRONTEND_DIR="${FRONTEND_DIR:-$FRONTEND_DIR_DEFAULT}"
-WORKER_DIR="${WORKER_DIR:-$BACKEND_DIR/rss-generator-worker}"
 
 if [[ ! -d "$FRONTEND_DIR" ]]; then
   echo "[build] 前端目录不存在: $FRONTEND_DIR" >&2
@@ -57,13 +50,6 @@ if [[ ! -d "$FRONTEND_DIR" ]]; then
   exit 1
 fi
 FRONTEND_DIR="$(cd "$FRONTEND_DIR" && pwd)"
-
-if [[ ! -f "$WORKER_DIR/Dockerfile" ]]; then
-  echo "[build] Worker Dockerfile 不存在: $WORKER_DIR/Dockerfile" >&2
-  echo "[build] 可通过 WORKER_DIR=/path/to/rss-generator-worker 覆盖" >&2
-  exit 1
-fi
-WORKER_DIR="$(cd "$WORKER_DIR" && pwd)"
 
 select_frontend_node() {
   command -v node >/dev/null 2>&1 || { echo "[build] 缺少 node，请先安装 Node.js 20.19+ 或 22.12+" >&2; exit 1; }
@@ -94,7 +80,7 @@ select_frontend_node
 command -v pnpm >/dev/null 2>&1 || { echo "[build] 缺少 pnpm，请先安装" >&2; exit 1; }
 command -v docker >/dev/null 2>&1 || { echo "[build] 缺少 docker" >&2; exit 1; }
 
-echo "==> [1/4] 构建前端: $FRONTEND_DIR"
+echo "==> [1/3] 构建前端: $FRONTEND_DIR"
 (
   cd "$FRONTEND_DIR"
   if [[ ! -d node_modules ]]; then
@@ -112,7 +98,7 @@ if [[ ! -d "$FRONTEND_DIR/dist" ]]; then
   exit 1
 fi
 
-echo "==> [2/4] 同步 dist 到 $BACKEND_DIR/dist"
+echo "==> [2/3] 同步 dist 到 $BACKEND_DIR/dist"
 rm -rf "$BACKEND_DIR/dist"
 mkdir -p "$BACKEND_DIR/dist"
 # 拷贝前端 dist 内容（含隐藏文件）到后端 dist 下
@@ -120,19 +106,15 @@ cp -R "$FRONTEND_DIR/dist/." "$BACKEND_DIR/dist/"
 
 TAG_ARGS=( -t "$IMAGE" )
 IMAGE_TAGS_DESC="$IMAGE"
-WORKER_TAG_ARGS=( -t "$WORKER_IMAGE" )
-WORKER_IMAGE_TAGS_DESC="$WORKER_IMAGE"
 if [[ "$TAG_LATEST" == "1" ]]; then
   TAG_ARGS+=( -t "$IMAGE_LATEST" )
   IMAGE_TAGS_DESC="$IMAGE, $IMAGE_LATEST"
-  WORKER_TAG_ARGS+=( -t "$WORKER_IMAGE_LATEST" )
-  WORKER_IMAGE_TAGS_DESC="$WORKER_IMAGE, $WORKER_IMAGE_LATEST"
 fi
 
 if [[ -n "$PUSH_FLAG" ]]; then
-  echo "==> [3/4] docker build 主程序: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 推送到 registry)"
+  echo "==> [3/3] docker build: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 推送到 registry)"
 else
-  echo "==> [3/4] docker build 主程序: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 不推送)"
+  echo "==> [3/3] docker build: $IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 不推送)"
 fi
 # shellcheck disable=SC2086
 docker build \
@@ -141,19 +123,4 @@ docker build \
   $PUSH_FLAG \
   $DOCKER_BUILD_ARGS \
   "$BACKEND_DIR"
-
-if [[ -n "$PUSH_FLAG" ]]; then
-  echo "==> [4/4] docker build Worker: $WORKER_IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 推送到 registry)"
-else
-  echo "==> [4/4] docker build Worker: $WORKER_IMAGE_TAGS_DESC  (platforms=$PLATFORMS, 不推送)"
-fi
-# shellcheck disable=SC2086
-docker build \
-  --platform="$PLATFORMS" \
-  "${WORKER_TAG_ARGS[@]}" \
-  $PUSH_FLAG \
-  $DOCKER_BUILD_ARGS \
-  "$WORKER_DIR"
-
-echo "==> 完成主程序: $IMAGE_TAGS_DESC"
-echo "==> 完成 Worker: $WORKER_IMAGE_TAGS_DESC"
+echo "==> 完成: $IMAGE_TAGS_DESC"

@@ -17,6 +17,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // EmbyCoverService 媒体库封面生成业务编排
@@ -160,16 +161,18 @@ func (s *EmbyCoverService) GenerateLibraryCover(ctx context.Context, embyLibrary
 	}
 	items, err := s.emby.ListLatestItems(embyLibraryID, posterCount, nil)
 	if err != nil {
-		return nil, fmt.Errorf("获取最新媒体失败: %w", err)
+		runErr := fmt.Errorf("获取最新媒体失败: %w", err)
+		return nil, s.recordGenerationFailure(local, opts, runErr)
 	}
 	if len(items) == 0 {
-		return nil, fmt.Errorf("媒体库 %s 下没有 Movie/Series", embyLibraryID)
+		runErr := fmt.Errorf("媒体库 %s 下没有 Movie/Series", embyLibraryID)
+		return nil, s.recordGenerationFailure(local, opts, runErr)
 	}
 
 	posters := make([][]byte, 0, len(items))
 	for _, it := range items {
 		if ctx.Err() != nil {
-			return nil, ctx.Err()
+			return nil, s.recordGenerationFailure(local, opts, ctx.Err())
 		}
 		if _, hasPrimary := it.ImageTags["Primary"]; !hasPrimary {
 			s.log.Debugf("[emby-cover] item %s (%s) 无 Primary 海报，跳过", it.ID, it.Name)
@@ -183,7 +186,8 @@ func (s *EmbyCoverService) GenerateLibraryCover(ctx context.Context, embyLibrary
 		posters = append(posters, data)
 	}
 	if len(posters) == 0 {
-		return nil, errors.New("所有最新媒体的海报都拉取失败")
+		runErr := errors.New("所有最新媒体的海报都拉取失败")
+		return nil, s.recordGenerationFailure(local, opts, runErr)
 	}
 
 	// 3) 渲染
@@ -203,17 +207,19 @@ func (s *EmbyCoverService) GenerateLibraryCover(ctx context.Context, embyLibrary
 	}
 	out, err := cover.RenderWithTemplate(ctx, local.TemplateID, in)
 	if err != nil {
-		s.recordFailure(embyLibraryID, err)
-		return nil, fmt.Errorf("渲染封面失败: %w", err)
+		runErr := fmt.Errorf("渲染封面失败: %w", err)
+		return nil, s.recordGenerationFailure(local, opts, runErr)
 	}
 
 	// 4) 上传
 	if opts.Upload {
 		if err := s.emby.UploadPrimaryImage(embyLibraryID, out.JPEG, "image/jpeg"); err != nil {
-			s.recordFailure(embyLibraryID, err)
-			return out.JPEG, fmt.Errorf("上传 Emby 封面失败: %w", err)
+			runErr := fmt.Errorf("上传 Emby 封面失败: %w", err)
+			return out.JPEG, s.recordGenerationFailure(local, opts, runErr)
 		}
-		s.recordSuccess(embyLibraryID)
+		if err := s.recordSuccess(local); err != nil {
+			return out.JPEG, fmt.Errorf("封面已上传，但保存生成状态失败: %w", err)
+		}
 		s.log.Infof("[emby-cover] 已生成并上传媒体库封面: %s (%s)", local.EmbyName, embyLibraryID)
 	}
 
@@ -291,24 +297,65 @@ func (s *EmbyCoverService) loadOrFallbackConfig(embyLibraryID string) (model.Emb
 	return model.EmbyCoverLibrary{}, fmt.Errorf("Emby 不存在该媒体库: %s", embyLibraryID)
 }
 
-func (s *EmbyCoverService) recordSuccess(embyLibraryID string) {
-	now := time.Now()
-	s.db.Model(&model.EmbyCoverLibrary{}).
-		Where("emby_library_id = ?", embyLibraryID).
-		Updates(map[string]interface{}{
-			"last_generated_at": &now,
-			"last_error":        "",
-		})
+// recordGenerationFailure 只记录真实上传任务的失败；预览不会改变运行状态。
+func (s *EmbyCoverService) recordGenerationFailure(local model.EmbyCoverLibrary, opts GenerateOptions, runErr error) error {
+	if !opts.Upload {
+		return runErr
+	}
+	if err := s.recordFailure(local, runErr); err != nil {
+		return fmt.Errorf("%w；保存最近状态失败: %v", runErr, err)
+	}
+	return runErr
 }
 
-func (s *EmbyCoverService) recordFailure(embyLibraryID string, err error) {
-	msg := err.Error()
+// runStateRecord 构造可用于首次落库的默认配置记录。
+// 状态更新发生冲突时只更新状态字段，不覆盖用户已有配置。
+func runStateRecord(local model.EmbyCoverLibrary) model.EmbyCoverLibrary {
+	templateID := local.TemplateID
+	if templateID == "" {
+		templateID = cover.DefaultTemplateID
+	}
+	return model.EmbyCoverLibrary{
+		EmbyLibraryID: local.EmbyLibraryID,
+		EmbyName:      local.EmbyName,
+		CNTitle:       local.CNTitle,
+		ENSubtitle:    local.ENSubtitle,
+		TemplateID:    templateID,
+		Enabled:       local.Enabled,
+	}
+}
+
+func (s *EmbyCoverService) recordSuccess(local model.EmbyCoverLibrary) error {
+	now := time.Now()
+	record := runStateRecord(local)
+	record.LastGeneratedAt = &now
+	record.UpdatedAt = now
+	return s.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "emby_library_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"last_generated_at": &now,
+			"last_error":        "",
+			"updated_at":        now,
+		}),
+	}).Create(&record).Error
+}
+
+func (s *EmbyCoverService) recordFailure(local model.EmbyCoverLibrary, runErr error) error {
+	msg := runErr.Error()
 	if len(msg) > 500 {
 		msg = msg[:500]
 	}
-	s.db.Model(&model.EmbyCoverLibrary{}).
-		Where("emby_library_id = ?", embyLibraryID).
-		Update("last_error", msg)
+	now := time.Now()
+	record := runStateRecord(local)
+	record.LastError = msg
+	record.UpdatedAt = now
+	return s.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "emby_library_id"}},
+		DoUpdates: clause.Assignments(map[string]interface{}{
+			"last_error": msg,
+			"updated_at": now,
+		}),
+	}).Create(&record).Error
 }
 
 // Start 启动 cron 定时任务（如果配置了 cron 表达式）

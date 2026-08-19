@@ -22,15 +22,17 @@ import (
 
 // EmbyVersionCheckHandler 扫描云路径映射对应的本地目录，找出电影/单集的多版本内容。
 type EmbyVersionCheckHandler struct {
-	logger *logger.Logger
-	mu     sync.RWMutex
-	jobs   map[uint]*EmbyVersionCheckJob
+	logger    *logger.Logger
+	mu        sync.RWMutex
+	jobs      map[uint]*EmbyVersionCheckJob
+	scheduler *embyVersionCheckScheduler
 }
 
 func NewEmbyVersionCheckHandler(log *logger.Logger) *EmbyVersionCheckHandler {
 	return &EmbyVersionCheckHandler{
-		logger: log,
-		jobs:   make(map[uint]*EmbyVersionCheckJob),
+		logger:    log,
+		jobs:      make(map[uint]*EmbyVersionCheckJob),
+		scheduler: newEmbyVersionCheckScheduler(database.GetDB()),
 	}
 }
 
@@ -304,9 +306,9 @@ func (h *EmbyVersionCheckHandler) updateJobProgress(userID uint, jobID string, p
 
 func (h *EmbyVersionCheckHandler) finishJob(userID uint, jobID string, result *EmbyVersionCheckResult, errorMessage string) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	job := h.jobs[userID]
 	if job == nil || job.ID != jobID {
+		h.mu.Unlock()
 		return
 	}
 	now := time.Now()
@@ -320,6 +322,9 @@ func (h *EmbyVersionCheckHandler) finishJob(userID uint, jobID string, result *E
 		job.Status = "failed"
 		job.Progress.Phase = "failed"
 	}
+	h.mu.Unlock()
+
+	h.persistEmbyVersionCheckResult(userID, now, result, errorMessage)
 }
 
 func (h *EmbyVersionCheckHandler) jobSnapshot(userID uint) *EmbyVersionCheckJob {

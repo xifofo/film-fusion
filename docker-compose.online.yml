@@ -20,29 +20,6 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - GIN_MODE=release
-      # RSS Worker 只通过 Docker 内部网络访问。
-      - RSS_GENERATOR_WORKER_URL=http://rss-generator-worker:8787
-    depends_on:
-      rss-generator-worker:
-        condition: service_healthy
-
-  rss-generator-worker:
-    image: "kumayi/film-fusion-rss-generator-worker:v3.0.8"
-    container_name: "rss-generator-worker"
-    restart: unless-stopped
-    init: true
-    shm_size: "1gb"
-    environment:
-      - NODE_ENV=production
-      - PORT=8787
-      # 必填：至少 32 个字符，并与 FilmFusion「系统设置 → RSS 生成器」中填写的值完全相同。
-      - WORKER_AUTH_TOKEN=
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/health').then(async r=>{const body=await r.json();if(!r.ok||body.status!=='ok')process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 3s
-      retries: 10
-      start_period: 20s
 
 networks:
   default:

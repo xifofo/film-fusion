@@ -16,17 +16,19 @@ import (
 
 // AuthHandler 认证处理器
 type AuthHandler struct {
-	config     *config.Config
-	jwtService *auth.JWTService
-	protection *service.EmbyLoginProtection
+	config          *config.Config
+	jwtService      *auth.JWTService
+	protection      *service.EmbyLoginProtection
+	avatarAssetsDir string
 }
 
 // NewAuthHandler 创建认证处理器
 func NewAuthHandler(cfg *config.Config, protection *service.EmbyLoginProtection) *AuthHandler {
 	return &AuthHandler{
-		config:     cfg,
-		jwtService: auth.NewJWTService(cfg),
-		protection: protection,
+		config:          cfg,
+		jwtService:      auth.NewJWTService(cfg),
+		protection:      protection,
+		avatarAssetsDir: defaultUserAvatarAssetsDir,
 	}
 }
 

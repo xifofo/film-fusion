@@ -34,9 +34,7 @@ func (s *RSSAutomationService) executeRSSAutomationMoviePilotTitleRecognize(ctx 
 		category = strings.TrimSpace(fmt.Sprint(value))
 	}
 
-	media, recognizeInput, responded, recognized, recognizeErr := recognizeRSSAutomationTitle(s.moviePilot, RSSFeedItem{
-		Title: input, Category: category,
-	}, tmdbID)
+	media, recognizeInput, responded, recognized, recognizeErr := recognizeRSSAutomationTitle(s.moviePilot, input, category, tmdbID)
 	output := rssAutomationTitleRecognitionOutput(input, recognizeInput, tmdbID, media)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return output, ctxErr
@@ -61,12 +59,12 @@ func (s *RSSAutomationService) executeRSSAutomationMoviePilotTitleRecognize(ctx 
 	return output, nil
 }
 
-func recognizeRSSAutomationTitle(recognizer RSSMediaRecognizer, item RSSFeedItem, tmdbID string) (RSSMediaMetadata, string, bool, bool, error) {
-	media := RSSMediaMetadata{
-		Title: strings.TrimSpace(item.Title), Category: strings.TrimSpace(item.Category),
-		SeasonEpisode: extractRSSSeasonEpisode(item.Title), Quality: extractRSSQuality(item.Title),
+func recognizeRSSAutomationTitle(recognizer RSSAutomationMediaRecognizer, title, category, tmdbID string) (RSSAutomationMediaMetadata, string, bool, bool, error) {
+	media := RSSAutomationMediaMetadata{
+		Title: strings.TrimSpace(title), Category: strings.TrimSpace(category),
+		SeasonEpisode: extractRSSAutomationSeasonEpisode(title), Quality: extractRSSAutomationQuality(title),
 	}
-	candidates := rssAutomationTitleRecognitionCandidates(item.Title, tmdbID)
+	candidates := rssAutomationTitleRecognitionCandidates(title, tmdbID)
 	requestErrors := make([]error, 0)
 	responded := false
 	lastInput := ""
@@ -86,29 +84,29 @@ func recognizeRSSAutomationTitle(recognizer RSSMediaRecognizer, item RSSFeedItem
 			continue
 		}
 
-		media.Title = rssFirstNonEmpty(info.Title, info.TitleYear, item.Title)
+		media.Title = firstRSSAutomationNonEmpty(info.Title, info.TitleYear, title)
 		media.Year = strings.TrimSpace(info.Year)
-		media.MediaType = normalizeRSSMediaType(info.MediaType)
-		media.Category = rssFirstNonEmpty(info.Category, strings.Join(info.Genres, "、"), item.Category)
-		media.SeasonEpisode = rssFirstNonEmpty(media.SeasonEpisode, normalizeRSSSeasonEpisode(info.SeasonEpisode))
+		media.MediaType = normalizeRSSAutomationMediaType(info.MediaType)
+		media.Category = firstRSSAutomationNonEmpty(info.Category, strings.Join(info.Genres, "、"), category)
+		media.SeasonEpisode = firstRSSAutomationNonEmpty(media.SeasonEpisode, normalizeRSSAutomationSeasonEpisode(info.SeasonEpisode))
 		if media.Quality == "" {
-			media.Quality = extractRSSQuality(strings.TrimSpace(info.ResourceType + " " + info.ResourcePix))
+			media.Quality = extractRSSAutomationQuality(strings.TrimSpace(info.ResourceType + " " + info.ResourcePix))
 		}
 		media.Rating = info.Rating
 		media.TmdbID = recognizedID
-		media.PosterURL = rssTMDBImageURL(rssFirstNonEmpty(info.BackdropPath, info.PosterPath))
+		media.PosterURL = rssAutomationTMDBImageURL(firstRSSAutomationNonEmpty(info.BackdropPath, info.PosterPath))
 
 		if media.PosterURL == "" && media.Title != "" {
 			if results, searchErr := recognizer.SearchMedia(media.Title, 8); searchErr == nil {
-				if match := matchRSSMediaSearchResult(media, results); match != nil {
-					media.Year = rssFirstNonEmpty(media.Year, match.Year)
-					media.MediaType = rssFirstNonEmpty(media.MediaType, normalizeRSSMediaType(match.MediaType))
-					media.Category = rssFirstNonEmpty(media.Category, match.Category, strings.Join(match.Genres, "、"), item.Category)
-					media.TmdbID = rssFirstNonEmpty(media.TmdbID, match.TmdbID)
+				if match := matchRSSAutomationMediaSearchResult(media, results); match != nil {
+					media.Year = firstRSSAutomationNonEmpty(media.Year, match.Year)
+					media.MediaType = firstRSSAutomationNonEmpty(media.MediaType, normalizeRSSAutomationMediaType(match.MediaType))
+					media.Category = firstRSSAutomationNonEmpty(media.Category, match.Category, strings.Join(match.Genres, "、"), category)
+					media.TmdbID = firstRSSAutomationNonEmpty(media.TmdbID, match.TmdbID)
 					if media.Rating <= 0 {
 						media.Rating = match.Rating
 					}
-					media.PosterURL = rssTMDBImageURL(rssFirstNonEmpty(match.BackdropPath, match.PosterPath))
+					media.PosterURL = rssAutomationTMDBImageURL(firstRSSAutomationNonEmpty(match.BackdropPath, match.PosterPath))
 				}
 			}
 		}
@@ -140,11 +138,11 @@ func rssAutomationTitleRecognitionCandidates(title, tmdbID string) []string {
 		add(strings.TrimRight(cleaned, " ._-") + ".{tmdb-" + tmdbID + "}")
 	}
 	add(title)
-	add(stripRSSTrailingMetadata(title))
+	add(stripRSSAutomationTrailingMetadata(title))
 	return candidates
 }
 
-func rssAutomationTitleRecognitionOutput(input, recognizeInput, requestedTMDBID string, media RSSMediaMetadata) map[string]any {
+func rssAutomationTitleRecognitionOutput(input, recognizeInput, requestedTMDBID string, media RSSAutomationMediaMetadata) map[string]any {
 	return map[string]any{
 		"input": input, "recognize_input": recognizeInput, "requested_tmdb_id": requestedTMDBID,
 		"tmdb_id": strings.TrimSpace(media.TmdbID), "title": strings.TrimSpace(media.Title),

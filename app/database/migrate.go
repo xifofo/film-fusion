@@ -56,22 +56,16 @@ func AutoMigrate() error {
 		&model.EmbyMissingBlacklist{},
 		&model.EmbyMissingSetting{},
 		&model.EmbyMissingSeriesScan{},
+		&model.EmbyVersionCheckSetting{},
 		&model.EmbyWatchUser{},
 		&model.EmbyWatchRecord{},
 		&model.EmbyWatchSetting{},
-		&model.RSSMonitorSetting{},
-		&model.RSSNotificationRule{},
-		&model.RSSMonitorItem{},
 		&model.RSSAutomationSource{},
 		&model.RSSAutomationWorkflow{},
 		&model.RSSAutomationTarget{},
 		&model.RSSAutomationEntry{},
 		&model.RSSAutomationRun{},
 		&model.RSSAutomationNodeRun{},
-		&model.RSSAutomationLegacyMigration{},
-		&model.RSSGeneratorFeedDefinition{},
-		&model.RSSGeneratorFeedAccessToken{},
-		&model.RSSGeneratorFeedCache{},
 	); err != nil {
 		return err
 	}

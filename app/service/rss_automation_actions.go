@@ -33,8 +33,11 @@ func (s *RSSAutomationService) TestTarget(ctx context.Context, targetID uint) er
 	}
 	switch target.Type {
 	case model.RSSAutomationTargetQBittorrent:
-		_, err := s.newRSSAutomationQBClient(ctx, target)
-		return err
+		client, err := s.newRSSAutomationQBClient(ctx, target)
+		if err != nil {
+			return err
+		}
+		return client.testConnection(ctx)
 	default:
 		return fmt.Errorf("不支持的目标类型 %q", target.Type)
 	}
@@ -88,7 +91,7 @@ func (s *RSSAutomationService) executeRSSAutomationQBittorrent(ctx context.Conte
 		}
 	}
 	_ = writer.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(client.baseURL, "/")+"/api/v2/torrents/add", &body)
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v2/torrents/add", &body)
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +114,41 @@ func (s *RSSAutomationService) executeRSSAutomationQBittorrent(ctx context.Conte
 type rssAutomationQBClient struct {
 	baseURL string
 	client  *http.Client
+	apiKey  string
+}
+
+func (client *rssAutomationQBClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(client.baseURL, "/")+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if client.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+client.apiKey)
+	}
+	return req, nil
+}
+
+func (client *rssAutomationQBClient) testConnection(ctx context.Context) error {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v2/app/version", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("连接 qBittorrent API 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if client.apiKey != "" {
+			return fmt.Errorf("qBittorrent API Key 验证失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return fmt.Errorf("qBittorrent API 连接失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return errors.New("qBittorrent API 未返回应用版本")
+	}
+	return nil
 }
 
 func (s *RSSAutomationService) newRSSAutomationQBClient(ctx context.Context, target model.RSSAutomationTarget) (*rssAutomationQBClient, error) {
@@ -120,6 +158,10 @@ func (s *RSSAutomationService) newRSSAutomationQBClient(ctx context.Context, tar
 	}
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 20 * time.Second, Jar: jar}
+	apiKey := strings.TrimSpace(config.APIKey)
+	if apiKey != "" {
+		return &rssAutomationQBClient{baseURL: config.BaseURL, client: client, apiKey: apiKey}, nil
+	}
 	form := url.Values{"username": {config.Username}, "password": {config.Password}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(config.BaseURL, "/")+"/api/v2/auth/login", strings.NewReader(form.Encode()))
 	if err != nil {

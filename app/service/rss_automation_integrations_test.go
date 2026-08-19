@@ -50,6 +50,17 @@ type stubRSSAutomationEmbyClient struct {
 	item         *embyhelper.EmbyLookupItem
 }
 
+type stubRSSAutomationMoviePilotTransfer struct {
+	request MoviePilotManualTransferRequest
+	result  MoviePilotManualTransferResult
+	err     error
+}
+
+func (s *stubRSSAutomationMoviePilotTransfer) ManualTransfer(_ context.Context, request MoviePilotManualTransferRequest) (MoviePilotManualTransferResult, error) {
+	s.request = request
+	return s.result, s.err
+}
+
 func (s *stubRSSAutomationEmbyClient) RefreshLibrary() (int, string, error) {
 	s.refreshCalls++
 	return http.StatusNoContent, "", nil
@@ -259,15 +270,17 @@ func TestRSSAutomationEmbyRefreshWaitRefreshesOnceAcrossPolls(t *testing.T) {
 
 func TestRSSAutomationWaitQBittorrentUsesLocalMockAndCompletes(t *testing.T) {
 	var requestedTag string
+	var requestedAuthorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v2/auth/login":
-			http.SetCookie(w, &http.Cookie{Name: "SID", Value: "local-test", Path: "/"})
-			_, _ = w.Write([]byte("Ok."))
 		case "/api/v2/torrents/info":
 			requestedTag = r.URL.Query().Get("tag")
+			requestedAuthorization = r.Header.Get("Authorization")
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"hash":"ABC","name":"Example","progress":1,"state":"uploading","save_path":"/downloads","content_path":"/downloads/Example","size":100,"downloaded":100,"amount_left":0,"ratio":1.2}]`))
+		case "/api/v2/torrents/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Example.mkv","size":100,"progress":1}]`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -275,7 +288,7 @@ func TestRSSAutomationWaitQBittorrentUsesLocalMockAndCompletes(t *testing.T) {
 	defer server.Close()
 
 	db := newRSSAutomationTestDB(t)
-	config, _ := json.Marshal(RSSAutomationQBittorrentConfig{BaseURL: server.URL, Username: "admin", Password: "secret"})
+	config, _ := json.Marshal(RSSAutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testRSSAutomationQBAPIKey})
 	target := model.RSSAutomationTarget{Name: "mock qB", Type: model.RSSAutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(config)}
 	if err := db.Create(&target).Error; err != nil {
 		t.Fatal(err)
@@ -288,7 +301,72 @@ func TestRSSAutomationWaitQBittorrentUsesLocalMockAndCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if requestedTag != "filmfusion-rss-test" || output["selected_port"] != "success" || output["completed"] != true || output["content_path"] != "/downloads/Example" {
-		t.Fatalf("unexpected qB wait output: %#v; tag=%q", output, requestedTag)
+	if requestedTag != "filmfusion-rss-test" || requestedAuthorization != "Bearer "+testRSSAutomationQBAPIKey || output["selected_port"] != "success" || output["completed"] != true || output["content_path"] != "/downloads/Example" || output["content_type"] != "file" || output["file_count"] != 1 {
+		t.Fatalf("unexpected qB wait output: %#v; tag=%q authorization=%q", output, requestedTag, requestedAuthorization)
+	}
+}
+
+func TestRSSAutomationMoviePilotTransferUsesCompletedQBOutput(t *testing.T) {
+	transfer := &stubRSSAutomationMoviePilotTransfer{result: MoviePilotManualTransferResult{Message: "整理完成"}}
+	automation := &RSSAutomationService{mpTransfer: transfer}
+	definition := RSSAutomationDefinition{Edges: []RSSAutomationEdge{{Source: "wait", SourcePort: "success", Target: "mp_transfer"}}}
+	output, err := automation.executeRSSAutomationMoviePilotTransfer(context.Background(), RSSAutomationNode{
+		ID: "mp_transfer", Type: RSSAutomationNodeMoviePilotTransfer,
+		Config: map[string]any{"file_type": "auto", "media_type": "tv", "tmdb_id": "1396", "scrape": true},
+	}, definition, rssAutomationTestRunContext("wait", map[string]any{
+		"completed": true, "target_id": 9, "target_name": "mock qB", "hash": "ABC",
+		"name": "Example", "content_path": "/downloads/Example", "content_type": "dir",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transfer.request.SourcePath != "/downloads/Example" || transfer.request.FileType != "dir" || transfer.request.TmdbID != "1396" || transfer.request.MediaType != "tv" || !transfer.request.Scrape {
+		t.Fatalf("unexpected MP2 request: %#v", transfer.request)
+	}
+	if output["organized"] != true || output["hash"] != "ABC" || output["target_id"] != uint(9) || output["message"] != "整理完成" {
+		t.Fatalf("unexpected MP2 output: %#v", output)
+	}
+}
+
+func TestRSSAutomationDeleteQBittorrentRemovesCompletedTaskWithoutFiles(t *testing.T) {
+	var deleteHash string
+	var deleteFiles string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"hash":"ABC","name":"Example","progress":1,"state":"uploading","content_path":"/downloads/Example","size":100,"amount_left":0}]`))
+		case "/api/v2/torrents/delete":
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			deleteHash = r.Form.Get("hashes")
+			deleteFiles = r.Form.Get("deleteFiles")
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	db := newRSSAutomationTestDB(t)
+	config, _ := json.Marshal(RSSAutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testRSSAutomationQBAPIKey})
+	target := model.RSSAutomationTarget{Name: "mock qB", Type: model.RSSAutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(config)}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	automation := &RSSAutomationService{db: db}
+	definition := RSSAutomationDefinition{Edges: []RSSAutomationEdge{{Source: "mp_transfer", SourcePort: "success", Target: "delete"}}}
+	output, err := automation.executeRSSAutomationDeleteQBittorrent(context.Background(), RSSAutomationNode{
+		ID: "delete", Type: RSSAutomationNodeDeleteQBittorrent, Config: map[string]any{"delete_files": false},
+	}, definition, rssAutomationTestRunContext("mp_transfer", map[string]any{
+		"organized": true, "target_id": target.ID, "hash": "ABC",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleteHash != "ABC" || deleteFiles != "false" || output["deleted"] != true || output["delete_files"] != false {
+		t.Fatalf("unexpected qB delete: output=%#v hash=%q deleteFiles=%q", output, deleteHash, deleteFiles)
 	}
 }

@@ -35,6 +35,7 @@ type OrganizePreviewTaskInput struct {
 	Depth                    int
 	MaxDepth                 int
 	MediaType                string
+	RecognitionSource        string
 	Category                 string
 	BestVersionEnabled       bool
 	IntervalSeconds          int
@@ -197,6 +198,14 @@ func normalizeOrganizePreviewMediaType(value string) string {
 	}
 }
 
+func normalizeOrganizePreviewRecognitionSource(value string) string {
+	source, err := NormalizeMediaRecognitionSource(value)
+	if err != nil {
+		return MediaRecognitionSourceMoviePilot
+	}
+	return source
+}
+
 func (q *OrganizePreviewQueue) Start() {
 	if q == nil {
 		return
@@ -279,6 +288,7 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 					"depth":                      input.Depth,
 					"max_depth":                  ClampOrganizePreviewMaxDepth(input.MaxDepth),
 					"media_type":                 normalizeOrganizePreviewMediaType(input.MediaType),
+					"recognition_source":         normalizeOrganizePreviewRecognitionSource(input.RecognitionSource),
 					"category":                   strings.TrimSpace(input.Category),
 					"best_version_enabled":       input.BestVersionEnabled,
 					"status":                     model.OrganizePreviewStatusPending,
@@ -320,6 +330,7 @@ func (q *OrganizePreviewQueue) Enqueue(inputs []OrganizePreviewTaskInput) ([]mod
 			Depth:                    input.Depth,
 			MaxDepth:                 ClampOrganizePreviewMaxDepth(input.MaxDepth),
 			MediaType:                normalizeOrganizePreviewMediaType(input.MediaType),
+			RecognitionSource:        normalizeOrganizePreviewRecognitionSource(input.RecognitionSource),
 			Category:                 strings.TrimSpace(input.Category),
 			BestVersionEnabled:       input.BestVersionEnabled,
 			Status:                   model.OrganizePreviewStatusPending,

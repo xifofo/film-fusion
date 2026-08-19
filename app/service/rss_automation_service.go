@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,9 +27,12 @@ const (
 	defaultRSSAutomationWorkerCount     = 4
 	maxRSSAutomationNameLength          = 120
 	rssAutomationSampleLimit            = 20
+	rssAutomationSecretMask             = "********"
 )
 
 var ErrRSSAutomationRefreshRunning = errors.New("RSS 自动化源正在刷新")
+
+var rssAutomationQBAPIKeyPattern = regexp.MustCompile(`^qbt_[A-Za-z0-9]{28}$`)
 
 type RSSAutomationSourceInput struct {
 	Name            string               `json:"name"`
@@ -80,6 +84,7 @@ type RSSAutomationQBittorrentConfig struct {
 	BaseURL  string `json:"base_url"`
 	Username string `json:"username"`
 	Password string `json:"password"`
+	APIKey   string `json:"api_key"`
 }
 
 type RSSAutomationRefreshResult struct {
@@ -98,32 +103,32 @@ type RSSAutomationRefreshResult struct {
 }
 
 type RSSAutomationDashboard struct {
-	Sources         []model.RSSAutomationSource        `json:"sources"`
-	Workflows       []model.RSSAutomationWorkflow      `json:"workflows"`
-	Targets         []model.RSSAutomationTarget        `json:"targets"`
-	RecentRuns      []model.RSSAutomationRun           `json:"recent_runs"`
-	TotalEntries    int64                              `json:"total_entries"`
-	PendingNodes    int64                              `json:"pending_nodes"`
-	RunningNodes    int64                              `json:"running_nodes"`
-	FailedRuns      int64                              `json:"failed_runs"`
-	SourceRunning   bool                               `json:"source_running"`
-	LegacyMigration RSSAutomationLegacyMigrationStatus `json:"legacy_migration"`
-	NodeProtocols   []RSSAutomationNodeProtocol        `json:"node_protocols"`
+	Sources       []model.RSSAutomationSource   `json:"sources"`
+	Workflows     []model.RSSAutomationWorkflow `json:"workflows"`
+	Targets       []model.RSSAutomationTarget   `json:"targets"`
+	RecentRuns    []model.RSSAutomationRun      `json:"recent_runs"`
+	TotalEntries  int64                         `json:"total_entries"`
+	PendingNodes  int64                         `json:"pending_nodes"`
+	RunningNodes  int64                         `json:"running_nodes"`
+	FailedRuns    int64                         `json:"failed_runs"`
+	SourceRunning bool                          `json:"source_running"`
+	NodeProtocols []RSSAutomationNodeProtocol   `json:"node_protocols"`
 }
 
 type RSSAutomationService struct {
-	db            *gorm.DB
-	log           *logger.Logger
-	notifier      NotificationPublisher
-	web115        *Web115Service
-	httpClient    *http.Client
-	moviePilot    rssAutomationMoviePilotRecognizer
-	cloud115      rssAutomation115Gateway
-	organizer     RSSAutomationOrganizer
-	mediaStatus   RSSAutomationMediaStatusChecker
-	hdhive        RSSAutomationHDHiveGateway
-	emby          RSSAutomationEmbyClient
-	legacyMonitor *RSSMonitorService
+	db          *gorm.DB
+	log         *logger.Logger
+	notifier    NotificationPublisher
+	web115      *Web115Service
+	httpClient  *http.Client
+	moviePilot  rssAutomationMoviePilotRecognizer
+	localMedia  rssAutomationLocalMediaRecognizer
+	mpTransfer  rssAutomationMoviePilotTransferer
+	cloud115    rssAutomation115Gateway
+	organizer   RSSAutomationOrganizer
+	mediaStatus RSSAutomationMediaStatusChecker
+	hdhive      RSSAutomationHDHiveGateway
+	emby        RSSAutomationEmbyClient
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -137,19 +142,27 @@ type RSSAutomationService struct {
 	workers          chan struct{}
 }
 
-func NewRSSAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService, legacyMonitor *RSSMonitorService) *RSSAutomationService {
+func NewRSSAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService) *RSSAutomationService {
 	ctx, cancel := context.WithCancel(context.Background())
 	web115 := serviceWeb115ForRSSAutomation(log)
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	return &RSSAutomationService{
 		db: database.GetDB(), log: log, notifier: notifier,
-		web115: web115, httpClient: httpClient, moviePilot: moviePilot, legacyMonitor: legacyMonitor,
+		web115: web115, httpClient: httpClient, moviePilot: moviePilot, mpTransfer: moviePilot,
 		cloud115: &defaultRSSAutomation115Gateway{
 			web115: web115, httpClient: httpClient,
 		},
 		ctx: ctx, cancel: cancel,
 		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
 		workers: make(chan struct{}, defaultRSSAutomationWorkerCount),
+	}
+}
+
+// SetLocalMediaRecognition connects FilmFusion's own recognition engine to RSS
+// automation without routing the node through MoviePilot or its fallback chain.
+func (s *RSSAutomationService) SetLocalMediaRecognition(local rssAutomationLocalMediaRecognizer) {
+	if s != nil {
+		s.localMedia = local
 	}
 }
 
@@ -237,11 +250,6 @@ func (s *RSSAutomationService) Dashboard(limit int) (RSSAutomationDashboard, err
 	s.db.Model(&model.RSSAutomationNodeRun{}).Where("status = ?", model.RSSAutomationNodeRunning).Count(&dashboard.RunningNodes)
 	s.db.Model(&model.RSSAutomationRun{}).Where("status IN ?", []string{model.RSSAutomationRunFailed, model.RSSAutomationRunPartial}).Count(&dashboard.FailedRuns)
 	dashboard.SourceRunning = s.sourceRefreshing.Load()
-	legacyMigration, err := s.LegacyMigrationStatus()
-	if err != nil {
-		return dashboard, err
-	}
-	dashboard.LegacyMigration = legacyMigration
 	return dashboard, nil
 }
 
@@ -832,20 +840,30 @@ func validateRSSAutomationTargetInput(input RSSAutomationTargetInput, oldConfigJ
 	if err := json.Unmarshal(encoded, &config); err != nil {
 		return input, "", errors.New("qBittorrent 配置格式错误")
 	}
-	if (config.Password == "" || config.Password == "********") && oldConfigJSON != "" {
+	_, apiKeyProvided := input.Config["api_key"]
+	if oldConfigJSON != "" {
 		var old RSSAutomationQBittorrentConfig
 		if json.Unmarshal([]byte(oldConfigJSON), &old) == nil {
-			config.Password = old.Password
+			if config.Password == "" || config.Password == rssAutomationSecretMask {
+				config.Password = old.Password
+			}
+			if !apiKeyProvided || config.APIKey == rssAutomationSecretMask {
+				config.APIKey = old.APIKey
+			}
 		}
 	}
 	config.BaseURL = strings.TrimRight(strings.TrimSpace(config.BaseURL), "/")
 	config.Username = strings.TrimSpace(config.Username)
+	config.APIKey = strings.TrimSpace(config.APIKey)
 	parsed, parseErr := url.ParseRequestURI(config.BaseURL)
 	if parseErr != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return input, "", errors.New("qBittorrent 地址必须是有效的 HTTP 或 HTTPS URL")
 	}
-	if config.Username == "" || config.Password == "" {
-		return input, "", errors.New("qBittorrent 用户名和密码不能为空")
+	if config.APIKey != "" && !rssAutomationQBAPIKeyPattern.MatchString(config.APIKey) {
+		return input, "", errors.New("qBittorrent API Key 必须以 qbt_ 开头，后接 28 位字母或数字")
+	}
+	if config.APIKey == "" && (config.Username == "" || config.Password == "") {
+		return input, "", errors.New("请配置 qBittorrent API Key，或同时填写用户名和密码")
 	}
 	configJSON, _ := json.Marshal(config)
 	return input, string(configJSON), nil
@@ -866,7 +884,10 @@ func redactRSSAutomationTarget(target *model.RSSAutomationTarget) {
 		return
 	}
 	if config.Password != "" {
-		config.Password = "********"
+		config.Password = rssAutomationSecretMask
+	}
+	if config.APIKey != "" {
+		config.APIKey = rssAutomationSecretMask
 	}
 	encoded, _ := json.Marshal(config)
 	target.ConfigJSON = string(encoded)
@@ -950,9 +971,9 @@ func (s *RSSAutomationService) refreshDueRSSAutomationSources() {
 
 func isRSSAutomationActionNode(nodeType string) bool {
 	switch nodeType {
-	case RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent,
+	case RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeMediaExists,
+		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
 		RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
 		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
 		RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,

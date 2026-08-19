@@ -1,6 +1,8 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -8,6 +10,46 @@ import (
 
 	"film-fusion/app/config"
 )
+
+func TestMoviePilotManualTransferUsesSynchronousEndpoint(t *testing.T) {
+	var authorization string
+	var background string
+	var payload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/transfer/manual":
+			authorization = r.Header.Get("Authorization")
+			background = r.URL.Query().Get("background")
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":true,"message":"整理完成"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	result, err := svc.ManualTransfer(context.Background(), MoviePilotManualTransferRequest{
+		SourcePath: "/downloads/Show.S01", FileType: "dir", TmdbID: "1396",
+		MediaType: "tv", TransferType: "link", Scrape: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileItem, _ := payload["fileitem"].(map[string]any)
+	if authorization != "Bearer test-token" || background != "false" || result.Message != "整理完成" {
+		t.Fatalf("unexpected request metadata: auth=%q background=%q result=%#v", authorization, background, result)
+	}
+	if fileItem["path"] != "/downloads/Show.S01" || fileItem["type"] != "dir" || payload["type_name"] != "电视剧" || payload["transfer_type"] != "link" || payload["tmdbid"] != float64(1396) || payload["scrape"] != true {
+		t.Fatalf("unexpected manual transfer payload: %#v", payload)
+	}
+}
 
 func TestMoviePilotRecognizeTitleParsesRichMediaInfo(t *testing.T) {
 	var gotTitle string
@@ -109,6 +151,212 @@ func TestMoviePilotBusinessFailureIsReturned(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestMoviePilotRecognitionFallsBackToFilmFusionLocalEngine(t *testing.T) {
+	db := newMediaRecognitionTestDB(t)
+	local := NewMediaRecognitionService(db, nil, nil)
+	if _, err := local.SaveWords([]string{"S04 => S01"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewMoviePilotService(&config.Config{}, nil)
+	svc.SetLocalMediaRecognition(local)
+
+	info, raw, err := svc.RecognizeFile("Example.Show.S04E02.1080p.WEB-DL.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != "Example Show" || info.MediaType != "tv" || info.SeasonEpisode != "S01E02" {
+		t.Fatalf("info=%+v", info)
+	}
+	if raw["engine"] != "local" || !strings.Contains(raw["fallback_reason"].(string), "未配置") {
+		t.Fatalf("raw=%#v", raw)
+	}
+
+	name, nameRaw, err := svc.TransferName("Example.Show.S04E02.mkv", "mkv")
+	if err != nil || name != "Example.Show.S01E02.mkv" || nameRaw["engine"] != "local" {
+		t.Fatalf("name=%q raw=%#v err=%v", name, nameRaw, err)
+	}
+	categories, err := svc.GetCategoryConfig()
+	if err != nil || categories.Movie["电影"] != nil || categories.TV["电视剧"] != nil {
+		t.Fatalf("categories=%#v err=%v", categories, err)
+	}
+}
+
+func TestMoviePilotExplicitRecognitionSourceDoesNotCrossFallbackBoundary(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		default:
+			_, _ = w.Write([]byte(`{"success":false,"message":"MoviePilot deliberate failure"}`))
+		}
+	}))
+	defer server.Close()
+
+	local := NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil)
+	if _, err := local.SaveWords([]string{"S04 => S01"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(local)
+
+	info, raw, err := svc.RecognizeFileWithSource(
+		"Example.Show.S04E02.{tmdb-123}.mkv",
+		MediaRecognitionSourceLocal,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 0 || info.SeasonEpisode != "S01E02" || raw["engine"] != "local" {
+		t.Fatalf("local source crossed into MoviePilot: requests=%d info=%+v raw=%#v", requestCount, info, raw)
+	}
+	name, nameRaw, err := svc.TransferNameWithSource(
+		"Example.Show.S04E02.mkv",
+		"mkv",
+		MediaRecognitionSourceLocal,
+	)
+	if err != nil || name != "Example.Show.S01E02.mkv" || nameRaw["engine"] != "local" || requestCount != 0 {
+		t.Fatalf("local naming crossed into MoviePilot: requests=%d name=%q raw=%#v err=%v", requestCount, name, nameRaw, err)
+	}
+	if _, err := svc.GetCategoryConfigWithSource(MediaRecognitionSourceLocal); err != nil || requestCount != 0 {
+		t.Fatalf("local category lookup crossed into MoviePilot: requests=%d err=%v", requestCount, err)
+	}
+
+	if _, _, err := svc.RecognizeFileWithSource("Example.Show.S04E02.mkv", MediaRecognitionSourceMoviePilot); err == nil || !strings.Contains(err.Error(), "deliberate failure") {
+		t.Fatalf("explicit MoviePilot source unexpectedly fell back: %v", err)
+	}
+	if requestCount == 0 {
+		t.Fatal("explicit MoviePilot source did not contact MoviePilot")
+	}
+}
+
+func TestNormalizeMediaRecognitionSource(t *testing.T) {
+	tests := map[string]string{
+		"":           MediaRecognitionSourceMoviePilot,
+		"MP":         MediaRecognitionSourceMoviePilot,
+		"moviepilot": MediaRecognitionSourceMoviePilot,
+		"local":      MediaRecognitionSourceLocal,
+		"FilmFusion": MediaRecognitionSourceLocal,
+	}
+	for input, want := range tests {
+		got, err := NormalizeMediaRecognitionSource(input)
+		if err != nil || got != want {
+			t.Fatalf("NormalizeMediaRecognitionSource(%q)=%q, %v want=%q", input, got, err, want)
+		}
+	}
+	if _, err := NormalizeMediaRecognitionSource("unknown"); err == nil {
+		t.Fatal("unknown recognition source should fail validation")
+	}
+}
+
+func TestMoviePilotRecognitionUsesFilmFusionWordsWhenConfigured(t *testing.T) {
+	var gotTitle, gotWords string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize":
+			gotTitle = r.URL.Query().Get("title")
+			gotWords = r.URL.Query().Get("custom_words")
+			_, _ = w.Write([]byte(`{"success":true,"data":{"media_info":{"media_type":"tv","title":"Example","tmdb_id":123},"meta_info":{"season_episode":"S01E02"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	local := NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil)
+	if _, err := local.SaveWords([]string{"S04 => S01", "第 <> 集 >> EP+1"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(local)
+	if _, _, err := svc.RecognizeFile("Example.S04E02.mkv"); err != nil {
+		t.Fatal(err)
+	}
+	if gotTitle != "Example.S04E02.mkv" || gotWords != "S04 => S01\n第 <> 集 >> EP+1" {
+		t.Fatalf("title=%q words=%q", gotTitle, gotWords)
+	}
+}
+
+func TestMoviePilotRecognitionUsesSavedFilmFusionCategoryConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize":
+			_, _ = w.Write([]byte(`{
+				"success":true,
+				"data":{"media_info":{
+					"media_type":"tv","title":"Example","year":"2026","tmdb_id":123,
+					"category":"MoviePilot 分类","origin_country":["CN"],"genre_ids":[18]
+				}}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	local := NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil)
+	if _, err := local.SaveCategoryConfig(`
+movie:
+  本地电影:
+tv:
+  FilmFusion 国产剧:
+    origin_country: 'CN'
+  其它剧集:
+`); err != nil {
+		t.Fatal(err)
+	}
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(local)
+
+	info, _, err := svc.RecognizeTitle("Example.S01E01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Category != "FilmFusion 国产剧" {
+		t.Fatalf("category=%q", info.Category)
+	}
+	config, err := svc.GetCategoryConfig()
+	if err != nil || len(config.TVOrder) != 2 || config.TVOrder[0] != "FilmFusion 国产剧" {
+		t.Fatalf("config=%+v err=%v", config, err)
+	}
+}
+
+func TestMoviePilotFallbackCircuitAvoidsRepeatedUnavailableRequests(t *testing.T) {
+	recognitionRequests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize_file":
+			recognitionRequests++
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	for _, input := range []string{"Show.S01E01.mkv", "Show.S01E02.mkv"} {
+		info, raw, err := svc.RecognizeFile(input)
+		if err != nil || info.Title != "Show" || raw["engine"] != "local" {
+			t.Fatalf("input=%q info=%+v raw=%#v err=%v", input, info, raw, err)
+		}
+	}
+	if recognitionRequests != 1 {
+		t.Fatalf("recognition requests=%d want=1", recognitionRequests)
 	}
 }
 

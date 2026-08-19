@@ -160,6 +160,39 @@ func TestOrganizePreviewQueuePublishesScopedEvents(t *testing.T) {
 	}
 }
 
+func TestOrganizePreviewQueuePersistsRecognitionSource(t *testing.T) {
+	db := newOrganizePreviewQueueTestDB(t)
+	queue := &OrganizePreviewQueue{db: db}
+
+	tasks, err := queue.Enqueue([]OrganizePreviewTaskInput{{
+		UserID:            7,
+		CloudDirectoryID:  8,
+		CloudStorageID:    9,
+		FolderID:          "folder-recognition-source",
+		RecognitionSource: MediaRecognitionSourceLocal,
+	}})
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("enqueue local task: tasks=%+v err=%v", tasks, err)
+	}
+	if tasks[0].RecognitionSource != MediaRecognitionSourceLocal {
+		t.Fatalf("recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceLocal)
+	}
+
+	tasks, err = queue.Enqueue([]OrganizePreviewTaskInput{{
+		UserID:            7,
+		CloudDirectoryID:  8,
+		CloudStorageID:    9,
+		FolderID:          "folder-recognition-source",
+		RecognitionSource: MediaRecognitionSourceMoviePilot,
+	}})
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("reenqueue MoviePilot task: tasks=%+v err=%v", tasks, err)
+	}
+	if tasks[0].RecognitionSource != MediaRecognitionSourceMoviePilot {
+		t.Fatalf("updated recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceMoviePilot)
+	}
+}
+
 func TestOrganizePreviewQueuePendingPositionsFollowWorkerOrder(t *testing.T) {
 	db := newOrganizePreviewQueueTestDB(t)
 	now := time.Now()

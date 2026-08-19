@@ -24,6 +24,7 @@ type OrganizePreviewTask struct {
 	Depth                    int                       `gorm:"default:0" json:"depth"`
 	MaxDepth                 int                       `gorm:"default:0" json:"max_depth"`
 	MediaType                string                    `gorm:"size:32" json:"media_type,omitempty"`
+	RecognitionSource        string                    `gorm:"size:32;not null;default:'moviepilot'" json:"recognition_source"`
 	Category                 string                    `gorm:"size:100" json:"category,omitempty"`
 	BestVersionEnabled       bool                      `gorm:"default:false" json:"best_version_enabled,omitempty"`
 	Status                   OrganizePreviewTaskStatus `gorm:"size:32;not null;index;default:'pending'" json:"status"`

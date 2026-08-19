@@ -1,6 +1,8 @@
 package service
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"film-fusion/app/config"
@@ -17,18 +19,39 @@ import (
 )
 
 const (
-	moviePilotTokenCheckInterval = 30 * time.Minute
-	moviePilotTokenSkew          = 2 * time.Minute
+	moviePilotTokenCheckInterval     = 30 * time.Minute
+	moviePilotTokenSkew              = 2 * time.Minute
+	moviePilotRequestTimeout         = 8 * time.Second
+	moviePilotLocalFallbackTTL       = 2 * time.Minute
+	MediaRecognitionSourceMoviePilot = "moviepilot"
+	MediaRecognitionSourceLocal      = "local"
 )
+
+// NormalizeMediaRecognitionSource returns the canonical recognition engine
+// used by organize requests. Empty values keep the historical MoviePilot
+// default for API compatibility.
+func NormalizeMediaRecognitionSource(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "moviepilot", "movie-pilot", "mp", "mp2":
+		return MediaRecognitionSourceMoviePilot, nil
+	case "local", "filmfusion", "film-fusion":
+		return MediaRecognitionSourceLocal, nil
+	default:
+		return "", errors.New("识别方式无效")
+	}
+}
 
 type MoviePilotService struct {
 	logger *logger.Logger
 	cfg    *config.Config
 	client *http.Client
+	local  *MediaRecognitionService
 
 	mu             sync.RWMutex
 	accessToken    string
 	tokenExpiresAt time.Time
+	fallbackUntil  time.Time
+	fallbackReason string
 
 	stopChan chan struct{}
 	wg       sync.WaitGroup
@@ -39,9 +62,14 @@ func NewMoviePilotService(cfg *config.Config, log *logger.Logger) *MoviePilotSer
 	return &MoviePilotService{
 		logger:   log,
 		cfg:      cfg,
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client:   &http.Client{Timeout: moviePilotRequestTimeout},
 		stopChan: make(chan struct{}),
 	}
+}
+
+// SetLocalMediaRecognition 为现有 MoviePilot 调用链接入 FilmFusion 本地降级识别。
+func (s *MoviePilotService) SetLocalMediaRecognition(local *MediaRecognitionService) {
+	s.local = local
 }
 
 func (s *MoviePilotService) Start() {
@@ -194,22 +222,258 @@ func (s *MoviePilotService) doGet(endpointPath string, query url.Values) ([]byte
 	return body, nil
 }
 
+type MoviePilotManualTransferRequest struct {
+	SourcePath   string
+	FileType     string
+	TmdbID       string
+	MediaType    string
+	TransferType string
+	Scrape       bool
+}
+
+type MoviePilotManualTransferResult struct {
+	Message string
+	Data    any
+}
+
+// ManualTransfer asks MoviePilot to synchronously organize one local file or
+// directory. A successful response means the transfer call has returned, so a
+// later automation node may safely remove the corresponding downloader task.
+func (s *MoviePilotService) ManualTransfer(ctx context.Context, request MoviePilotManualTransferRequest) (MoviePilotManualTransferResult, error) {
+	result := MoviePilotManualTransferResult{}
+	sourcePath := strings.TrimSpace(request.SourcePath)
+	if sourcePath == "" {
+		return result, errors.New("MoviePilot 整理源路径不能为空")
+	}
+	fileType := strings.ToLower(strings.TrimSpace(request.FileType))
+	if fileType != "file" && fileType != "dir" {
+		return result, errors.New("MoviePilot 整理源类型必须是 file 或 dir")
+	}
+
+	normalizedPath := strings.ReplaceAll(sourcePath, "\\", "/")
+	name := path.Base(strings.TrimRight(normalizedPath, "/"))
+	fileItem := map[string]any{
+		"storage": "local",
+		"path":    sourcePath,
+		"type":    fileType,
+		"name":    name,
+	}
+	if fileType == "file" {
+		fileItem["extension"] = strings.TrimPrefix(path.Ext(name), ".")
+	}
+	payload := map[string]any{
+		"fileitem": fileItem,
+		"scrape":   request.Scrape,
+	}
+	if tmdbID := strings.TrimSpace(request.TmdbID); tmdbID != "" {
+		parsed, err := strconv.ParseUint(tmdbID, 10, 64)
+		if err != nil || parsed == 0 {
+			return result, errors.New("MoviePilot 整理使用的 TMDB ID 无效")
+		}
+		payload["tmdbid"] = parsed
+	}
+	switch strings.ToLower(strings.TrimSpace(request.MediaType)) {
+	case "", "auto":
+	case "movie":
+		payload["type_name"] = "电影"
+	case "tv":
+		payload["type_name"] = "电视剧"
+	default:
+		return result, errors.New("MoviePilot 整理媒体类型必须是 auto/movie/tv")
+	}
+	if transferType := strings.TrimSpace(request.TransferType); transferType != "" {
+		payload["transfer_type"] = transferType
+	}
+
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return result, fmt.Errorf("序列化 MoviePilot 整理请求失败: %w", err)
+	}
+	requestURL := s.baseURL() + "/api/v1/transfer/manual?background=false"
+	perform := func(token string) ([]byte, int, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, requestURL, bytes.NewReader(encoded))
+		if err != nil {
+			return nil, 0, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+		client := *s.client
+		client.Timeout = 0
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer resp.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		return body, resp.StatusCode, readErr
+	}
+
+	token, err := s.GetAccessToken()
+	if err != nil {
+		return result, err
+	}
+	body, statusCode, err := perform(token)
+	if err != nil {
+		return result, fmt.Errorf("请求 MoviePilot 整理失败: %w", err)
+	}
+	if statusCode == http.StatusUnauthorized {
+		token, err = s.refreshToken()
+		if err == nil {
+			body, statusCode, err = perform(token)
+		}
+		if err != nil {
+			return result, fmt.Errorf("刷新凭据后请求 MoviePilot 整理失败: %w", err)
+		}
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		return result, fmt.Errorf("MoviePilot 整理请求失败: HTTP %d %s", statusCode, strings.TrimSpace(string(body)))
+	}
+	if err := validateMoviePilotSuccess(body); err != nil {
+		return result, err
+	}
+	var response struct {
+		Message string `json:"message"`
+		Data    any    `json:"data"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return result, fmt.Errorf("解析 MoviePilot 整理响应失败: %w", err)
+	}
+	result.Message = strings.TrimSpace(response.Message)
+	result.Data = response.Data
+	return result, nil
+}
+
 type MoviePilotCategoryRule struct {
-	GenreIDs            string `json:"genre_ids"`
-	OriginalLanguage    string `json:"original_language"`
-	OriginCountry       string `json:"origin_country"`
-	ProductionCountries string `json:"production_countries"`
-	ReleaseYear         string `json:"release_year"`
+	GenreIDs            string            `json:"genre_ids"`
+	OriginalLanguage    string            `json:"original_language"`
+	OriginCountry       string            `json:"origin_country"`
+	ProductionCountries string            `json:"production_countries"`
+	ReleaseYear         string            `json:"release_year"`
+	Extra               map[string]string `json:"-"`
 }
 
 type MoviePilotCategoryConfig struct {
-	Movie map[string]*MoviePilotCategoryRule `json:"movie"`
-	TV    map[string]*MoviePilotCategoryRule `json:"tv"`
+	Movie      map[string]*MoviePilotCategoryRule `json:"movie"`
+	TV         map[string]*MoviePilotCategoryRule `json:"tv"`
+	MovieOrder []string                           `json:"-"`
+	TVOrder    []string                           `json:"-"`
+}
+
+// UnmarshalJSON 保留 MoviePilot 分类对象在 JSON 中的书写顺序。
+func (config *MoviePilotCategoryConfig) UnmarshalJSON(data []byte) error {
+	var groups map[string]json.RawMessage
+	if err := json.Unmarshal(data, &groups); err != nil {
+		return err
+	}
+	var err error
+	config.Movie, config.MovieOrder, err = decodeMoviePilotCategoryGroup(groups["movie"])
+	if err != nil {
+		return fmt.Errorf("解析 movie 分类失败: %w", err)
+	}
+	config.TV, config.TVOrder, err = decodeMoviePilotCategoryGroup(groups["tv"])
+	if err != nil {
+		return fmt.Errorf("解析 tv 分类失败: %w", err)
+	}
+	return nil
+}
+
+func decodeMoviePilotCategoryGroup(data json.RawMessage) (map[string]*MoviePilotCategoryRule, []string, error) {
+	result := make(map[string]*MoviePilotCategoryRule)
+	if len(bytes.TrimSpace(data)) == 0 || bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		return result, nil, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, nil, err
+	}
+	if delimiter, ok := token.(json.Delim); !ok || delimiter != '{' {
+		return nil, nil, errors.New("分类分组必须是对象")
+	}
+	order := make([]string, 0)
+	for decoder.More() {
+		nameToken, err := decoder.Token()
+		if err != nil {
+			return nil, nil, err
+		}
+		name, ok := nameToken.(string)
+		if !ok {
+			return nil, nil, errors.New("分类名必须是字符串")
+		}
+		var rule *MoviePilotCategoryRule
+		if err := decoder.Decode(&rule); err != nil {
+			return nil, nil, err
+		}
+		result[name] = rule
+		order = append(order, name)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, nil, err
+	}
+	return result, order, nil
+}
+
+// UnmarshalJSON 接收 MoviePilot 允许的动态 TMDB 一级字段。
+func (rule *MoviePilotCategoryRule) UnmarshalJSON(data []byte) error {
+	type knownRule MoviePilotCategoryRule
+	var known knownRule
+	if err := json.Unmarshal(data, &known); err != nil {
+		return err
+	}
+	*rule = MoviePilotCategoryRule(known)
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	for _, field := range []string{"genre_ids", "original_language", "origin_country", "production_countries", "release_year"} {
+		delete(values, field)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	rule.Extra = make(map[string]string, len(values))
+	for field, raw := range values {
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil {
+			var scalar any
+			if err := json.Unmarshal(raw, &scalar); err != nil {
+				return err
+			}
+			value = fmt.Sprint(scalar)
+		}
+		rule.Extra[field] = value
+	}
+	return nil
 }
 
 func (s *MoviePilotService) GetCategoryConfig() (MoviePilotCategoryConfig, error) {
+	if s.local != nil {
+		if localConfig, configured, err := s.local.LoadMoviePilotCategoryConfig(); err != nil {
+			if s.logger != nil {
+				s.logger.Warnf("[media-recognition] 读取本地分类配置失败，将继续尝试 MoviePilot: %v", err)
+			}
+		} else if configured {
+			return localConfig, nil
+		}
+	}
+	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
+		s.logLocalRecognitionFallback("分类配置", fallbackErr)
+		return s.localMediaRecognitionCategoryConfig(), nil
+	}
 	body, err := s.doGet("/api/v1/media/category/config", nil)
 	if err != nil {
+		if s.local != nil {
+			s.logLocalRecognitionFallback("分类配置", err)
+			return s.localMediaRecognitionCategoryConfig(), nil
+		}
+		return MoviePilotCategoryConfig{}, err
+	}
+	if err := validateMoviePilotSuccess(body); err != nil {
+		if s.local != nil {
+			s.logLocalRecognitionFallback("分类配置", err)
+			return s.localMediaRecognitionCategoryConfig(), nil
+		}
 		return MoviePilotCategoryConfig{}, err
 	}
 
@@ -219,20 +483,50 @@ func (s *MoviePilotService) GetCategoryConfig() (MoviePilotCategoryConfig, error
 	var cfg MoviePilotCategoryConfig
 	if err := json.Unmarshal(body, &wrapper); err == nil && len(wrapper.Data) > 0 {
 		if err := json.Unmarshal(wrapper.Data, &cfg); err == nil {
+			s.clearLocalRecognitionFallback()
 			return cfg, nil
 		}
 	}
 
 	if err := json.Unmarshal(body, &cfg); err != nil {
+		if s.local != nil {
+			s.logLocalRecognitionFallback("分类配置", err)
+			return s.localMediaRecognitionCategoryConfig(), nil
+		}
 		return MoviePilotCategoryConfig{}, fmt.Errorf("解析 MoviePilot 分类配置失败: %w", err)
 	}
 
+	s.clearLocalRecognitionFallback()
 	return cfg, nil
+}
+
+// GetCategoryConfigWithSource avoids contacting MoviePilot when an organize
+// request explicitly selects FilmFusion's local recognition engine.
+func (s *MoviePilotService) GetCategoryConfigWithSource(source string) (MoviePilotCategoryConfig, error) {
+	normalized, err := NormalizeMediaRecognitionSource(source)
+	if err != nil {
+		return MoviePilotCategoryConfig{}, err
+	}
+	if normalized != MediaRecognitionSourceLocal {
+		return s.GetCategoryConfig()
+	}
+	if s.local == nil {
+		return MoviePilotCategoryConfig{}, errors.New("FilmFusion 本地识别未初始化")
+	}
+	config, configured, err := s.local.LoadMoviePilotCategoryConfig()
+	if err != nil {
+		return MoviePilotCategoryConfig{}, fmt.Errorf("读取 FilmFusion 本地分类配置失败: %w", err)
+	}
+	if configured {
+		return config, nil
+	}
+	return s.localMediaRecognitionCategoryConfig(), nil
 }
 
 type MoviePilotMediaInfo struct {
 	MediaType           string
 	Title               string
+	OriginalTitle       string
 	Year                string
 	Category            string
 	TitleYear           string
@@ -249,6 +543,7 @@ type MoviePilotMediaInfo struct {
 	OriginalLanguages   []string
 	OriginCountries     []string
 	ProductionCountries []string
+	CategoryFields      map[string][]string
 	BeginSeason         int
 	HasBeginSeason      bool
 }
@@ -276,6 +571,9 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 	if count <= 0 || count > 20 {
 		count = 8
 	}
+	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
+		return s.searchMediaLocally(keyword, count, fallbackErr)
+	}
 
 	values := url.Values{}
 	values.Set("title", keyword)
@@ -285,10 +583,10 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 
 	body, err := s.doGet("/api/v1/media/search", values)
 	if err != nil {
-		return nil, err
+		return s.searchMediaLocally(keyword, count, err)
 	}
 	if err := validateMoviePilotSuccess(body); err != nil {
-		return nil, err
+		return s.searchMediaLocally(keyword, count, err)
 	}
 
 	rawItems := extractSearchResultMaps(body)
@@ -296,6 +594,9 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 	seen := make(map[string]struct{}, len(rawItems))
 	for _, raw := range rawItems {
 		item := parseSearchResult(raw)
+		categoryInfo := parseMediaInfo(raw)
+		s.applyConfiguredLocalCategory(&categoryInfo)
+		item.Category = categoryInfo.Category
 		if strings.TrimSpace(item.TmdbID) == "" || strings.TrimSpace(item.Title) == "" {
 			continue
 		}
@@ -306,13 +607,65 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 		seen[key] = struct{}{}
 		results = append(results, item)
 	}
+	if len(results) == 0 && s.local != nil {
+		return s.searchMediaLocally(keyword, count, errors.New("MoviePilot 未返回媒体搜索结果"))
+	}
+	s.clearLocalRecognitionFallback()
 	return results, nil
 }
 
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
+	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
+		return s.recognizeMediaLocally(filePath, MediaRecognitionModeFile, fallbackErr)
+	}
+	info, raw, err := s.recognizeFileWithMoviePilot(filePath)
+	if err == nil {
+		s.clearLocalRecognitionFallback()
+		return info, raw, nil
+	}
+	return s.recognizeMediaLocally(filePath, MediaRecognitionModeFile, err)
+}
+
+// RecognizeFileWithSource uses exactly the requested recognition engine. This
+// is intentionally strict so the organize-page switch has deterministic
+// semantics; legacy callers can keep using RecognizeFile for automatic local
+// fallback.
+func (s *MoviePilotService) RecognizeFileWithSource(filePath, source string) (MoviePilotMediaInfo, map[string]any, error) {
+	normalized, err := NormalizeMediaRecognitionSource(source)
+	if err != nil {
+		return MoviePilotMediaInfo{}, nil, err
+	}
+	if normalized == MediaRecognitionSourceLocal {
+		if s.local == nil {
+			return MoviePilotMediaInfo{}, nil, errors.New("FilmFusion 本地识别未初始化")
+		}
+		return s.local.RecognizeFallback(context.Background(), filePath, MediaRecognitionModeFile)
+	}
+	info, raw, err := s.recognizeFileWithMoviePilot(filePath)
+	if err == nil {
+		s.clearLocalRecognitionFallback()
+	}
+	return info, raw, err
+}
+
+func (s *MoviePilotService) recognizeFileWithMoviePilot(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
 	values := url.Values{}
+	endpoint := "/api/v1/media/recognize_file"
 	values.Set("path", filePath)
-	return s.recognizeMedia("/api/v1/media/recognize_file", values)
+	if customWords, configured := s.localRecognitionWords(); configured {
+		endpoint = "/api/v1/media/recognize"
+		values = url.Values{}
+		values.Set("title", filePath)
+		values.Set("custom_words", customWords)
+	}
+	info, raw, err := s.recognizeMedia(endpoint, values)
+	if err != nil {
+		return MoviePilotMediaInfo{}, raw, err
+	}
+	if strings.TrimSpace(info.Title) == "" {
+		return MoviePilotMediaInfo{}, raw, errors.New("MoviePilot 未识别到媒体信息")
+	}
+	return info, raw, nil
 }
 
 // RecognizeTitle identifies a release title without treating it as a filesystem path.
@@ -321,9 +674,23 @@ func (s *MoviePilotService) RecognizeTitle(title string) (MoviePilotMediaInfo, m
 	if title == "" {
 		return MoviePilotMediaInfo{}, nil, errors.New("识别标题不能为空")
 	}
+	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
+		return s.recognizeMediaLocally(title, MediaRecognitionModeTitle, fallbackErr)
+	}
 	values := url.Values{}
 	values.Set("title", title)
-	return s.recognizeMedia("/api/v1/media/recognize", values)
+	if customWords, configured := s.localRecognitionWords(); configured {
+		values.Set("custom_words", customWords)
+	}
+	info, raw, err := s.recognizeMedia("/api/v1/media/recognize", values)
+	if err == nil && strings.TrimSpace(info.Title) != "" {
+		s.clearLocalRecognitionFallback()
+		return info, raw, nil
+	}
+	if err == nil {
+		err = errors.New("MoviePilot 未识别到媒体信息")
+	}
+	return s.recognizeMediaLocally(title, MediaRecognitionModeTitle, err)
 }
 
 func (s *MoviePilotService) recognizeMedia(endpoint string, values url.Values) (MoviePilotMediaInfo, map[string]any, error) {
@@ -338,10 +705,58 @@ func (s *MoviePilotService) recognizeMedia(endpoint string, values url.Values) (
 	dataMap := unwrapDataMap(body)
 	info := parseMediaInfo(dataMap)
 	info.BeginSeason, info.HasBeginSeason = extractBeginSeason(dataMap)
+	s.applyConfiguredLocalCategory(&info)
 	return info, dataMap, nil
 }
 
+func (s *MoviePilotService) applyConfiguredLocalCategory(info *MoviePilotMediaInfo) {
+	if s == nil || s.local == nil || info == nil {
+		return
+	}
+	category, configured, err := s.local.ApplyConfiguredCategory(*info)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warnf("[media-recognition] 应用本地分类配置失败，保留上游分类: %v", err)
+		}
+		return
+	}
+	if configured {
+		info.Category = category
+	}
+}
+
 func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map[string]any, error) {
+	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
+		return s.transferNameLocally(filePath, fallbackErr)
+	}
+	name, raw, err := s.transferNameWithMoviePilot(filePath, fileType)
+	if err == nil {
+		s.clearLocalRecognitionFallback()
+		return name, raw, nil
+	}
+	return s.transferNameLocally(filePath, err)
+}
+
+// TransferNameWithSource mirrors RecognizeFileWithSource for the naming stage.
+func (s *MoviePilotService) TransferNameWithSource(filePath, fileType, source string) (string, map[string]any, error) {
+	normalized, err := NormalizeMediaRecognitionSource(source)
+	if err != nil {
+		return "", nil, err
+	}
+	if normalized == MediaRecognitionSourceLocal {
+		if s.local == nil {
+			return "", nil, errors.New("FilmFusion 本地识别未初始化")
+		}
+		return s.local.BuildTransferName(filePath)
+	}
+	name, raw, err := s.transferNameWithMoviePilot(filePath, fileType)
+	if err == nil {
+		s.clearLocalRecognitionFallback()
+	}
+	return name, raw, err
+}
+
+func (s *MoviePilotService) transferNameWithMoviePilot(filePath, fileType string) (string, map[string]any, error) {
 	values := url.Values{}
 	values.Set("path", filePath)
 	if fileType != "" {
@@ -350,6 +765,9 @@ func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map
 
 	body, err := s.doGet("/api/v1/transfer/name", values)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := validateMoviePilotSuccess(body); err != nil {
 		return "", nil, err
 	}
 
@@ -363,7 +781,148 @@ func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map
 		}
 	}
 
+	if strings.TrimSpace(name) == "" {
+		return "", dataMap, errors.New("MoviePilot 未返回重命名结果")
+	}
 	return name, dataMap, nil
+}
+
+func (s *MoviePilotService) localRecognitionWords() (string, bool) {
+	if s.local == nil {
+		return "", false
+	}
+	words, configured, err := s.local.LoadWords()
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warnf("[media-recognition] 读取本地识别词失败，继续使用 MoviePilot 配置: %v", err)
+		}
+		return "", false
+	}
+	if !configured {
+		return "", false
+	}
+	if len(words) == 0 {
+		// MoviePilot 将空 custom_words 当作未传入并回退到自己的全局词表；
+		// 用注释占位才能表达 FilmFusion 已显式保存空词表。
+		return "# FilmFusion empty word list", true
+	}
+	return strings.Join(words, "\n"), true
+}
+
+func (s *MoviePilotService) recognizeMediaLocally(input, mode string, upstreamErr error) (MoviePilotMediaInfo, map[string]any, error) {
+	if s.local == nil {
+		return MoviePilotMediaInfo{}, nil, upstreamErr
+	}
+	info, raw, localErr := s.local.RecognizeFallback(context.Background(), input, mode)
+	if localErr != nil {
+		return MoviePilotMediaInfo{}, raw, fmt.Errorf("MoviePilot 识别失败: %v；本地识别也失败: %w", upstreamErr, localErr)
+	}
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	raw["fallback_reason"] = upstreamErr.Error()
+	s.logLocalRecognitionFallback("媒体识别", upstreamErr)
+	return info, raw, nil
+}
+
+func (s *MoviePilotService) searchMediaLocally(keyword string, count int, upstreamErr error) ([]MoviePilotSearchResult, error) {
+	if s.local == nil {
+		return nil, upstreamErr
+	}
+	results, localErr := s.local.SearchMedia(context.Background(), keyword, count)
+	if localErr != nil {
+		return nil, fmt.Errorf("MoviePilot 搜索失败: %v；本地搜索也失败: %w", upstreamErr, localErr)
+	}
+	s.logLocalRecognitionFallback("媒体搜索", upstreamErr)
+	return results, nil
+}
+
+func (s *MoviePilotService) transferNameLocally(filePath string, upstreamErr error) (string, map[string]any, error) {
+	if s.local == nil {
+		return "", nil, upstreamErr
+	}
+	name, raw, localErr := s.local.BuildTransferName(filePath)
+	if localErr != nil {
+		return "", raw, fmt.Errorf("MoviePilot 重命名失败: %v；本地重命名也失败: %w", upstreamErr, localErr)
+	}
+	if raw == nil {
+		raw = map[string]any{}
+	}
+	raw["fallback_reason"] = upstreamErr.Error()
+	s.logLocalRecognitionFallback("文件命名", upstreamErr)
+	return name, raw, nil
+}
+
+func (s *MoviePilotService) logLocalRecognitionFallback(action string, err error) {
+	s.markLocalRecognitionFallback(err)
+	if s.logger != nil {
+		s.logger.Warnf("[media-recognition] MoviePilot %s不可用，已切换 FilmFusion 本地能力: %v", action, err)
+	}
+}
+
+func (s *MoviePilotService) activeLocalRecognitionFallback() (error, bool) {
+	if s.local == nil {
+		return nil, false
+	}
+	s.mu.RLock()
+	until := s.fallbackUntil
+	reason := s.fallbackReason
+	s.mu.RUnlock()
+	if until.IsZero() || !time.Now().Before(until) {
+		return nil, false
+	}
+	return fmt.Errorf("MoviePilot 暂停重试至 %s: %s", until.Format(time.RFC3339), reason), true
+}
+
+func (s *MoviePilotService) markLocalRecognitionFallback(err error) {
+	if err == nil || !shouldOpenMoviePilotFallbackCircuit(err) {
+		return
+	}
+	s.mu.Lock()
+	s.fallbackUntil = time.Now().Add(moviePilotLocalFallbackTTL)
+	s.fallbackReason = err.Error()
+	s.mu.Unlock()
+}
+
+func (s *MoviePilotService) clearLocalRecognitionFallback() {
+	s.mu.Lock()
+	s.fallbackUntil = time.Time{}
+	s.fallbackReason = ""
+	s.mu.Unlock()
+}
+
+func shouldOpenMoviePilotFallbackCircuit(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	if strings.Contains(message, "moviepilot 暂停重试至") {
+		return false
+	}
+	for _, businessMessage := range []string{"未识别到媒体", "未返回媒体搜索结果", "未返回重命名结果"} {
+		if strings.Contains(message, strings.ToLower(businessMessage)) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *MoviePilotService) localMediaRecognitionCategoryConfig() MoviePilotCategoryConfig {
+	if s != nil && s.local != nil {
+		if config, _, err := s.local.LoadMoviePilotCategoryConfig(); err == nil {
+			return config
+		} else if s.logger != nil {
+			s.logger.Warnf("[media-recognition] 加载本地分类配置失败，使用内置默认值: %v", err)
+		}
+	}
+	config, err := mediaRecognitionCategoryConfigFromYAML(DefaultMediaRecognitionCategoryYAML)
+	if err == nil {
+		return config
+	}
+	return MoviePilotCategoryConfig{
+		Movie: map[string]*MoviePilotCategoryRule{"电影": nil}, MovieOrder: []string{"电影"},
+		TV: map[string]*MoviePilotCategoryRule{"电视剧": nil}, TVOrder: []string{"电视剧"},
+	}
 }
 
 func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transferName, originalName string) string {
@@ -417,125 +976,160 @@ func SelectMoviePilotCategory(mediaType string, info MoviePilotMediaInfo, cfg Mo
 	}
 
 	var categories map[string]*MoviePilotCategoryRule
+	var order []string
 	if normalizedType == "tv" {
 		categories = cfg.TV
+		order = cfg.TVOrder
 	} else {
 		categories = cfg.Movie
+		order = cfg.MovieOrder
 	}
 
 	if len(categories) == 0 {
 		return ""
 	}
 
-	keys := make([]string, 0, len(categories))
-	for k := range categories {
-		keys = append(keys, k)
-	}
-	sortStrings(keys)
-
-	bestName := ""
-	bestScore := -1
-	fallback := ""
-
+	keys := orderedMoviePilotCategoryNames(categories, order)
 	for _, name := range keys {
 		rule := categories[name]
 		if rule == nil {
-			if fallback == "" {
-				fallback = name
-			}
-			continue
+			return name
 		}
-
-		match, score := matchCategoryRule(info, *rule)
-		if match && score > bestScore {
-			bestScore = score
-			bestName = name
+		if matchCategoryRule(info, *rule) {
+			return name
 		}
 	}
-
-	if bestName != "" {
-		return bestName
-	}
-	if fallback != "" {
-		return fallback
-	}
-	return keys[0]
+	return ""
 }
 
-func matchCategoryRule(info MoviePilotMediaInfo, rule MoviePilotCategoryRule) (bool, int) {
-	score := 0
+func orderedMoviePilotCategoryNames(categories map[string]*MoviePilotCategoryRule, preferred []string) []string {
+	result := make([]string, 0, len(categories))
+	seen := make(map[string]struct{}, len(categories))
+	for _, name := range preferred {
+		if _, exists := categories[name]; !exists {
+			continue
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+	rest := make([]string, 0, len(categories)-len(result))
+	for name := range categories {
+		if _, exists := seen[name]; !exists {
+			rest = append(rest, name)
+		}
+	}
+	sortStrings(rest)
+	return append(result, rest...)
+}
+
+func matchCategoryRule(info MoviePilotMediaInfo, rule MoviePilotCategoryRule) bool {
 	if rule.GenreIDs != "" {
-		score++
-		if !hasAny(normalizeList(rule.GenreIDs), info.GenreIDs) {
-			return false, 0
+		if !matchMoviePilotCategoryCondition(rule.GenreIDs, info.GenreIDs) {
+			return false
 		}
 	}
 	if rule.OriginalLanguage != "" {
-		score++
-		if !hasAny(normalizeList(rule.OriginalLanguage), info.OriginalLanguages) {
-			return false, 0
+		if !matchMoviePilotCategoryCondition(rule.OriginalLanguage, info.OriginalLanguages) {
+			return false
 		}
 	}
 	if rule.OriginCountry != "" {
-		score++
-		if !hasAny(normalizeList(rule.OriginCountry), info.OriginCountries) {
-			return false, 0
+		if !matchMoviePilotCategoryCondition(rule.OriginCountry, info.OriginCountries) {
+			return false
 		}
 	}
 	if rule.ProductionCountries != "" {
-		score++
-		if !hasAny(normalizeList(rule.ProductionCountries), info.ProductionCountries) {
-			return false, 0
+		if !matchMoviePilotCategoryCondition(rule.ProductionCountries, info.ProductionCountries) {
+			return false
 		}
 	}
 	if rule.ReleaseYear != "" {
-		score++
-		if !matchReleaseYear(rule.ReleaseYear, info.Year) {
-			return false, 0
+		if !matchMoviePilotCategoryCondition(rule.ReleaseYear, compactMediaRecognitionValues(info.Year)) {
+			return false
 		}
 	}
-	return true, score
+	for field, value := range rule.Extra {
+		dataValues := info.CategoryFields[field]
+		if len(dataValues) == 0 {
+			dataValues = info.CategoryFields[strings.ToLower(field)]
+		}
+		if !matchMoviePilotCategoryCondition(value, dataValues) {
+			return false
+		}
+	}
+	return true
 }
 
-func matchReleaseYear(rule, year string) bool {
-	rule = strings.TrimSpace(rule)
-	year = strings.TrimSpace(year)
-	if rule == "" || year == "" {
+func matchMoviePilotCategoryCondition(rule string, dataValues []string) bool {
+	if strings.TrimSpace(rule) == "" {
+		return true
+	}
+	if len(dataValues) == 0 {
+		return false
+	}
+	data := make(map[string]struct{}, len(dataValues))
+	for _, value := range dataValues {
+		if value = strings.ToUpper(strings.TrimSpace(value)); value != "" {
+			data[value] = struct{}{}
+		}
+	}
+	if len(data) == 0 {
 		return false
 	}
 
-	if strings.Contains(rule, "-") {
-		parts := strings.Split(rule, "-")
-		if len(parts) != 2 {
-			return false
+	positive := make([]string, 0)
+	negative := make([]string, 0)
+	for _, raw := range strings.Split(rule, ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
 		}
-		start, _ := strconv.Atoi(strings.TrimSpace(parts[0]))
-		end, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-		y, _ := strconv.Atoi(year)
-		if start == 0 || end == 0 || y == 0 {
-			return false
-		}
-		return y >= start && y <= end
-	}
-
-	for _, val := range normalizeList(rule) {
-		if val == year {
-			return true
+		inverted := strings.HasPrefix(raw, "!")
+		raw = strings.TrimPrefix(raw, "!")
+		values := expandMoviePilotCategoryValue(raw)
+		if inverted {
+			negative = append(negative, values...)
+		} else {
+			positive = append(positive, values...)
 		}
 	}
-	return false
-}
-
-func hasAny(ruleValues []string, dataValues []string) bool {
-	if len(ruleValues) == 0 || len(dataValues) == 0 {
+	if len(positive) > 0 && !categoryValueIntersects(positive, data) {
 		return false
 	}
-	set := make(map[string]struct{}, len(dataValues))
-	for _, v := range dataValues {
-		set[strings.ToLower(strings.TrimSpace(v))] = struct{}{}
+	if len(negative) > 0 && categoryValueIntersects(negative, data) {
+		return false
 	}
-	for _, r := range ruleValues {
-		if _, ok := set[strings.ToLower(strings.TrimSpace(r))]; ok {
+	return true
+}
+
+func expandMoviePilotCategoryValue(value string) []string {
+	value = strings.TrimSpace(value)
+	if !strings.Contains(value, "-") {
+		return compactMediaRecognitionValues(strings.ToUpper(value))
+	}
+	parts := strings.SplitN(value, "-", 2)
+	startText, endText := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	start, startErr := strconv.Atoi(startText)
+	end, endErr := strconv.Atoi(endText)
+	if startErr != nil || endErr != nil {
+		return compactMediaRecognitionValues(strings.ToUpper(startText), strings.ToUpper(endText))
+	}
+	if start > end || end-start > 10000 {
+		return nil
+	}
+	result := make([]string, 0, end-start+1)
+	for current := start; current <= end; current++ {
+		result = append(result, strconv.Itoa(current))
+	}
+	return result
+}
+
+func categoryValueIntersects(values []string, data map[string]struct{}) bool {
+	for _, value := range values {
+		if _, exists := data[strings.ToUpper(strings.TrimSpace(value))]; exists {
 			return true
 		}
 	}
@@ -713,6 +1307,10 @@ func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {
 	if info.Title == "" {
 		info.Title = extractString(data, "title", "name", "original_title", "originalTitle")
 	}
+	info.OriginalTitle = extractString(base, "original_title", "originalTitle", "original_name", "originalName")
+	if info.OriginalTitle == "" {
+		info.OriginalTitle = extractString(data, "original_title", "originalTitle", "original_name", "originalName")
+	}
 
 	info.TitleYear = extractString(base, "title_year", "titleYear")
 	if info.TitleYear == "" {
@@ -766,7 +1364,47 @@ func parseMediaInfo(data map[string]any) MoviePilotMediaInfo {
 	if len(info.ProductionCountries) == 0 {
 		info.ProductionCountries = extractStringSlice(data, "production_countries", "productionCountries")
 	}
+	info.CategoryFields = extractMoviePilotCategoryFields(base)
 	return info
+}
+
+func extractMoviePilotCategoryFields(data map[string]any) map[string][]string {
+	fields := make(map[string][]string, len(data))
+	for field, raw := range data {
+		values := moviePilotCategoryScalarValues(raw)
+		if len(values) == 0 {
+			continue
+		}
+		fields[field] = values
+		fields[strings.ToLower(field)] = values
+	}
+	return fields
+}
+
+func moviePilotCategoryScalarValues(raw any) []string {
+	switch value := raw.(type) {
+	case string:
+		return compactMediaRecognitionValues(value)
+	case json.Number:
+		return compactMediaRecognitionValues(value.String())
+	case float64:
+		return compactMediaRecognitionValues(strconv.FormatFloat(value, 'f', -1, 64))
+	case bool:
+		return []string{strconv.FormatBool(value)}
+	case []any:
+		values := make([]string, 0, len(value))
+		for _, item := range value {
+			values = append(values, moviePilotCategoryScalarValues(item)...)
+		}
+		return values
+	case map[string]any:
+		for _, key := range []string{"iso_3166_1", "id", "name", "value"} {
+			if nested := moviePilotCategoryScalarValues(value[key]); len(nested) > 0 {
+				return nested
+			}
+		}
+	}
+	return nil
 }
 
 func extractYear(data map[string]any) string {

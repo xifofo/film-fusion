@@ -38,10 +38,6 @@ emby:
   enabled: false                     # 尚未配置 Emby 时先关闭
 ```
 
-在 Compose 的 `rss-generator-worker.environment` 中手工填写至少 32 个字符的 `WORKER_AUTH_TOKEN`。首次启动后，登录 FilmFusion，在“系统设置 → RSS 生成器”中填写完全相同的 Token；两边不一致时 Worker 会拒绝请求。没有 HTTPS 域名时，保持 `rss_generator.public_base_url` 为空即可。
-
-RSS Feed 使用统一地址 `/rss/{feedPublicID}.xml`（或 `.atom`）：局域网来源可直接订阅，公网来源必须使用管理页生成的 `?token=...` 地址。订阅 Token 与 RSS Worker 内部 Token 相互独立。
-
 3. **修改挂载路径**
 
 如需访问宿主机媒体目录，新建 `docker-compose.override.yml`：
@@ -58,7 +54,6 @@ services:
 ```bash
 docker compose config
 docker compose pull film-fusion
-docker compose build --pull rss-generator-worker
 docker compose up -d --no-build
 ```
 
@@ -83,6 +78,8 @@ JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工�
 115 默认 App 与浏览器 UA 首次从上述 YAML 导入，之后只保存在数据库并通过系统设置维护；UA 暂未接入请求。
 
 通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、RSS 命中和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。
+
+RSS 自动化可直接订阅外部 RSS/Atom 地址；需要把不提供 Feed 的网站转换为 RSS 时，可使用独立部署的 RSSHub。
 
 ### Emby 集成配置
 ```yaml
@@ -152,7 +149,6 @@ docker compose restart
 # 更新应用
 git pull --ff-only
 docker compose pull film-fusion
-docker compose build --pull rss-generator-worker
 docker compose up -d --no-build --remove-orphans
 
 # 停止服务

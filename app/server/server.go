@@ -17,32 +17,32 @@ import (
 
 // Server 表示 HTTP 服务器
 type Server struct {
-	Config                 *config.Config
-	Logger                 *logger.Logger
-	gin                    *gin.Engine
-	http                   *http.Server
-	tokenRefreshService    *service.TokenRefreshService
-	hdhiveRefreshService   *service.HDHiveTokenRefreshService
-	web115KeepAliveService *service.Web115KeepAliveService
-	download115Service     *service.Download115Service
-	moviePilotService      *service.MoviePilotService
-	tmdbService            *service.TMDBService
-	embyCoverService       *service.EmbyCoverService
-	embySortNameService    *service.EmbySortNameService
-	embyStatsService       *service.EmbyStatsService
-	embyMissingService     *service.EmbyMissingService
-	balanceCleanupSvc      *service.BalanceCleanupService
-	embyClient             *embyhelper.EmbyClient
-	organizeLogCleaner     *service.OrganizeLogCleaner
-	organizePreviewQueue   *service.OrganizePreviewQueue
-	embyProxyServer        *EmbyProxyServer
-	embyLoginProtection    *service.EmbyLoginProtection
-	appLoginProtection     *service.EmbyLoginProtection
-	notificationService    *service.NotificationService
-	rssMonitorService      *service.RSSMonitorService
-	rssAutomationService   *service.RSSAutomationService
-	rssGeneratorService    *service.RSSGeneratorService
-	taskQueue              *service.PersistentTaskQueue
+	Config                  *config.Config
+	Logger                  *logger.Logger
+	gin                     *gin.Engine
+	http                    *http.Server
+	tokenRefreshService     *service.TokenRefreshService
+	hdhiveRefreshService    *service.HDHiveTokenRefreshService
+	web115KeepAliveService  *service.Web115KeepAliveService
+	download115Service      *service.Download115Service
+	moviePilotService       *service.MoviePilotService
+	mediaRecognitionService *service.MediaRecognitionService
+	tmdbService             *service.TMDBService
+	embyCoverService        *service.EmbyCoverService
+	embySortNameService     *service.EmbySortNameService
+	embyStatsService        *service.EmbyStatsService
+	embyMissingService      *service.EmbyMissingService
+	versionCheckHandler     *handler.EmbyVersionCheckHandler
+	balanceCleanupSvc       *service.BalanceCleanupService
+	embyClient              *embyhelper.EmbyClient
+	organizeLogCleaner      *service.OrganizeLogCleaner
+	organizePreviewQueue    *service.OrganizePreviewQueue
+	embyProxyServer         *EmbyProxyServer
+	embyLoginProtection     *service.EmbyLoginProtection
+	appLoginProtection      *service.EmbyLoginProtection
+	notificationService     *service.NotificationService
+	rssAutomationService    *service.RSSAutomationService
+	taskQueue               *service.PersistentTaskQueue
 }
 
 // NewServer 创建一个新的 Server 实例
@@ -53,6 +53,8 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	download115Service := service.NewDownload115Service(log, cfg.Server.Download115Concurrency)
 	moviePilotService := service.NewMoviePilotService(cfg, log)
 	tmdbService := service.NewTMDBService(cfg, log)
+	mediaRecognitionService := service.NewMediaRecognitionService(database.GetDB(), tmdbService, log)
+	moviePilotService.SetLocalMediaRecognition(mediaRecognitionService)
 
 	embyClient := embyhelper.New(cfg)
 
@@ -79,6 +81,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
 	embyMissingService := service.NewEmbyMissingService(cfg, log, embyClient)
+	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(log)
 	notificationService := service.NewNotificationService(cfg, log)
 
 	s := &Server{
@@ -87,34 +90,28 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 			Addr:    ":" + cfg.Server.Port,
 			Handler: router,
 		},
-		Config:                 cfg,
-		Logger:                 log,
-		tokenRefreshService:    service.NewTokenRefreshService(log),
-		hdhiveRefreshService:   service.NewHDHiveTokenRefreshService(cfg, log),
-		web115KeepAliveService: service.NewWeb115KeepAliveService(cfg, log, notificationService),
-		download115Service:     download115Service,
-		moviePilotService:      moviePilotService,
-		tmdbService:            tmdbService,
-		embyCoverService:       embyCoverService,
-		embySortNameService:    embySortNameService,
-		embyStatsService:       embyStatsService,
-		embyMissingService:     embyMissingService,
-		balanceCleanupSvc:      service.NewBalanceCleanupService(log),
-		embyClient:             embyClient,
-		organizeLogCleaner:     service.NewOrganizeLogCleaner(log, 0, 0),
-		notificationService:    notificationService,
-		taskQueue:              taskQueue,
+		Config:                  cfg,
+		Logger:                  log,
+		tokenRefreshService:     service.NewTokenRefreshService(log),
+		hdhiveRefreshService:    service.NewHDHiveTokenRefreshService(cfg, log),
+		web115KeepAliveService:  service.NewWeb115KeepAliveService(cfg, log, notificationService),
+		download115Service:      download115Service,
+		moviePilotService:       moviePilotService,
+		mediaRecognitionService: mediaRecognitionService,
+		tmdbService:             tmdbService,
+		embyCoverService:        embyCoverService,
+		embySortNameService:     embySortNameService,
+		embyStatsService:        embyStatsService,
+		embyMissingService:      embyMissingService,
+		versionCheckHandler:     embyVersionCheckHandler,
+		balanceCleanupSvc:       service.NewBalanceCleanupService(log),
+		embyClient:              embyClient,
+		organizeLogCleaner:      service.NewOrganizeLogCleaner(log, 0, 0),
+		notificationService:     notificationService,
+		taskQueue:               taskQueue,
 	}
-	s.rssMonitorService = service.NewRSSMonitorService(cfg, log, s.notificationService, s.moviePilotService)
-	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService, s.moviePilotService, s.rssMonitorService)
-	rssGeneratorService, err := service.NewRSSGeneratorService(database.GetDB(), log, cfg.RSSGenerator)
-	if err != nil {
-		// Stored request credentials cannot be used safely without the dedicated
-		// encryption key. Fail closed instead of starting a partially working
-		// public feed endpoint.
-		log.Fatalf("初始化 RSS 生成器失败: %v", err)
-	}
-	s.rssGeneratorService = rssGeneratorService
+	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService, s.moviePilotService)
+	s.rssAutomationService.SetLocalMediaRecognition(s.mediaRecognitionService)
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.notificationService)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.notificationService)
 
@@ -137,15 +134,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 func newApplicationRouter() *gin.Engine {
 	router := gin.New()
-	router.Use(
-		gin.LoggerWithConfig(gin.LoggerConfig{Skip: func(c *gin.Context) bool {
-			// A public subscription token is a credential. Gin's default logger
-			// includes the full path and query string, so do not write these
-			// requests to the generic access log.
-			return strings.HasPrefix(c.Request.URL.Path, "/rss/")
-		}}),
-		gin.Recovery(),
-	)
+	router.Use(gin.Logger(), gin.Recovery())
 	return router
 }
 
@@ -185,8 +174,8 @@ func (s *Server) Start() error {
 	// 启动 Emby 缺集定时扫描调度
 	s.embyMissingService.Start()
 
-	// 启动 RSS 增量监控调度
-	s.rssMonitorService.Start()
+	// 启动 Emby 本地多版本定时检查调度
+	s.versionCheckHandler.Start()
 
 	// 启动独立的 RSS 自动化流程调度
 	s.rssAutomationService.Start()
@@ -237,8 +226,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.embyMissingService.Stop()
 	}
 
-	if s.rssMonitorService != nil {
-		s.rssMonitorService.Stop()
+	if s.versionCheckHandler != nil {
+		s.versionCheckHandler.Stop()
 	}
 
 	if s.rssAutomationService != nil {
@@ -289,15 +278,12 @@ func (s *Server) setupRoutes() {
 	// 创建处理器实例
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
-	appConfigHandler.SetRSSGeneratorService(s.rssGeneratorService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
-	rssMonitorHandler := handler.NewRSSMonitorHandler(s.rssMonitorService)
 	rssAutomationHandler := handler.NewRSSAutomationHandler(s.rssAutomationService)
-	rssGeneratorHandler := handler.NewRSSGeneratorHandler(s.rssGeneratorService, s.Config)
-	systemInfoHandler := handler.NewSystemInfoHandler(s.rssGeneratorService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
+	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService)
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
@@ -319,7 +305,6 @@ func (s *Server) setupRoutes() {
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler(s.embyLoginProtection)
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
-	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(s.Logger)
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
 	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger, s.hdhiveRefreshService)
@@ -334,11 +319,7 @@ func (s *Server) setupRoutes() {
 	api.GET("/public-config", appConfigHandler.GetPublic)
 	api.GET("/public-assets/login-background/:filename", appConfigHandler.GetLoginBackground)
 	api.GET("/public-assets/login-background-emby/:itemID", appConfigHandler.GetEmbyLoginBackground)
-
-	// LAN clients may use the feed URL directly. Requests resolved to any other
-	// network must provide a dedicated, revocable read-only token in the query.
-	// This route must remain outside the administrator JWT middleware.
-	s.gin.GET("/rss/:feed", rssGeneratorHandler.PublicFeed)
+	api.GET("/public-assets/avatar/:filename", authHandler.GetAvatar)
 
 	// 认证相关路由（不需要JWT验证）
 	auth := api.Group("/auth")
@@ -370,7 +351,8 @@ func (s *Server) setupRoutes() {
 	{
 		// 用户相关
 		protected.GET("/me", authHandler.Me)
-		protected.GET("/system-info", systemInfoHandler.Get)
+		protected.PUT("/me", authHandler.UpdateMe)
+		protected.POST("/me/avatar", authHandler.UploadAvatar)
 
 		// 系统配置相关路由
 		// 应用配置（config.yaml 在线编辑 + 热重载）
@@ -381,25 +363,10 @@ func (s *Server) setupRoutes() {
 		// 旧版前端兼容入口。
 		protected.POST("/telegram/test", notificationHandler.TestTelegram)
 
-		rssMonitor := protected.Group("/rss-monitor")
-		{
-			rssMonitor.GET("", rssMonitorHandler.Dashboard)
-			rssMonitor.PUT("/settings", rssMonitorHandler.UpdateSettings)
-			rssMonitor.POST("/sources", rssMonitorHandler.CreateSource)
-			rssMonitor.PUT("/sources/:id", rssMonitorHandler.UpdateSource)
-			rssMonitor.DELETE("/sources/:id", rssMonitorHandler.DeleteSource)
-			rssMonitor.POST("/refresh", rssMonitorHandler.Refresh)
-			rssMonitor.POST("/rules", rssMonitorHandler.CreateRule)
-			rssMonitor.PUT("/rules/:id", rssMonitorHandler.UpdateRule)
-			rssMonitor.DELETE("/rules/:id", rssMonitorHandler.DeleteRule)
-			rssMonitor.POST("/rules/test", rssMonitorHandler.TestRule)
-		}
-
 		rssAutomation := protected.Group("/rss-automation")
 		{
 			rssAutomation.GET("", rssAutomationHandler.Dashboard)
 			rssAutomation.GET("/node-protocols", rssAutomationHandler.NodeProtocols)
-			rssAutomation.POST("/legacy-migration", rssAutomationHandler.MigrateLegacyMonitor)
 			rssAutomation.POST("/automations", rssAutomationHandler.CreateAutomation)
 			rssAutomation.PATCH("/automations/:id/enabled", rssAutomationHandler.SetAutomationEnabled)
 			rssAutomation.DELETE("/automations/:id", rssAutomationHandler.DeleteAutomation)
@@ -411,6 +378,7 @@ func (s *Server) setupRoutes() {
 			rssAutomation.GET("/workflows/:id/manual-candidates", rssAutomationHandler.ListManualCandidates)
 			rssAutomation.POST("/workflows/:id/manual-runs", rssAutomationHandler.CreateManualRuns)
 			rssAutomation.GET("/targets", rssAutomationHandler.ListTargets)
+			rssAutomation.GET("/targets/status", rssAutomationHandler.ListTargetStatuses)
 			rssAutomation.POST("/targets", rssAutomationHandler.CreateTarget)
 			rssAutomation.PUT("/targets/:id", rssAutomationHandler.UpdateTarget)
 			rssAutomation.DELETE("/targets/:id", rssAutomationHandler.DeleteTarget)
@@ -426,27 +394,11 @@ func (s *Server) setupRoutes() {
 		downloaders := protected.Group("/downloaders")
 		{
 			downloaders.GET("", rssAutomationHandler.ListTargets)
+			downloaders.GET("/status", rssAutomationHandler.ListTargetStatuses)
 			downloaders.POST("", rssAutomationHandler.CreateTarget)
 			downloaders.PUT("/:id", rssAutomationHandler.UpdateTarget)
 			downloaders.DELETE("/:id", rssAutomationHandler.DeleteTarget)
 			downloaders.POST("/:id/test", rssAutomationHandler.TestTarget)
-		}
-
-		rssGenerator := protected.Group("/rss-generator")
-		{
-			rssGenerator.GET("/dashboard", rssGeneratorHandler.Dashboard)
-			rssGenerator.GET("/health", rssGeneratorHandler.Health)
-			rssGenerator.GET("/feeds", rssGeneratorHandler.ListFeeds)
-			rssGenerator.POST("/feeds", rssGeneratorHandler.CreateFeed)
-			rssGenerator.POST("/preview", rssGeneratorHandler.Preview)
-			rssGenerator.GET("/feeds/:id", rssGeneratorHandler.GetFeed)
-			rssGenerator.PUT("/feeds/:id", rssGeneratorHandler.UpdateFeed)
-			rssGenerator.DELETE("/feeds/:id", rssGeneratorHandler.DeleteFeed)
-			rssGenerator.POST("/feeds/:id/preview", rssGeneratorHandler.PreviewSaved)
-			rssGenerator.GET("/feeds/:id/tokens", rssGeneratorHandler.ListTokens)
-			rssGenerator.POST("/feeds/:id/tokens", rssGeneratorHandler.CreateToken)
-			rssGenerator.POST("/feeds/:id/tokens/:token_id/rotate", rssGeneratorHandler.RotateToken)
-			rssGenerator.DELETE("/feeds/:id/tokens/:token_id", rssGeneratorHandler.RevokeToken)
 		}
 
 		config := protected.Group("/config")
@@ -554,6 +506,17 @@ func (s *Server) setupRoutes() {
 			downloadQueue.DELETE("/failed", downloadQueueHandler.ClearFailed)
 			downloadQueue.POST("/:id/retry", downloadQueueHandler.Retry)
 			downloadQueue.DELETE("/:id", downloadQueueHandler.Remove)
+		}
+
+		// FilmFusion 本地识别词、媒体分类配置与识别测试。
+		mediaRecognition := protected.Group("/media-recognition")
+		{
+			mediaRecognition.GET("/words", mediaRecognitionHandler.GetWords)
+			mediaRecognition.PUT("/words", mediaRecognitionHandler.UpdateWords)
+			mediaRecognition.GET("/category-config", mediaRecognitionHandler.GetCategoryConfig)
+			mediaRecognition.POST("/category-config/validate", mediaRecognitionHandler.ValidateCategoryConfig)
+			mediaRecognition.PUT("/category-config", mediaRecognitionHandler.UpdateCategoryConfig)
+			mediaRecognition.POST("/test", mediaRecognitionHandler.Test)
 		}
 
 		// 整理文件相关路由
@@ -689,8 +652,10 @@ func (s *Server) setupRoutes() {
 		// Emby 本地媒体多版本检查（按云路径映射扫描本地目录）
 		embyVersionCheck := protected.Group("/emby-version-check")
 		{
-			embyVersionCheck.POST("/scan", embyVersionCheckHandler.Scan)
-			embyVersionCheck.GET("/status", embyVersionCheckHandler.Status)
+			embyVersionCheck.POST("/scan", s.versionCheckHandler.Scan)
+			embyVersionCheck.GET("/status", s.versionCheckHandler.Status)
+			embyVersionCheck.GET("/setting", s.versionCheckHandler.GetSetting)
+			embyVersionCheck.PUT("/setting", s.versionCheckHandler.UpdateSetting)
 		}
 
 		// Emby 图片尺寸/质量控制与真实图片对比测试

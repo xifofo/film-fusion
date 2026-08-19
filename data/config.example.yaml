@@ -6,7 +6,7 @@ server:
   cookie_115_default_app: "alipaymini" # 仅首次初始化数据库时导入；之后在系统设置中维护
   web_115_user_agent: ""       # 仅首次初始化数据库时导入；之后在系统设置中维护
   process_new_media: false     # 是否处理新增媒体事件（通过webhook）
-  # FilmFusion 管理后台登录防爆破与 RSS 局域网免 Token 共用真实来源 IP 解析。
+  # FilmFusion 管理后台登录防爆破使用该配置解析真实来源 IP。
   # 直连时 trusted_proxy_cidrs 保持为空；经过代理时仅填写实际代理 IP/CIDR。
   security:
     enabled: true
@@ -36,15 +36,6 @@ webhook:
   clouddrive2:
     enabled: false
     token: ""  # openssl rand -hex 32
-
-# RSS 生成器的抓取执行面。Compose 会覆盖 worker_url；首次启动后请在
-# 「系统设置 → RSS 生成器」填写与 Worker WORKER_AUTH_TOKEN 相同的值。
-rss_generator:
-  worker_url: "http://127.0.0.1:8787"
-  worker_token: ""             # 至少 32 个字符；后台读取时不会回显明文
-  public_base_url: ""          # 留空返回相对地址，管理页会按当前访问域名展示
-  request_timeout_seconds: 90
-  secret_key_file: "data/rss-generator.key" # Cookie/代理等敏感字段的本地 AES 密钥（0600）
 
 notifications:
   instance_name: "FilmFusion"

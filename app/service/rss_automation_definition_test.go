@@ -248,6 +248,8 @@ func TestRSSAutomationNodeMaxAttemptsKeepsSideEffectsSingleAttempt(t *testing.T)
 		{name: "organize", node: RSSAutomationNode{Type: RSSAutomationNodeOrganizeStrm}, want: 1},
 		{name: "strm regenerate", node: RSSAutomationNode{Type: RSSAutomationNodeStrmRegenerate}, want: 1},
 		{name: "http request", node: RSSAutomationNode{Type: RSSAutomationNodeHTTPRequest}, want: 1},
+		{name: "MP2 transfer", node: RSSAutomationNode{Type: RSSAutomationNodeMoviePilotTransfer}, want: 1},
+		{name: "qBittorrent delete", node: RSSAutomationNode{Type: RSSAutomationNodeDeleteQBittorrent}, want: 1},
 		{name: "qBittorrent", node: RSSAutomationNode{Type: RSSAutomationNodeQBittorrent}, want: 3},
 		{name: "explicit", node: RSSAutomationNode{Type: RSSAutomationNodeQBittorrent, MaxAttempts: 2}, want: 2},
 	}
@@ -316,6 +318,82 @@ func TestValidateRSSAutomationDefinitionAllowsMoviePilotTitleBeforeDownload(t *t
 	}
 }
 
+func TestValidateRSSAutomationDefinitionAllowsFilmFusionTitleRecognitionAnywhere(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "local", Type: RSSAutomationNodeFilmFusionRecognize, Config: map[string]any{
+				"recognition_mode": "title", "input": "$item.title", "lookup_tmdb": true,
+			}},
+			{ID: "end_success", Type: RSSAutomationNodeEnd},
+			{ID: "end_failure", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "local"},
+			{ID: "e2", Source: "local", SourcePort: "success", Target: "end_success"},
+			{ID: "e3", Source: "local", SourcePort: "failure", Target: "end_failure"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("FilmFusion title recognition definition invalid: %#v", result.Errors)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionAcceptsFilmFusionFileRecognitionChain(t *testing.T) {
+	definition := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "offline", Type: RSSAutomationNodeOffline115OpenAPI, Config: map[string]any{"cloud_storage_id": 1, "url": "$item.download_url"}},
+			{ID: "wait", Type: RSSAutomationNodeWait115},
+			{ID: "local", Type: RSSAutomationNodeFilmFusionRecognize, Config: map[string]any{"recognition_mode": "file", "lookup_tmdb": false}},
+			{ID: "organize", Type: RSSAutomationNodeOrganizeStrm, Config: map[string]any{"cloud_directory_id": 1}},
+			{ID: "end", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "offline"},
+			{ID: "e2", Source: "offline", SourcePort: "success", Target: "wait"},
+			{ID: "e3", Source: "wait", SourcePort: "success", Target: "local"},
+			{ID: "e4", Source: "local", SourcePort: "success", Target: "organize"},
+			{ID: "e5", Source: "organize", SourcePort: "success", Target: "end"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("FilmFusion file recognition chain invalid: %#v", result.Errors)
+	}
+
+	definition.Edges[2].Source = "offline"
+	if result := ValidateRSSAutomationDefinition(definition); result.Valid || !containsRSSAutomationValidationError(result.Errors, "115 下载文件模式必须直接连接") {
+		t.Fatalf("FilmFusion file predecessor safeguard missing: %#v", result.Errors)
+	}
+}
+
+func TestValidateRSSAutomationDefinitionRejectsInvalidFilmFusionRecognitionConfig(t *testing.T) {
+	base := RSSAutomationNode{ID: "local", Type: RSSAutomationNodeFilmFusionRecognize, Config: map[string]any{"recognition_mode": "title", "input": "$item.title"}}
+	if err := validateRSSAutomationNodeConfig(base); err != nil {
+		t.Fatalf("valid local recognition config rejected: %v", err)
+	}
+
+	invalidMode := base
+	invalidMode.Config = map[string]any{"recognition_mode": "directory", "input": "$item.title"}
+	if err := validateRSSAutomationNodeConfig(invalidMode); err == nil || !strings.Contains(err.Error(), "title/file") {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+
+	missingInput := base
+	missingInput.Config = map[string]any{"recognition_mode": "title"}
+	if err := validateRSSAutomationNodeConfig(missingInput); err == nil || !strings.Contains(err.Error(), "待识别标题") {
+		t.Fatalf("missing title input error = %v", err)
+	}
+
+	invalidLookup := base
+	invalidLookup.Config = map[string]any{"recognition_mode": "file", "lookup_tmdb": "yes"}
+	if err := validateRSSAutomationNodeConfig(invalidLookup); err == nil || !strings.Contains(err.Error(), "布尔值") {
+		t.Fatalf("invalid lookup_tmdb error = %v", err)
+	}
+}
+
 func TestValidateRSSAutomationDefinitionAcceptsSuggestedQBitMediaChain(t *testing.T) {
 	definition := RSSAutomationDefinition{
 		SchemaVersion: RSSAutomationSchemaVersion,
@@ -333,6 +411,8 @@ func TestValidateRSSAutomationDefinitionAcceptsSuggestedQBitMediaChain(t *testin
 				"target_id": 1, "url": "{{nodes.unlock.output.download_url}}",
 			}},
 			{ID: "wait_qb", Type: RSSAutomationNodeWaitQBittorrent, Config: map[string]any{"poll_interval_seconds": 30}},
+			{ID: "mp_transfer", Type: RSSAutomationNodeMoviePilotTransfer, Config: map[string]any{"file_type": "auto", "media_type": "auto"}},
+			{ID: "delete_qb", Type: RSSAutomationNodeDeleteQBittorrent, Config: map[string]any{"delete_files": false}},
 			{ID: "end", Type: RSSAutomationNodeEnd},
 		},
 		Edges: []RSSAutomationEdge{
@@ -342,11 +422,32 @@ func TestValidateRSSAutomationDefinitionAcceptsSuggestedQBitMediaChain(t *testin
 			{ID: "e4", Source: "query", SourcePort: "found", Target: "unlock"},
 			{ID: "e5", Source: "unlock", SourcePort: "success", Target: "qb"},
 			{ID: "e6", Source: "qb", SourcePort: "success", Target: "wait_qb"},
-			{ID: "e7", Source: "wait_qb", SourcePort: "success", Target: "end"},
+			{ID: "e7", Source: "wait_qb", SourcePort: "success", Target: "mp_transfer"},
+			{ID: "e8", Source: "mp_transfer", SourcePort: "success", Target: "delete_qb"},
+			{ID: "e9", Source: "delete_qb", SourcePort: "success", Target: "end"},
 		},
 	}
 	if result := ValidateRSSAutomationDefinition(definition); !result.Valid {
 		t.Fatalf("suggested qB media chain invalid: %#v", result.Errors)
+	}
+	unsafeDelete := RSSAutomationDefinition{
+		SchemaVersion: RSSAutomationSchemaVersion,
+		Nodes: []RSSAutomationNode{
+			{ID: "trigger", Type: RSSAutomationNodeTrigger},
+			{ID: "qb", Type: RSSAutomationNodeQBittorrent, Config: map[string]any{"target_id": 1, "url": "$item.download_url"}},
+			{ID: "wait", Type: RSSAutomationNodeWaitQBittorrent},
+			{ID: "delete", Type: RSSAutomationNodeDeleteQBittorrent, Config: map[string]any{"delete_files": true}},
+			{ID: "end", Type: RSSAutomationNodeEnd},
+		},
+		Edges: []RSSAutomationEdge{
+			{ID: "u1", Source: "trigger", SourcePort: "next", Target: "qb"},
+			{ID: "u2", Source: "qb", SourcePort: "success", Target: "wait"},
+			{ID: "u3", Source: "wait", SourcePort: "success", Target: "delete"},
+			{ID: "u4", Source: "delete", SourcePort: "success", Target: "end"},
+		},
+	}
+	if result := ValidateRSSAutomationDefinition(unsafeDelete); result.Valid || !containsRSSAutomationValidationError(result.Errors, "MP2 整理成功后") {
+		t.Fatalf("qB file deletion safeguard missing: %#v", result.Errors)
 	}
 }
 

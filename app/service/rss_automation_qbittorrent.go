@@ -70,8 +70,8 @@ func (s *RSSAutomationService) executeRSSAutomationWaitQBittorrent(
 	output["torrent_tag"] = torrentTag
 	output["last_checked_at"] = time.Now().UTC().Format(time.RFC3339)
 
-	requestURL := strings.TrimRight(client.baseURL, "/") + "/api/v2/torrents/info?" + url.Values{"tag": {torrentTag}}.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	requestPath := "/api/v2/torrents/info?" + url.Values{"tag": {torrentTag}}.Encode()
+	req, err := client.newRequest(ctx, http.MethodGet, requestPath, nil)
 	if err != nil {
 		return output, err
 	}
@@ -116,6 +116,13 @@ func (s *RSSAutomationService) executeRSSAutomationWaitQBittorrent(
 			output["completed"] = true
 			output["failed"] = false
 			output["progress"] = 100
+			contentType, fileCount, contentTypeErr := queryRSSAutomationQBContentType(ctx, client, torrent.Hash)
+			if contentTypeErr == nil {
+				output["content_type"] = contentType
+				output["file_count"] = fileCount
+			} else {
+				output["content_type_error"] = contentTypeErr.Error()
+			}
 			output["selected_port"] = "success"
 			return output, nil
 		}

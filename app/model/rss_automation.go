@@ -20,8 +20,8 @@ const (
 	RSSAutomationNodeCancelled = "cancelled"
 )
 
-// RSSAutomationSource is an RSS/Atom source owned by the independent
-// automation module. It deliberately does not share state with RSSMonitorSetting.
+// RSSAutomationSource is an RSS/Atom source owned by the workflow-based
+// automation module.
 type RSSAutomationSource struct {
 	ID              uint       `gorm:"primarykey" json:"id"`
 	Name            string     `gorm:"size:120;not null" json:"name"`
@@ -139,18 +139,3 @@ type RSSAutomationNodeRun struct {
 }
 
 func (RSSAutomationNodeRun) TableName() string { return "rss_automation_node_runs" }
-
-// RSSAutomationLegacyMigration makes migration from the retired RSS monitor
-// idempotent without deleting its source, rule, or history tables.
-type RSSAutomationLegacyMigration struct {
-	ID             uint      `gorm:"primarykey" json:"id"`
-	LegacySourceID uint      `gorm:"not null;uniqueIndex" json:"legacy_source_id"`
-	SourceID       uint      `gorm:"not null;index" json:"source_id"`
-	WorkflowID     uint      `gorm:"not null;index" json:"workflow_id"`
-	MigratedAt     time.Time `gorm:"not null" json:"migrated_at"`
-	CreatedAt      time.Time `json:"created_at"`
-}
-
-func (RSSAutomationLegacyMigration) TableName() string {
-	return "rss_automation_legacy_migrations"
-}

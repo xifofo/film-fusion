@@ -93,6 +93,7 @@ type Organize115CookieRequest struct {
 	FolderContexts           []Organize115FolderContext `json:"folder_contexts"`
 	DryRun                   bool                       `json:"dry_run"`
 	MediaType                string                     `json:"media_type"`
+	RecognitionSource        string                     `json:"recognition_source"`
 	Category                 string                     `json:"category"`
 	BestVersionEnabled       *bool                      `json:"best_version_enabled"`
 	DeleteSourceFolder       bool                       `json:"delete_source_folder"`
@@ -121,6 +122,7 @@ type Organize115CookieResult struct {
 	FolderID                       string                   `json:"folder_id"`
 	FolderIDs                      []string                 `json:"folder_ids,omitempty"`
 	MediaType                      string                   `json:"media_type,omitempty"`
+	RecognitionSource              string                   `json:"recognition_source"`
 	Category                       string                   `json:"category,omitempty"`
 	BestVersionEnabled             bool                     `json:"best_version_enabled,omitempty"`
 	DryRun                         bool                     `json:"dry_run"`
@@ -226,6 +228,7 @@ type OrganizePreviewTaskCreateRequest struct {
 	RecursiveDepth           *int                           `json:"recursive_depth"`
 	TaskLimit                int                            `json:"task_limit"`
 	MediaType                string                         `json:"media_type"`
+	RecognitionSource        string                         `json:"recognition_source"`
 	Category                 string                         `json:"category"`
 	BestVersionEnabled       *bool                          `json:"best_version_enabled"`
 	FilenameRegexEnabled     bool                           `json:"filename_regex_enabled"`
@@ -688,6 +691,11 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
+	recognitionSource, err := service.NormalizeMediaRecognitionSource(req.RecognitionSource)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 	category := strings.TrimSpace(req.Category)
 	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
@@ -749,6 +757,7 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 			maxTasks:                 remaining,
 			intervalSeconds:          req.IntervalSeconds,
 			mediaType:                mediaType,
+			recognitionSource:        recognitionSource,
 			category:                 category,
 			bestVersionEnabled:       bestVersionEnabled,
 			filenameRegexEnabled:     req.FilenameRegexEnabled,
@@ -1463,6 +1472,7 @@ func (h *OrganizeHandler) ProcessPreviewTask(task model.OrganizePreviewTask) (se
 		}},
 		DryRun:                   true,
 		MediaType:                task.MediaType,
+		RecognitionSource:        task.RecognitionSource,
 		Category:                 task.Category,
 		BestVersionEnabled:       &bestVersionEnabled,
 		FilenameRegexEnabled:     task.FilenameRegexEnabled,
@@ -1542,6 +1552,7 @@ func (h *OrganizeHandler) buildPreviewChildTasks(task model.OrganizePreviewTask)
 		maxTasks:                 -1,
 		intervalSeconds:          task.IntervalSeconds,
 		mediaType:                task.MediaType,
+		recognitionSource:        task.RecognitionSource,
 		category:                 task.Category,
 		bestVersionEnabled:       task.BestVersionEnabled,
 		filenameRegexEnabled:     task.FilenameRegexEnabled,
@@ -1563,6 +1574,7 @@ type buildPreviewChildTaskArgs struct {
 	maxTasks                 int // 0 表示不生成，正数表示上限，负数表示不限。
 	intervalSeconds          int
 	mediaType                string
+	recognitionSource        string
 	category                 string
 	bestVersionEnabled       bool
 	filenameRegexEnabled     bool
@@ -1622,6 +1634,7 @@ func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTask
 				MaxDepth:                 args.maxDepth,
 				IntervalSeconds:          args.intervalSeconds,
 				MediaType:                args.mediaType,
+				RecognitionSource:        args.recognitionSource,
 				Category:                 args.category,
 				BestVersionEnabled:       args.bestVersionEnabled,
 				FilenameRegexEnabled:     args.filenameRegexEnabled,
@@ -1659,6 +1672,10 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	if err != nil {
 		return Organize115CookieResult{}, err
 	}
+	recognitionSource, err := service.NormalizeMediaRecognitionSource(req.RecognitionSource)
+	if err != nil {
+		return Organize115CookieResult{}, err
+	}
 	category := strings.TrimSpace(req.Category)
 	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
@@ -1683,9 +1700,9 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		return Organize115CookieResult{}, fmt.Errorf("115 Cookie 为空")
 	}
 
-	categoryCfg, err := h.moviePilotSvc.GetCategoryConfig()
+	categoryCfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(recognitionSource)
 	if err != nil {
-		return Organize115CookieResult{}, fmt.Errorf("获取 MoviePilot 分类配置失败")
+		return Organize115CookieResult{}, fmt.Errorf("获取媒体分类配置失败: %w", err)
 	}
 
 	webClient, err := h.web115Svc.NewClient(storage.Cookie)
@@ -1733,6 +1750,7 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 				fileIDs:                fileIDSet,
 				dryRun:                 req.DryRun,
 				mediaType:              mediaType,
+				recognitionSource:      recognitionSource,
 				category:               category,
 				bestVersionEnabled:     bestVersionEnabled,
 				filename:               filenameProcessor,
@@ -1793,6 +1811,7 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 		FolderID:                       primaryFolderID,
 		FolderIDs:                      folderIDs,
 		MediaType:                      mediaType,
+		RecognitionSource:              recognitionSource,
 		Category:                       category,
 		BestVersionEnabled:             bestVersionEnabled,
 		DryRun:                         req.DryRun,
@@ -1821,6 +1840,7 @@ type processOrganizeArgs struct {
 	fileIDs                map[string]struct{}
 	dryRun                 bool
 	mediaType              string
+	recognitionSource      string
 	category               string
 	bestVersionEnabled     bool
 	filename               filenameRegexProcessor
@@ -1878,6 +1898,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	minSizeMB := dir.ExcludeSmallerThanMB
 	filenameProcessor := args.filename
 	expectedMediaType := args.mediaType
+	recognitionSource := args.recognitionSource
 	categoryOverride := strings.TrimSpace(args.category)
 
 	results := make([]Organize115ItemResult, 0)
@@ -1946,7 +1967,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				ext = strings.TrimPrefix(filepath.Ext(file.Name), ".")
 			}
 
-			info, recognizeInput, recErr := h.recognizeFileWithContext(file.Name, recognizeName, args.context)
+			info, recognizeInput, recErr := h.recognizeFileWithContext(file.Name, recognizeName, args.context, recognitionSource)
 			item.RecognizeInput = recognizeInput
 			if recErr != nil {
 				item.Error = recErr.Error()
@@ -1971,11 +1992,12 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				continue
 			}
 
-			recognizeInput = h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
+			recognizeInput = h.enhanceEpisodeRecognizeInputWithTMDBEnglishSource(
 				info,
 				expectedMediaType,
 				recognizeName,
 				recognizeInput,
+				recognitionSource,
 			)
 			item.RecognizeInput = recognizeInput
 
@@ -1996,7 +2018,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				}
 			}
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(transferInput, ext)
+			transferName, _, transErr := h.moviePilotSvc.TransferNameWithSource(transferInput, ext, recognitionSource)
 			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
@@ -2102,13 +2124,13 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	return group
 }
 
-func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName string, context Organize115FolderContext) (service.MoviePilotMediaInfo, string, error) {
+func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName string, context Organize115FolderContext, recognitionSource string) (service.MoviePilotMediaInfo, string, error) {
 	candidates := buildRecognizeInputs(fileName, recognizeName, context)
 	var lastErr error
 	lastInput := ""
 	for _, input := range candidates {
 		lastInput = input
-		info, _, err := h.moviePilotSvc.RecognizeFile(input)
+		info, _, err := h.moviePilotSvc.RecognizeFileWithSource(input, recognitionSource)
 		if err != nil {
 			lastErr = err
 			continue
@@ -2137,6 +2159,25 @@ func (h *OrganizeHandler) enhanceEpisodeRecognizeInputWithTMDBEnglish(
 	recognizeName string,
 	currentInput string,
 ) string {
+	return h.enhanceEpisodeRecognizeInputWithTMDBEnglishSource(
+		info,
+		expectedMediaType,
+		recognizeName,
+		currentInput,
+		"",
+	)
+}
+
+func (h *OrganizeHandler) enhanceEpisodeRecognizeInputWithTMDBEnglishSource(
+	info service.MoviePilotMediaInfo,
+	expectedMediaType string,
+	recognizeName string,
+	currentInput string,
+	recognitionSource string,
+) string {
+	if strings.TrimSpace(recognitionSource) == service.MediaRecognitionSourceLocal {
+		return currentInput
+	}
 	if h == nil || h.tmdbSvc == nil || h.moviePilotSvc == nil {
 		return currentInput
 	}
@@ -2168,17 +2209,23 @@ func (h *OrganizeHandler) enhanceEpisodeRecognizeInputWithTMDBEnglish(
 	if enhancedInput == "" || enhancedInput == currentInput {
 		return currentInput
 	}
-	enhancedInfo, _, err := h.moviePilotSvc.RecognizeFile(enhancedInput)
+	var enhancedInfo service.MoviePilotMediaInfo
+	if strings.TrimSpace(recognitionSource) == "" {
+		enhancedInfo, _, err = h.moviePilotSvc.RecognizeFile(enhancedInput)
+	} else {
+		enhancedInfo, _, err = h.moviePilotSvc.RecognizeFileWithSource(enhancedInput, recognitionSource)
+	}
 	if err != nil {
 		if h.logger != nil {
-			h.logger.Debugf("[organize] MP2 英文标题增强识别失败 input=%q: %v", enhancedInput, err)
+			h.logger.Debugf("[organize] 英文标题增强识别失败 source=%s input=%q: %v", recognitionSource, enhancedInput, err)
 		}
 		return currentInput
 	}
 	if strings.TrimSpace(enhancedInfo.TmdbID) != tmdbID {
 		if h.logger != nil {
 			h.logger.Debugf(
-				"[organize] MP2 英文标题增强识别 TMDB 不一致 input=%q got=%s want=%s",
+				"[organize] 英文标题增强识别 TMDB 不一致 source=%s input=%q got=%s want=%s",
+				recognitionSource,
 				enhancedInput,
 				strings.TrimSpace(enhancedInfo.TmdbID),
 				tmdbID,
