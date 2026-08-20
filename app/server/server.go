@@ -311,6 +311,7 @@ func (s *Server) setupRoutes() {
 	s.rssAutomationService.SetHDHiveGateway(hdhiveHandler)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
+	systemInfoHandler := handler.NewSystemInfoHandler(service.NewSystemInfoCollector())
 
 	// API路由组
 	api := s.gin.Group("/api")
@@ -353,6 +354,7 @@ func (s *Server) setupRoutes() {
 		protected.GET("/me", authHandler.Me)
 		protected.PUT("/me", authHandler.UpdateMe)
 		protected.POST("/me/avatar", authHandler.UploadAvatar)
+		protected.GET("/system-info", systemInfoHandler.Get)
 
 		// 系统配置相关路由
 		// 应用配置（config.yaml 在线编辑 + 热重载）
