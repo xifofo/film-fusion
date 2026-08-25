@@ -199,6 +199,30 @@ func TestRSSAutomationSourcePortsAreNodeSpecific(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("115 OpenAPI action config rejected: %v", err)
 	}
+	if !isRSSAutomationSourcePortValid(RSSAutomationNodeRename115OpenAPI, "success") ||
+		!isRSSAutomationSourcePortValid(RSSAutomationNodeRename115OpenAPI, "failure") {
+		t.Fatal("115 OpenAPI rename action should expose success and failure ports")
+	}
+	if err := validateRSSAutomationNodeConfig(RSSAutomationNode{
+		Type: RSSAutomationNodeRename115OpenAPI,
+		Config: map[string]any{
+			"cloud_storage_id": 1,
+			"file_id":          "$nodes.wait.output.file_id",
+			"new_name":         "{{item.title}}.mkv",
+		},
+	}); err != nil {
+		t.Fatalf("115 OpenAPI rename config rejected: %v", err)
+	}
+	if err := validateRSSAutomationNodeConfig(RSSAutomationNode{
+		Type: RSSAutomationNodeRename115OpenAPI,
+		Config: map[string]any{
+			"cloud_storage_id": 1,
+			"file_id":          "123456",
+			"new_name":         "剧集/第一集.mkv",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "路径分隔符") {
+		t.Fatalf("invalid 115 rename name was accepted: %v", err)
+	}
 	if !isRSSAutomationSourcePortValid(RSSAutomationNodeKeyword, "matched") ||
 		!isRSSAutomationSourcePortValid(RSSAutomationNodeKeyword, "unmatched") {
 		t.Fatal("keyword nodes should expose matched and unmatched ports")
@@ -489,6 +513,41 @@ func TestValidateRSSAutomationDefinitionRejectsUnknownTargetPort(t *testing.T) {
 	result := ValidateRSSAutomationDefinition(definition)
 	if result.Valid || !containsRSSAutomationValidationError(result.Errors, "入口 \"side-door\" 无效") {
 		t.Fatalf("unexpected validation result: %#v", result)
+	}
+}
+
+func TestValidateRSSAutomationReplacementNodeConfigs(t *testing.T) {
+	valid := []RSSAutomationNode{
+		{Type: RSSAutomationNodeKeywordReplace, Config: map[string]any{
+			"input": "$item.title", "variable": "normalized_title", "case_sensitive": false,
+			"replacements": []any{map[string]any{"keyword": "WEB-DL", "replacement": "WEB"}},
+		}},
+		{Type: RSSAutomationNodeRegexReplace, Config: map[string]any{
+			"input": "$item.title", "pattern": `\[[^]]+\]`, "replacement": "", "variable": "clean_title",
+		}},
+	}
+	for _, node := range valid {
+		if err := validateRSSAutomationNodeConfig(node); err != nil {
+			t.Errorf("valid %s config rejected: %v", node.Type, err)
+		}
+		if !isRSSAutomationSourcePortValid(node.Type, "success") || !isRSSAutomationSourcePortValid(node.Type, "failure") {
+			t.Errorf("%s should expose success and failure ports", node.Type)
+		}
+	}
+
+	invalid := []RSSAutomationNode{
+		{Type: RSSAutomationNodeKeywordReplace, Config: map[string]any{
+			"input": "$item.title", "variable": "normalized_title",
+			"replacements": []any{map[string]any{"keyword": "", "replacement": "WEB"}},
+		}},
+		{Type: RSSAutomationNodeRegexReplace, Config: map[string]any{
+			"input": "$item.title", "pattern": "(", "replacement": "", "variable": "clean_title",
+		}},
+	}
+	for _, node := range invalid {
+		if err := validateRSSAutomationNodeConfig(node); err == nil {
+			t.Errorf("invalid %s config was accepted", node.Type)
+		}
 	}
 }
 

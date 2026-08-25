@@ -73,8 +73,9 @@ type MediaRecognitionMediaInfo struct {
 // MediaRecognitionCandidate 是本地 TMDB 匹配时用于解释选择结果的候选项。
 type MediaRecognitionCandidate struct {
 	MediaRecognitionMediaInfo
-	Score      int     `json:"score"`
-	Confidence float64 `json:"confidence"`
+	Score       int     `json:"score"`
+	Confidence  float64 `json:"confidence"`
+	matchTitles []string
 }
 
 // MediaRecognitionResult 汇总识别词轨迹、本地解析和可选 TMDB 匹配结果。
@@ -362,15 +363,17 @@ func normalizeMediaRecognitionMode(mode string) string {
 	return MediaRecognitionModeFile
 }
 
+const localTMDBMarkerPattern = `(?i:(?:\[\s*tmdb(?:id)?\s*[-_=]\s*([1-9][0-9]{0,19})\s*\]|\{\s*tmdb(?:id)?\s*[-_=]\s*([1-9][0-9]{0,19})\s*\}))`
+
 var (
 	localMediaExtensionRE = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov|wmv|flv|m4v|ts|m2ts|iso|rmvb|strm)$`)
-	localTMDBMarkerRE     = regexp.MustCompile(`(?i)[\[{](?:tmdb(?:id)?)[-_=](\d+)[\]}]`)
+	localTMDBMarkerRE     = regexp.MustCompile(localTMDBMarkerPattern)
 	localRichMarkerRE     = regexp.MustCompile(`(?i)\{\[([^\]]*(?:tmdbid|tmdb_id)\s*=\s*\d+[^\]]*)\]\}`)
 	localYearRE           = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})(?:[^0-9]|$)`)
 	localSeasonEpisodeRE  = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])S(\d{1,3})(?:[ ._-]*E(?:P)?(\d{1,4})(?:[ ._-]*(?:E|-)(\d{1,4}))?)?`)
 	localChineseSeasonRE  = regexp.MustCompile(`第\s*([0-9零一二两三四五六七八九十百]+)\s*季`)
 	localChineseEpisodeRE = regexp.MustCompile(`第\s*([0-9零一二两三四五六七八九十百]+)\s*[集话話](?:\s*[-~至]\s*([0-9零一二两三四五六七八九十百]+))?`)
-	localEpisodeOnlyRE    = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])E(?:P)?\s*(\d{1,4})(?:\s*[-~]\s*(\d{1,4}))?`)
+	localEpisodeOnlyRE    = regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9])E(?:P)?\s*(\d{1,4})(?:\s*[-~]\s*(\d{1,4}))?(?:$|[^A-Za-z0-9])`)
 	localResolutionRE     = regexp.MustCompile(`(?i)(4320p|2160p|1080[pi]|720p|576p|480p|8k|4k|uhd)`)
 	localResourceTypeRE   = regexp.MustCompile(`(?i)(blu[ ._-]?ray|bdrip|remux|web[ ._-]?dl|web[ ._-]?rip|hdtv|hdrip|dvdrip|cam|telesync|ts)`)
 	localVideoCodecRE     = regexp.MustCompile(`(?i)(h[ ._-]?26[45]|x26[45]|hevc|avc|av1|mpeg[ ._-]?2)`)
@@ -379,6 +382,7 @@ var (
 	localEffectRE         = regexp.MustCompile(`(?i)(dolby[ ._-]?vision|dovi|hdr10\+|hdr10|hdr|sdr)`)
 	localReleaseTeamRE    = regexp.MustCompile(`-([A-Za-z0-9][A-Za-z0-9._-]{1,40})$`)
 	localLeadingGroupRE   = regexp.MustCompile(`^\s*(?:\[[^\]]{1,80}\]\s*)+`)
+	localBracketValueRE   = regexp.MustCompile(`\[([^\]]{1,80})\]`)
 	localBracketRE        = regexp.MustCompile(`[\[\]{}()]`)
 	localSpaceRE          = regexp.MustCompile(`\s+`)
 )
@@ -426,7 +430,7 @@ func parseLocalMediaMeta(original string, words MediaRecognitionWordResult, mode
 	if team := localReleaseTeamRE.FindStringSubmatch(cleanSource); len(team) > 1 {
 		meta.ResourceTeam = team[1]
 	}
-	meta.Name = cleanLocalMediaTitle(cleanSource)
+	meta.Name = cleanLocalMediaTitle(localMediaTitlePrefix(cleanSource))
 
 	if mode == MediaRecognitionModeFile {
 		parent := path.Base(path.Dir(normalizedPath))
@@ -445,9 +449,12 @@ func parseLocalMediaMeta(original string, words MediaRecognitionWordResult, mode
 		}
 	}
 	if meta.Name == "" {
+		meta.Name = localLeadingBracketTitle(cleanSource)
+	}
+	if meta.Name == "" && meta.TMDBID == "" {
 		return MediaRecognitionMetaInfo{}, errors.New("无法从输入中解析媒体标题")
 	}
-	if meta.MediaType == "unknown" && meta.Year != "" {
+	if meta.MediaType == "unknown" && meta.Year != "" && meta.TMDBID == "" {
 		meta.MediaType = "movie"
 	}
 	meta.SeasonEpisode = formatLocalSeasonEpisode(meta)
@@ -477,11 +484,22 @@ func parseLocalMediaMarkers(input string) (tmdbID, mediaType string, season, epi
 		}
 	}
 	if tmdbID == "" {
-		if simple := localTMDBMarkerRE.FindStringSubmatch(input); len(simple) > 1 {
-			tmdbID = simple[1]
-		}
+		tmdbID = extractLocalTMDBMarkerID(input)
 	}
 	return tmdbID, mediaType, season, episode
+}
+
+func extractLocalTMDBMarkerID(input string) string {
+	match := localTMDBMarkerRE.FindStringSubmatch(input)
+	if len(match) <= 1 {
+		return ""
+	}
+	for _, value := range match[1:] {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func parseLocalSeasonEpisode(input string, meta *MediaRecognitionMetaInfo) {
@@ -515,10 +533,74 @@ func parseLocalSeasonEpisode(input string, meta *MediaRecognitionMetaInfo) {
 			}
 		}
 	}
+	if meta.BeginEpisode == nil {
+		for _, value := range localLeadingBracketValues(input) {
+			if episode, ok := localBracketEpisodeNumber(value); ok {
+				meta.BeginEpisode = &episode
+				break
+			}
+		}
+	}
 	if meta.BeginEpisode != nil && meta.BeginSeason == nil {
 		season := 1
 		meta.BeginSeason = &season
 	}
+}
+
+func localLeadingBracketValues(input string) []string {
+	leading := localLeadingGroupRE.FindString(input)
+	if leading == "" {
+		return nil
+	}
+	matches := localBracketValueRE.FindAllStringSubmatch(leading, -1)
+	values := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) > 1 {
+			values = append(values, strings.TrimSpace(match[1]))
+		}
+	}
+	return values
+}
+
+func localBracketEpisodeNumber(value string) (int, bool) {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 || len(value) > 4 {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	number, err := strconv.Atoi(value)
+	if err != nil || number <= 0 || (number >= 1900 && number <= 2099) {
+		return 0, false
+	}
+	switch number {
+	case 480, 576, 720, 1080, 2160, 4320:
+		return 0, false
+	default:
+		return number, true
+	}
+}
+
+func localLeadingBracketTitle(input string) string {
+	candidates := make([]string, 0, 2)
+	for _, value := range localLeadingBracketValues(input) {
+		if _, isEpisode := localBracketEpisodeNumber(value); isEpisode ||
+			localYearRE.MatchString(value) || localResolutionRE.MatchString(value) ||
+			localResourceTypeRE.MatchString(value) || localVideoCodecRE.MatchString(value) ||
+			localAudioCodecRE.MatchString(value) || localEffectRE.MatchString(value) {
+			break
+		}
+		if title := cleanLocalMediaTitle(value); title != "" {
+			candidates = append(candidates, title)
+		}
+	}
+	if len(candidates) == 0 {
+		return ""
+	}
+	return candidates[len(candidates)-1]
 }
 
 func cleanLocalMediaTitle(input string) string {
@@ -535,6 +617,33 @@ func cleanLocalMediaTitle(input string) string {
 	value = strings.NewReplacer(".", " ", "_", " ", " - ", " ", "+", " ").Replace(value)
 	value = strings.Trim(value, " -_.")
 	return localSpaceRE.ReplaceAllString(value, " ")
+}
+
+// localMediaTitlePrefix removes release metadata that follows an episode or
+// resolution marker before the remaining title cleanup runs. This keeps web
+// source tags such as WeTV from becoming part of the TMDB search title.
+func localMediaTitlePrefix(input string) string {
+	end := len(input)
+	found := false
+	for _, pattern := range []*regexp.Regexp{
+		localSeasonEpisodeRE, localChineseSeasonRE, localChineseEpisodeRE,
+		localEpisodeOnlyRE, localResolutionRE,
+	} {
+		location := pattern.FindStringIndex(input)
+		if location == nil || location[0] <= 0 || location[0] >= end {
+			continue
+		}
+		end = location[0]
+		found = true
+	}
+	if !found {
+		return input
+	}
+	prefix := strings.Trim(input[:end], " ._-")
+	if prefix == "" {
+		return input
+	}
+	return prefix
 }
 
 func shouldUseParentMediaTitle(name, source string) bool {

@@ -29,12 +29,18 @@ func (s *RSSAutomationService) executeRSSAutomationMoviePilotTitleRecognize(ctx 
 	if err != nil {
 		return nil, err
 	}
+	if tmdbID == "" {
+		tmdbID = extractLocalTMDBMarkerID(input)
+	}
 	category := ""
 	if value, ok := resolveRSSAutomationReference(runContext, "$item.category"); ok {
 		category = strings.TrimSpace(fmt.Sprint(value))
 	}
 
 	media, recognizeInput, responded, recognized, recognizeErr := recognizeRSSAutomationTitle(s.moviePilot, input, category, tmdbID)
+	if recognized {
+		media = s.reclassifyRSSAutomationMoviePilotTitle(ctx, input, media)
+	}
 	output := rssAutomationTitleRecognitionOutput(input, recognizeInput, tmdbID, media)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return output, ctxErr
@@ -57,6 +63,68 @@ func (s *RSSAutomationService) executeRSSAutomationMoviePilotTitleRecognize(ctx 
 		return output, fmt.Errorf("MoviePilot 标题识别请求失败: %w", recognizeErr)
 	}
 	return output, nil
+}
+
+// reclassifyRSSAutomationMoviePilotTitle keeps MoviePilot responsible for
+// identifying the title, then uses the returned TMDB identity to load complete
+// metadata and run FilmFusion's saved category rules. MoviePilot recognition
+// responses do not always contain every field used by category.yaml (notably
+// genre_ids), so classifying the partial response can select a later fallback
+// category even though the identified media itself is correct.
+func (s *RSSAutomationService) reclassifyRSSAutomationMoviePilotTitle(
+	ctx context.Context,
+	input string,
+	media RSSAutomationMediaMetadata,
+) RSSAutomationMediaMetadata {
+	if s == nil || s.localMedia == nil || strings.TrimSpace(media.TmdbID) == "" {
+		return media
+	}
+	recognizeInput := rssAutomationMoviePilotCategoryInput(input, media)
+	result, err := s.localMedia.Recognize(ctx, recognizeInput, MediaRecognitionOptions{
+		Mode: MediaRecognitionModeTitle, LookupTMDB: true,
+	})
+	if err != nil {
+		if s.log != nil && ctx.Err() == nil {
+			s.log.Warnf("[RSS-AUTOMATION] MP 标题识别分类补全失败，保留 MoviePilot 分类: %v", err)
+		}
+		return media
+	}
+	localTMDBID := strings.TrimSpace(firstRSSAutomationNonEmpty(result.MediaInfo.TMDBID, result.MetaInfo.TMDBID))
+	if result.TMDBStatus != "matched_by_id" || localTMDBID != strings.TrimSpace(media.TmdbID) {
+		if s.log != nil && ctx.Err() == nil {
+			s.log.Warnf(
+				"[RSS-AUTOMATION] MP 标题识别未能按 TMDB %s 补全分类，保留 MoviePilot 分类（状态：%s）",
+				media.TmdbID,
+				firstRSSAutomationNonEmpty(result.TMDBStatus, "unknown"),
+			)
+		}
+		return media
+	}
+	if category := strings.TrimSpace(result.MediaInfo.Category); category != "" {
+		media.Category = category
+	}
+	return media
+}
+
+func rssAutomationMoviePilotCategoryInput(input string, media RSSAutomationMediaMetadata) string {
+	parts := make([]string, 0, 4)
+	if title := strings.TrimSpace(media.Title); title != "" {
+		parts = append(parts, title)
+	} else if input = strings.TrimSpace(input); input != "" {
+		parts = append(parts, input)
+	}
+	if year := strings.TrimSpace(media.Year); year != "" {
+		parts = append(parts, year)
+	}
+	if seasonEpisode := strings.TrimSpace(media.SeasonEpisode); seasonEpisode != "" {
+		parts = append(parts, seasonEpisode)
+	}
+	marker := "tmdbid=" + strings.TrimSpace(media.TmdbID)
+	if mediaType := normalizeLocalMediaType(media.MediaType); mediaType == "movie" || mediaType == "tv" {
+		marker += ";type=" + mediaType
+	}
+	parts = append(parts, "{["+marker+"]}")
+	return strings.Join(parts, ".")
 }
 
 func recognizeRSSAutomationTitle(recognizer RSSAutomationMediaRecognizer, title, category, tmdbID string) (RSSAutomationMediaMetadata, string, bool, bool, error) {

@@ -33,9 +33,62 @@ func TestMediaRecognitionHandlerSavesWordsAndTestsUnsavedRules(t *testing.T) {
 	router.GET("/category-config", handler.GetCategoryConfig)
 	router.POST("/category-config/validate", handler.ValidateCategoryConfig)
 	router.PUT("/category-config", handler.UpdateCategoryConfig)
+	router.GET("/rename-config", handler.GetRenameConfig)
+	router.PUT("/rename-config", handler.UpdateRenameConfig)
+	router.POST("/rename-config/validate", handler.ValidateRenameTemplate)
+	router.POST("/rename-config/preview", handler.PreviewRenameTemplate)
 	router.POST("/test", handler.Test)
 
-	response := performMediaRecognitionRequest(t, router, http.MethodPut, "/words", `{"words":["S04 => S01"]}`)
+	response := performMediaRecognitionRequest(t, router, http.MethodGet, "/rename-config", "")
+	if response.Code != 0 || response.Data["configured"] != false || response.Data["active"] != false {
+		t.Fatalf("initial rename config=%+v", response)
+	}
+	commonVariables, _ := response.Data["common_variables"].([]any)
+	tvVariables, _ := response.Data["tv_variables"].([]any)
+	if len(commonVariables) != 32 || len(tvVariables) != 7 {
+		t.Fatalf("rename variables common=%d tv=%d", len(commonVariables), len(tvVariables))
+	}
+
+	response = performMediaRecognitionRequest(t, router, http.MethodPost, "/rename-config/preview", `{
+		"media_type":"movie","template":"{{title}}{% if year %} ({{year}}){% endif %}/{{title}}{{fileExt}}",
+		"sample":{"title":"沙丘","year":2021,"fileExt":".mkv"}
+	}`)
+	if response.Code != 0 || response.Data["path"] != "沙丘 (2021)/沙丘.mkv" {
+		t.Fatalf("rename preview=%+v", response)
+	}
+
+	response = performMediaRecognitionRequest(t, router, http.MethodPost, "/rename-config/validate", `{
+		"media_type":"movie","template":"../{{title}}{{fileExt}}"
+	}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe rename validation=%+v", response)
+	}
+	errors, _ := response.Data["errors"].([]any)
+	if len(errors) == 0 {
+		t.Fatalf("unsafe rename validation omitted errors: %+v", response)
+	}
+
+	response = performMediaRecognitionRequest(t, router, http.MethodPut, "/rename-config", `{
+		"movie_format":"电影/{{title}}{{fileExt}}",
+		"tv_format":"../{{title}}{{fileExt}}"
+	}`)
+	if response.Code != http.StatusBadRequest || response.Data["media_type"] != "tv" {
+		t.Fatalf("invalid save rename config=%+v", response)
+	}
+	validation, _ := response.Data["validation"].(map[string]any)
+	if validation["valid"] != false {
+		t.Fatalf("invalid save validation=%#v", validation)
+	}
+
+	response = performMediaRecognitionRequest(t, router, http.MethodPut, "/rename-config", `{
+		"movie_format":"电影/{{title}}{{fileExt}}",
+		"tv_format":"剧集/{{title}}/{{season_episode}}{{fileExt}}"
+	}`)
+	if response.Code != 0 || response.Data["configured"] != true || response.Data["active"] != true {
+		t.Fatalf("save rename config=%+v", response)
+	}
+
+	response = performMediaRecognitionRequest(t, router, http.MethodPut, "/words", `{"words":["S04 => S01"]}`)
 	if response.Code != 0 || response.Data["configured"] != true {
 		t.Fatalf("save response=%+v", response)
 	}

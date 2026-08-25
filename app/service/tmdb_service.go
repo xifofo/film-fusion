@@ -21,9 +21,10 @@ type TMDBService struct {
 	logger *logger.Logger
 	client *http.Client
 
-	mu         sync.Mutex
-	cache      map[string]tmdbEpisodeCacheEntry
-	titleCache map[string]tmdbTitleCacheEntry
+	mu          sync.Mutex
+	cache       map[string]tmdbEpisodeCacheEntry
+	titleCache  map[string]tmdbTitleCacheEntry
+	renameCache map[string]tmdbRenameDetailsCacheEntry
 }
 
 type tmdbEpisodeCacheEntry struct {
@@ -38,11 +39,12 @@ type tmdbTitleCacheEntry struct {
 
 func NewTMDBService(cfg *config.Config, log *logger.Logger) *TMDBService {
 	return &TMDBService{
-		cfg:        cfg,
-		logger:     log,
-		client:     &http.Client{Timeout: 10 * time.Second},
-		cache:      make(map[string]tmdbEpisodeCacheEntry),
-		titleCache: make(map[string]tmdbTitleCacheEntry),
+		cfg:         cfg,
+		logger:      log,
+		client:      &http.Client{Timeout: 10 * time.Second},
+		cache:       make(map[string]tmdbEpisodeCacheEntry),
+		titleCache:  make(map[string]tmdbTitleCacheEntry),
+		renameCache: make(map[string]tmdbRenameDetailsCacheEntry),
 	}
 }
 

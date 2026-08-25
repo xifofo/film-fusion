@@ -31,7 +31,7 @@ const (
 
 var (
 	rssAutomationTMDBIDPattern     = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
-	rssAutomationTMDBMarkerPattern = regexp.MustCompile(`(?i)[\s._-]*\{tmdb(?:id)?-[0-9]+\}`)
+	rssAutomationTMDBMarkerPattern = regexp.MustCompile(`[\s._-]*` + localTMDBMarkerPattern)
 	rssAutomationMediaExtensions   = map[string]struct{}{
 		".3gp": {}, ".asf": {}, ".avi": {}, ".divx": {}, ".flv": {},
 		".iso": {}, ".m2ts": {}, ".m4v": {}, ".mkv": {}, ".mov": {},

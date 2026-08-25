@@ -65,6 +65,9 @@ func (s *RSSAutomationService) executeRSSAutomationFilmFusionTitleRecognize(
 	if err != nil {
 		return nil, err
 	}
+	if tmdbID == "" {
+		tmdbID = extractLocalTMDBMarkerID(input)
+	}
 	recognizeInput := input
 	if tmdbID != "" {
 		if candidates := rssAutomationTitleRecognitionCandidates(input, tmdbID); len(candidates) > 0 {

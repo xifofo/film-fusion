@@ -92,6 +92,87 @@ func TestRSSAutomationOffline115OpenAPIActionSubmitsWithAccessToken(t *testing.T
 	}
 }
 
+func TestRSSAutomationRename115OpenAPIActionUsesResolvedFileIDAndName(t *testing.T) {
+	var requestCount atomic.Int32
+	httpClient := &http.Client{Transport: rssAutomationRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requestCount.Add(1)
+		if request.URL.Host != "proapi.115.com" || request.URL.Path != "/open/ufile/update" {
+			t.Fatalf("unexpected OpenAPI URL: %s", request.URL.String())
+		}
+		if got := request.Header.Get("Authorization"); got != "Bearer rename-token" {
+			t.Fatalf("Authorization = %q", got)
+		}
+		if err := request.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		if got := request.Form.Get("file_id"); got != "987654321" {
+			t.Fatalf("file_id = %q", got)
+		}
+		if got := request.Form.Get("file_name"); got != "示例剧.S01E02.mkv" {
+			t.Fatalf("file_name = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"state": true,
+				"code": 0,
+				"message": "",
+				"data": {"file_name": "示例剧.S01E02.mkv", "star": "0"}
+			}`)),
+			Request: request,
+		}, nil
+	})}
+
+	db := newRSSAutomationTestDB(t)
+	storage := model.CloudStorage{
+		UserID: 1, StorageType: model.StorageType115Open,
+		StorageName: "重命名账号", AccessToken: "rename-token", Status: model.StatusActive,
+	}
+	if err := db.Create(&storage).Error; err != nil {
+		t.Fatal(err)
+	}
+	automation := &RSSAutomationService{db: db, httpClient: httpClient}
+	node := RSSAutomationNode{Type: RSSAutomationNodeRename115OpenAPI, Config: map[string]any{
+		"cloud_storage_id": storage.ID,
+		"file_id":          "$nodes.wait.output.file_id",
+		"new_name":         "{{item.title}}.mkv",
+	}}
+	output, err := automation.executeRSSAutomationRename115OpenAPI(context.Background(), node, map[string]any{
+		"item":  map[string]any{"title": "示例剧.S01E02"},
+		"nodes": map[string]any{"wait": map[string]any{"output": map[string]any{"file_id": "987654321"}}},
+	})
+	if err != nil {
+		t.Fatalf("executeRSSAutomationRename115OpenAPI() error = %v", err)
+	}
+	if requestCount.Load() != 1 {
+		t.Fatalf("request count = %d", requestCount.Load())
+	}
+	if output["renamed"] != true || output["file_id"] != "987654321" || output["file_name"] != "示例剧.S01E02.mkv" {
+		t.Fatalf("unexpected output: %#v", output)
+	}
+}
+
+func TestRSSAutomationRename115OpenAPIPreviewDoesNotCallAPI(t *testing.T) {
+	output, err := previewRSSAutomationActionNode(RSSAutomationNode{
+		Type: RSSAutomationNodeRename115OpenAPI,
+		Config: map[string]any{
+			"cloud_storage_id": 1,
+			"file_id":          "$nodes.wait.output.file_id",
+			"new_name":         "{{item.title}}.mkv",
+		},
+	}, map[string]any{
+		"item":  map[string]any{"title": "示例剧.S01E03"},
+		"nodes": map[string]any{"wait": map[string]any{"output": map[string]any{"file_id": "preview-file"}}},
+	})
+	if err != nil {
+		t.Fatalf("previewRSSAutomationActionNode() error = %v", err)
+	}
+	if output["preview"] != true || output["renamed"] != true || output["file_id"] != "preview-file" || output["file_name"] != "示例剧.S01E03.mkv" {
+		t.Fatalf("unexpected preview output: %#v", output)
+	}
+}
+
 func TestRSSAutomationQBittorrentActionLogsInAndSubmitsResolvedURL(t *testing.T) {
 	var loginCount atomic.Int32
 	var addCount atomic.Int32

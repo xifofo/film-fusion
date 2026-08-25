@@ -71,8 +71,9 @@ const (
 // RSS 自动化运行配置键。只保存在 system_configs，不从 config.yaml 读取或写入。
 const ConfigKeyRSSAutomationUserAgent = "rss_automation.user_agent"
 
-// 本地媒体识别配置键。识别词与分类配置只保存在 system_configs，不依赖 MoviePilot 配置。
+// 本地媒体识别配置键。识别词、分类与重命名格式只保存在 system_configs，不依赖 MoviePilot 配置。
 const (
 	ConfigKeyMediaRecognitionWords      = "media_recognition.words"
 	ConfigKeyMediaRecognitionCategories = "media_recognition.categories"
+	ConfigKeyMediaRecognitionRename     = "media_recognition.rename_formats"
 )

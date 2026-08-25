@@ -13,6 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+)
+
+const (
+	minMediaRecognitionMatchScore = 90
+	mediaRecognitionAmbiguityGap  = 10
 )
 
 type tmdbMediaRecognitionRecord struct {
@@ -82,31 +88,51 @@ func (s *TMDBService) matchMediaRecognition(ctx context.Context, meta MediaRecog
 		return &selected, candidates, "matched_by_id", nil
 	}
 
-	candidates := make([]MediaRecognitionCandidate, 0)
+	bestCandidates := make([]MediaRecognitionCandidate, 0)
+	bestStatus := "not_found"
+	bestScore := -1
+	searchYears := []string{meta.Year}
+	if meta.MediaType == "tv" && meta.Year != "" {
+		// A TV release year may describe the current season rather than the
+		// series' first-air year. Retry without the hard TMDB year filter when
+		// the strict attempt cannot produce an acceptable match.
+		searchYears = append(searchYears, "")
+	}
 	for _, searchTitle := range mediaRecognitionSearchTitles(meta.Name) {
-		var err error
-		candidates, err = s.searchMediaRecognitionCandidates(ctx, searchTitle, meta.MediaType, meta.Year, 8)
-		if err != nil {
-			return nil, nil, "error", err
-		}
-		if len(candidates) > 0 {
-			break
+		for _, searchYear := range searchYears {
+			candidates, err := s.searchMediaRecognitionCandidates(ctx, searchTitle, meta.MediaType, searchYear, 8)
+			if err != nil {
+				return nil, nil, "error", err
+			}
+			selected, evaluated, status := evaluateMediaRecognitionCandidates(meta, candidates)
+			if len(evaluated) > 0 && evaluated[0].Score > bestScore {
+				bestCandidates = evaluated
+				bestStatus = status
+				bestScore = evaluated[0].Score
+			}
+			if selected != nil {
+				return selected, evaluated, status, nil
+			}
 		}
 	}
+	return nil, bestCandidates, bestStatus, nil
+}
+
+func evaluateMediaRecognitionCandidates(meta MediaRecognitionMetaInfo, candidates []MediaRecognitionCandidate) (*MediaRecognitionCandidate, []MediaRecognitionCandidate, string) {
 	for index := range candidates {
 		candidates[index].Score = scoreMediaRecognitionCandidate(meta, candidates[index])
 		candidates[index].Confidence = math.Min(1, math.Max(0, float64(candidates[index].Score)/150))
 	}
 	sortMediaRecognitionCandidates(candidates)
-	if len(candidates) == 0 || candidates[0].Score < 90 {
-		return nil, candidates, "not_found", nil
+	if len(candidates) == 0 || candidates[0].Score < minMediaRecognitionMatchScore {
+		return nil, candidates, "not_found"
 	}
-	if len(candidates) > 1 && candidates[0].Score-candidates[1].Score < 10 &&
+	if len(candidates) > 1 && candidates[0].Score-candidates[1].Score < mediaRecognitionAmbiguityGap &&
 		!mediaRecognitionCandidateHasExactYear(meta, candidates[0]) {
-		return nil, candidates, "ambiguous", nil
+		return nil, candidates, "ambiguous"
 	}
 	selected := candidates[0]
-	return &selected, candidates, "matched", nil
+	return &selected, candidates, "matched"
 }
 
 func (s *TMDBService) lookupMediaRecognitionByID(ctx context.Context, meta MediaRecognitionMetaInfo) ([]MediaRecognitionCandidate, error) {
@@ -157,40 +183,114 @@ func (s *TMDBService) searchMediaRecognitionCandidates(ctx context.Context, titl
 	if mediaType == "movie" || mediaType == "tv" {
 		endpoint = "/3/search/" + mediaType
 	}
-	query := url.Values{
-		"query":         []string{title},
-		"language":      []string{"zh-CN"},
-		"include_adult": []string{"false"},
-		"page":          []string{"1"},
-	}
-	if year != "" {
-		if mediaType == "movie" {
-			query.Set("year", year)
-		} else if mediaType == "tv" {
-			query.Set("first_air_date_year", year)
+	candidates := make([]MediaRecognitionCandidate, 0, limit)
+	candidateIndexes := make(map[string]int, limit)
+	for languageIndex, language := range mediaRecognitionSearchLanguages(title) {
+		query := url.Values{
+			"query":         []string{title},
+			"language":      []string{language},
+			"include_adult": []string{"false"},
+			"page":          []string{"1"},
 		}
-	}
-	var response tmdbMediaRecognitionSearchResponse
-	if err := s.doMediaRecognitionTMDBRequest(ctx, endpoint, query, &response); err != nil {
-		return nil, err
-	}
-	candidates := make([]MediaRecognitionCandidate, 0, min(limit, len(response.Results)))
-	for _, record := range response.Results {
-		if record.MediaType == "person" {
+		if year != "" {
+			if mediaType == "movie" {
+				query.Set("year", year)
+			} else if mediaType == "tv" {
+				query.Set("first_air_date_year", year)
+			}
+		}
+		var response tmdbMediaRecognitionSearchResponse
+		if err := s.doMediaRecognitionTMDBRequest(ctx, endpoint, query, &response); err != nil {
+			if languageIndex == 0 || len(candidates) == 0 {
+				return nil, err
+			}
 			continue
 		}
-		if record.MediaType == "" && mediaType != "unknown" {
-			record.MediaType = mediaType
-		}
-		if record.MediaType != "movie" && record.MediaType != "tv" {
-			continue
-		}
-		candidates = append(candidates, mediaRecognitionCandidateFromTMDB(record))
-		if len(candidates) >= limit {
-			break
+		for _, record := range response.Results {
+			if record.MediaType == "person" {
+				continue
+			}
+			if record.MediaType == "" && mediaType != "unknown" {
+				record.MediaType = mediaType
+			}
+			if record.MediaType != "movie" && record.MediaType != "tv" {
+				continue
+			}
+			candidate := mediaRecognitionCandidateFromTMDB(record)
+			key := candidate.MediaType + ":" + candidate.TMDBID
+			if index, exists := candidateIndexes[key]; exists {
+				mergeMediaRecognitionMatchTitles(&candidates[index], candidate)
+				continue
+			}
+			if len(candidates) >= limit {
+				continue
+			}
+			candidateIndexes[key] = len(candidates)
+			candidates = append(candidates, candidate)
 		}
 	}
-	return candidates, nil
+	return s.enrichIncompleteMediaRecognitionCandidates(ctx, candidates), nil
+}
+
+func (s *TMDBService) enrichIncompleteMediaRecognitionCandidates(ctx context.Context, candidates []MediaRecognitionCandidate) []MediaRecognitionCandidate {
+	for index := range candidates {
+		candidate := &candidates[index]
+		if candidate.TMDBID == "" || (candidate.Year != "" && len(candidate.GenreIDs) > 0) {
+			continue
+		}
+		var record tmdbMediaRecognitionRecord
+		if err := s.doMediaRecognitionTMDBRequest(ctx, "/3/"+candidate.MediaType+"/"+url.PathEscape(candidate.TMDBID), url.Values{
+			"language": []string{"zh-CN"},
+		}, &record); err != nil {
+			continue
+		}
+		if record.ID == 0 {
+			record.ID, _ = strconv.Atoi(candidate.TMDBID)
+		}
+		record.MediaType = candidate.MediaType
+		details := mediaRecognitionCandidateFromTMDB(record)
+		mergeMediaRecognitionMatchTitles(&details, *candidate)
+		*candidate = details
+	}
+	return candidates
+}
+
+func mediaRecognitionSearchLanguages(title string) []string {
+	hasHan := false
+	hasLatin := false
+	for _, char := range title {
+		hasHan = hasHan || unicode.Is(unicode.Han, char)
+		hasLatin = hasLatin || (unicode.IsLetter(char) && unicode.In(char, unicode.Latin))
+	}
+	if hasLatin && !hasHan {
+		// Keep zh-CN as the display result, then merge en-US titles as aliases
+		// for scoring Latin release names against translated TMDB records.
+		return []string{"zh-CN", "en-US"}
+	}
+	return []string{"zh-CN"}
+}
+
+func mergeMediaRecognitionMatchTitles(target *MediaRecognitionCandidate, source MediaRecognitionCandidate) {
+	if target == nil {
+		return
+	}
+	for _, title := range append([]string{source.Title, source.OriginalTitle}, source.matchTitles...) {
+		addMediaRecognitionMatchTitle(target, title)
+	}
+}
+
+func addMediaRecognitionMatchTitle(candidate *MediaRecognitionCandidate, title string) {
+	title = strings.TrimSpace(title)
+	if candidate == nil || title == "" {
+		return
+	}
+	normalized := normalizeLocalTitleForMatch(title)
+	for _, existing := range candidate.matchTitles {
+		if normalizeLocalTitleForMatch(existing) == normalized {
+			return
+		}
+	}
+	candidate.matchTitles = append(candidate.matchTitles, title)
 }
 
 func (s *TMDBService) doMediaRecognitionTMDBRequest(ctx context.Context, endpoint string, query url.Values, target any) error {
@@ -295,24 +395,14 @@ func mediaRecognitionCandidateFromTMDB(record tmdbMediaRecognitionRecord) MediaR
 		Overview: record.Overview, OriginalLanguage: record.OriginalLanguage,
 		OriginCountries: record.OriginCountry, ProductionCountries: productionCountries,
 	}
-	return MediaRecognitionCandidate{MediaRecognitionMediaInfo: media}
+	candidate := MediaRecognitionCandidate{MediaRecognitionMediaInfo: media}
+	addMediaRecognitionMatchTitle(&candidate, title)
+	addMediaRecognitionMatchTitle(&candidate, originalTitle)
+	return candidate
 }
 
 func scoreMediaRecognitionCandidate(meta MediaRecognitionMetaInfo, candidate MediaRecognitionCandidate) int {
-	query := normalizeLocalTitleForMatch(meta.Name)
-	title := normalizeLocalTitleForMatch(candidate.Title)
-	original := normalizeLocalTitleForMatch(candidate.OriginalTitle)
-	score := 0
-	switch {
-	case query != "" && (query == title || query == original):
-		score += 110
-	case query != "" && ((title != "" && strings.Contains(title, query)) || (original != "" && strings.Contains(original, query))):
-		score += 70
-	case query != "" && ((title != "" && strings.Contains(query, title)) || (original != "" && strings.Contains(query, original))):
-		score += 60
-	default:
-		score += mediaRecognitionTokenOverlapScore(meta.Name, candidate.Title)
-	}
+	score := mediaRecognitionCandidateTitleScore(meta.Name, candidate)
 	if meta.Year != "" {
 		if candidate.Year == meta.Year {
 			score += 30
@@ -331,6 +421,34 @@ func scoreMediaRecognitionCandidate(meta MediaRecognitionMetaInfo, candidate Med
 		score += min(5, int(candidate.Rating/2))
 	}
 	return score
+}
+
+func mediaRecognitionCandidateTitleScore(queryTitle string, candidate MediaRecognitionCandidate) int {
+	query := normalizeLocalTitleForMatch(queryTitle)
+	if query == "" {
+		return 0
+	}
+	titles := append([]string{candidate.Title, candidate.OriginalTitle}, candidate.matchTitles...)
+	best := 0
+	for _, candidateTitle := range titles {
+		normalized := normalizeLocalTitleForMatch(candidateTitle)
+		current := 0
+		switch {
+		case normalized == "":
+		case query == normalized:
+			current = 110
+		case strings.Contains(normalized, query):
+			current = 70
+		case strings.Contains(query, normalized):
+			current = 60
+		default:
+			current = mediaRecognitionTokenOverlapScore(queryTitle, candidateTitle)
+		}
+		if current > best {
+			best = current
+		}
+	}
+	return best
 }
 
 func mediaRecognitionTokenOverlapScore(left, right string) int {

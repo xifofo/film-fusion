@@ -184,8 +184,17 @@ func TestRSSAutomationMoviePilotRecognitionUsesVirtualTMDBMarker(t *testing.T) {
 }
 
 func TestRSSAutomationFileNameWithTMDBReplacesExistingMarker(t *testing.T) {
-	if got := rssAutomationFileNameWithTMDB("Show.S01E01.{tmdbid-100}.mkv", "200"); got != "Show.S01E01.{tmdb-200}.mkv" {
-		t.Fatalf("marked filename = %q", got)
+	markers := []string{
+		"[tmdbid=100]", "[tmdbid-100]", "[tmdb=100]", "[tmdb-100]",
+		"{tmdbid=100}", "{tmdbid-100}", "{tmdb=100}", "{tmdb-100}",
+	}
+	for _, marker := range markers {
+		t.Run(marker, func(t *testing.T) {
+			fileName := "Show.S01E01." + marker + ".mkv"
+			if got := rssAutomationFileNameWithTMDB(fileName, "200"); got != "Show.S01E01.{tmdb-200}.mkv" {
+				t.Fatalf("marked filename = %q", got)
+			}
+		})
 	}
 }
 

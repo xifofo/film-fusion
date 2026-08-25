@@ -518,6 +518,10 @@ func (s *Server) setupRoutes() {
 			mediaRecognition.GET("/category-config", mediaRecognitionHandler.GetCategoryConfig)
 			mediaRecognition.POST("/category-config/validate", mediaRecognitionHandler.ValidateCategoryConfig)
 			mediaRecognition.PUT("/category-config", mediaRecognitionHandler.UpdateCategoryConfig)
+			mediaRecognition.GET("/rename-config", mediaRecognitionHandler.GetRenameConfig)
+			mediaRecognition.PUT("/rename-config", mediaRecognitionHandler.UpdateRenameConfig)
+			mediaRecognition.POST("/rename-config/validate", mediaRecognitionHandler.ValidateRenameTemplate)
+			mediaRecognition.POST("/rename-config/preview", mediaRecognitionHandler.PreviewRenameTemplate)
 			mediaRecognition.POST("/test", mediaRecognitionHandler.Test)
 		}
 

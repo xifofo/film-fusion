@@ -95,6 +95,128 @@ tv:
 	}
 }
 
+func TestParseLocalMediaMetaSupportsCommonTMDBMarkers(t *testing.T) {
+	markers := []string{
+		"[tmdbid=95491]",
+		"[tmdbid-95491]",
+		"[tmdb=95491]",
+		"[tmdb-95491]",
+		"{tmdbid=95491}",
+		"{tmdbid-95491}",
+		"{tmdb=95491}",
+		"{tmdb-95491}",
+	}
+	for _, marker := range markers {
+		t.Run(marker, func(t *testing.T) {
+			input := "The Vampire Diaries (2009) " + marker
+			meta, err := parseLocalMediaMeta(input, MediaRecognitionWordResult{Processed: input}, MediaRecognitionModeTitle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.TMDBID != "95491" || meta.Name != "The Vampire Diaries" || meta.Year != "2009" {
+				t.Fatalf("meta=%+v", meta)
+			}
+		})
+	}
+}
+
+func TestExtractLocalTMDBMarkerIDIgnoresUnsupportedMarkers(t *testing.T) {
+	for _, input := range []string{
+		"The Vampire Diaries (2009)",
+		"The Vampire Diaries (2009) [tvdbid=95491]",
+		"The Vampire Diaries (2009) {imdb-tt1405406}",
+		"The Vampire Diaries (2009) {tmdb-xxxxx}",
+	} {
+		if got := extractLocalTMDBMarkerID(input); got != "" {
+			t.Fatalf("extractLocalTMDBMarkerID(%q)=%q", input, got)
+		}
+	}
+}
+
+func TestMediaRecognitionServiceUsesTMDBMarkerBeforeGuessingMovieFromYear(t *testing.T) {
+	requests := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		if r.URL.Path != "/3/tv/30983" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":30983,"name":"名侦探柯南","original_name":"名探偵コナン",
+			"first_air_date":"1996-01-08","vote_average":8.0,
+			"original_language":"ja","origin_country":["JP"],"genre_ids":[16,9648]
+		}`))
+	}))
+	defer server.Close()
+
+	tmdb := NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+		Enabled: true, BaseURL: server.URL, APIKey: "test-key", TimeoutSeconds: 2,
+	}}, nil)
+	service := NewMediaRecognitionService(newMediaRecognitionTestDB(t), tmdb, nil)
+	result, err := service.Recognize(
+		context.Background(),
+		"Case Closed (1996) {tmdbid-30983}",
+		MediaRecognitionOptions{Mode: MediaRecognitionModeTitle, UseProvidedWords: true, LookupTMDB: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TMDBStatus != "matched_by_id" || result.MediaInfo.TMDBID != "30983" || result.MediaInfo.MediaType != "tv" {
+		t.Fatalf("result=%+v requests=%v", result, requests)
+	}
+	if strings.Join(requests, ",") != "/3/movie/30983,/3/tv/30983" {
+		t.Fatalf("requests=%v", requests)
+	}
+}
+
+func TestMediaRecognitionServiceRecognizesBracketOnlyReleaseByTMDBMarker(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/3/tv/30983" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":30983,"name":"名侦探柯南","original_name":"名探偵コナン",
+			"first_air_date":"1996-01-08","vote_average":8.0,
+			"original_language":"ja","origin_country":["JP"],"genre_ids":[16,9648]
+		}`))
+	}))
+	defer server.Close()
+
+	tmdb := NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+		Enabled: true, BaseURL: server.URL, APIKey: "test-key", TimeoutSeconds: 2,
+	}}, nil)
+	service := NewMediaRecognitionService(newMediaRecognitionTestDB(t), tmdb, nil)
+	result, err := service.Recognize(
+		context.Background(),
+		"[SBSUB][CONAN][1210][WEBRIP][1080P][HEVC_AAC][CHS_CHT_JP][PGS](E5B7FCE8).{tmdbid-30983}.mkv",
+		MediaRecognitionOptions{
+			Mode: MediaRecognitionModeFile, UseProvidedWords: true, LookupTMDB: true,
+			UseProvidedCategory: true, CategoryYAML: `
+movie:
+  其他电影:
+tv:
+  动画番剧:
+    genre_ids: '16'
+  其他剧集:
+`,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TMDBStatus != "matched_by_id" || result.MediaInfo.TMDBID != "30983" || result.MediaInfo.MediaType != "tv" {
+		t.Fatalf("result=%+v", result)
+	}
+	if result.MediaInfo.Title != "名侦探柯南" || result.MediaInfo.Category != "动画番剧" ||
+		result.MetaInfo.Name != "CONAN" || result.MetaInfo.SeasonEpisode != "S01E1210" ||
+		result.MetaInfo.ResourcePix != "1080p" || result.MetaInfo.VideoEncode != "H.265" || result.MetaInfo.AudioEncode != "AAC" {
+		t.Fatalf("media=%+v meta=%+v", result.MediaInfo, result.MetaInfo)
+	}
+}
+
 func TestMediaRecognitionServiceSearchesTMDBAndRejectsWrongYear(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/3/search/movie" || r.URL.Query().Get("year") != "2021" {
@@ -130,6 +252,89 @@ func TestMediaRecognitionServiceSearchesTMDBAndRejectsWrongYear(t *testing.T) {
 	}
 	if len(result.MediaInfo.Genres) != 2 || strings.Join(result.MediaInfo.Genres, ",") != "冒险,科幻" {
 		t.Fatalf("genres=%#v", result.MediaInfo.Genres)
+	}
+}
+
+func TestMediaRecognitionServiceMatchesTranslatedTVTitleAfterYearFallback(t *testing.T) {
+	requests := make([]string, 0, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/3/tv/326556" {
+			requests = append(requests, "detail:"+r.URL.Query().Get("language"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"id":326556,"name":"斩神之凡尘神域Ⅱ","original_name":"斩神之凡尘神域Ⅱ",
+				"first_air_date":"2026-06-25","vote_average":8.3,"genres":[{"id":16,"name":"动画"}],
+				"original_language":"zh","origin_country":["CN"]
+			}`))
+			return
+		}
+		if r.URL.Path != "/3/search/tv" || r.URL.Query().Get("query") != "Slay The Gods" {
+			http.NotFound(w, r)
+			return
+		}
+		language := r.URL.Query().Get("language")
+		year := r.URL.Query().Get("first_air_date_year")
+		requests = append(requests, language+":"+year)
+		w.Header().Set("Content-Type", "application/json")
+		if year != "" {
+			_, _ = w.Write([]byte(`{"results":[]}`))
+			return
+		}
+		if language == "en-US" {
+			_, _ = w.Write([]byte(`{"results":[
+				{"id":259231,"name":"Slay the Gods","original_name":"斩神之凡尘神域","first_air_date":"2024-07-31","vote_average":8.3,"genre_ids":[16],"original_language":"zh","origin_country":["CN"]},
+				{"id":326556,"name":"Slay the Gods II","original_name":"斩神之凡尘神域Ⅱ","vote_average":8.0,"genre_ids":[18],"original_language":"zh","origin_country":["CN"]}
+			]}`))
+			return
+		}
+		if language != "zh-CN" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"results":[
+			{"id":259231,"name":"斩神之凡尘神域","original_name":"斩神之凡尘神域","first_air_date":"2024-07-31","vote_average":8.3,"genre_ids":[16],"original_language":"zh","origin_country":["CN"]},
+			{"id":326556,"name":"斩神之凡尘神域Ⅱ","original_name":"斩神之凡尘神域Ⅱ","vote_average":8.0,"genre_ids":[18],"original_language":"zh","origin_country":["CN"]}
+		]}`))
+	}))
+	defer server.Close()
+
+	tmdb := NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+		Enabled: true, BaseURL: server.URL, APIKey: "test-key", TimeoutSeconds: 2,
+	}}, nil)
+	service := NewMediaRecognitionService(newMediaRecognitionTestDB(t), tmdb, nil)
+	result, err := service.Recognize(context.Background(),
+		"Slay.The.Gods.2026.S01E11.1080p.WeTV.WEB-DL.AAC2.0.H.264-DepWeb.mkv",
+		MediaRecognitionOptions{
+			Mode: MediaRecognitionModeFile, UseProvidedWords: true, LookupTMDB: true,
+			UseProvidedCategory: true, CategoryYAML: `
+movie:
+  其他电影:
+tv:
+  动画番剧:
+    genre_ids: '16'
+  国产剧集:
+    origin_country: 'CN'
+  其他剧集:
+`,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MetaInfo.Name != "Slay The Gods" || result.MetaInfo.Year != "2026" {
+		t.Fatalf("meta=%+v", result.MetaInfo)
+	}
+	if result.TMDBStatus != "matched" || result.MediaInfo.TMDBID != "326556" {
+		t.Fatalf("status=%q media=%+v candidates=%+v", result.TMDBStatus, result.MediaInfo, result.Candidates)
+	}
+	if result.MediaInfo.Title != "斩神之凡尘神域Ⅱ" || result.MediaInfo.Year != "2026" {
+		t.Fatalf("localized media=%+v", result.MediaInfo)
+	}
+	if result.MediaInfo.Category != "动画番剧" || len(result.Candidates) == 0 || result.Candidates[0].Score < minMediaRecognitionMatchScore {
+		t.Fatalf("category=%q candidates=%+v", result.MediaInfo.Category, result.Candidates)
+	}
+	if got := strings.Join(requests, ","); got != "zh-CN:2026,en-US:2026,zh-CN:,en-US:,detail:zh-CN" {
+		t.Fatalf("requests=%q", got)
 	}
 }
 

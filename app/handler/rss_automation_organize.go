@@ -97,7 +97,10 @@ func (h *OrganizeHandler) CheckRSSAutomationMediaStatus(
 	if !dir.ClassifyByCategory {
 		categoryForPath = ""
 	}
-	targetDir := buildMediaLookupTargetDir(dir.DirectoryName, categoryForPath, info)
+	targetDir, err := h.buildMediaLookupTargetDir(dir.DirectoryName, categoryForPath, info)
+	if err != nil {
+		return status, err
+	}
 	items := []Organize115ItemResult{{
 		TmdbID: tmdbID, Title: info.Title, Year: info.Year, TitleYear: info.TitleYear,
 		MediaType: info.MediaType, Category: info.Category, TargetDir: targetDir,

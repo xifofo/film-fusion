@@ -15,6 +15,8 @@ const (
 	RSSAutomationNodeTrigger             = "trigger"
 	RSSAutomationNodeRegex               = "regex"
 	RSSAutomationNodeKeyword             = "keyword"
+	RSSAutomationNodeKeywordReplace      = "keyword_replace"
+	RSSAutomationNodeRegexReplace        = "regex_replace"
 	RSSAutomationNodeConvert             = "convert"
 	RSSAutomationNodeIf                  = "if"
 	RSSAutomationNodeParallel            = "parallel"
@@ -25,6 +27,7 @@ const (
 	RSSAutomationNodeOffline115          = "offline115"
 	RSSAutomationNodeOffline115OpenAPI   = "offline115_openapi"
 	RSSAutomationNodeWait115             = "wait115"
+	RSSAutomationNodeRename115OpenAPI    = "rename115_openapi"
 	RSSAutomationNodeMoviePilotTitle     = "moviepilot_title_recognize"
 	RSSAutomationNodeFilmFusionRecognize = "filmfusion_recognize"
 	RSSAutomationNodeMoviePilotTransfer  = "moviepilot_transfer"
@@ -449,10 +452,11 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 	port = strings.TrimSpace(strings.ToLower(port))
 	if port == "always" {
 		switch nodeType {
-		case RSSAutomationNodeRegex, RSSAutomationNodeKeyword, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
+		case RSSAutomationNodeRegex, RSSAutomationNodeKeyword, RSSAutomationNodeKeywordReplace, RSSAutomationNodeRegexReplace,
+			RSSAutomationNodeConvert, RSSAutomationNodeJoin,
 			RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 			RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-			RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
+			RSSAutomationNodeWait115, RSSAutomationNodeRename115OpenAPI, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
 			RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
 			RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
 			RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
@@ -475,10 +479,11 @@ func isRSSAutomationSourcePortValid(nodeType, port string) bool {
 		return port == "valid" || port == "invalid" || port == "failure"
 	case RSSAutomationNodeParallel:
 		return strings.HasPrefix(port, "branch-") && len(port) > len("branch-")
-	case RSSAutomationNodeRegex, RSSAutomationNodeConvert, RSSAutomationNodeJoin,
+	case RSSAutomationNodeRegex, RSSAutomationNodeKeywordReplace, RSSAutomationNodeRegexReplace,
+		RSSAutomationNodeConvert, RSSAutomationNodeJoin,
 		RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeHDHiveUnlock,
+		RSSAutomationNodeWait115, RSSAutomationNodeRename115OpenAPI, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeHDHiveUnlock,
 		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,
 		RSSAutomationNodeHTTPRequest, RSSAutomationNodeNotification:
 		return port == "success" || port == "failure"
@@ -531,6 +536,44 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 			if _, ok := caseSensitive.(bool); !ok {
 				return errors.New("区分大小写配置必须是布尔值")
 			}
+		}
+	case RSSAutomationNodeKeywordReplace:
+		if rssAutomationConfigString(config, "input") == "" || rssAutomationConfigString(config, "variable") == "" {
+			return errors.New("必须配置输入字段和输出变量")
+		}
+		rules, err := rssAutomationConfigReplacementRules(config, "replacements")
+		if err != nil {
+			return err
+		}
+		if len(rules) == 0 {
+			return errors.New("至少需要一条关键词替换规则")
+		}
+		if len(rules) > 100 {
+			return errors.New("关键词替换规则不能超过 100 条")
+		}
+		for _, rule := range rules {
+			if len([]rune(rule.Keyword)) > 200 {
+				return errors.New("单个替换关键词不能超过 200 个字符")
+			}
+			if len([]rune(rule.Replacement)) > 2000 {
+				return errors.New("单个替换内容不能超过 2000 个字符")
+			}
+		}
+		if caseSensitive, exists := config["case_sensitive"]; exists {
+			if _, ok := caseSensitive.(bool); !ok {
+				return errors.New("区分大小写配置必须是布尔值")
+			}
+		}
+	case RSSAutomationNodeRegexReplace:
+		pattern := rssAutomationConfigString(config, "pattern")
+		if pattern == "" {
+			return errors.New("正则表达式不能为空")
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("正则表达式无效: %w", err)
+		}
+		if rssAutomationConfigString(config, "input") == "" || rssAutomationConfigString(config, "variable") == "" {
+			return errors.New("必须配置输入字段和输出变量")
 		}
 	case RSSAutomationNodeConvert:
 		if rssAutomationConfigString(config, "input") == "" || rssAutomationConfigString(config, "variable") == "" {
@@ -611,6 +654,22 @@ func validateRSSAutomationNodeConfig(node RSSAutomationNode) error {
 		maxWaitMinutes := rssAutomationConfigUint(config, "max_wait_minutes")
 		if maxWaitMinutes > maxRSSAutomation115MaxWaitMinutes {
 			return fmt.Errorf("最长等待不能超过 %d 分钟", maxRSSAutomation115MaxWaitMinutes)
+		}
+	case RSSAutomationNodeRename115OpenAPI:
+		if rssAutomationConfigUint(config, "cloud_storage_id") == 0 {
+			return errors.New("必须选择 115 OpenAPI 账号")
+		}
+		if rssAutomationConfigString(config, "file_id") == "" {
+			return errors.New("必须配置要重命名的文件或文件夹 ID")
+		}
+		newName := rssAutomationConfigString(config, "new_name")
+		if newName == "" {
+			return errors.New("必须配置新名称")
+		}
+		if !strings.HasPrefix(newName, "$") && !strings.Contains(newName, "{{") {
+			if err := validateRSSAutomation115RenameName(newName); err != nil {
+				return err
+			}
 		}
 	case RSSAutomationNodeMoviePilotTitle:
 		if rssAutomationConfigString(config, "input") == "" {
@@ -978,4 +1037,51 @@ func rssAutomationConfigTextSlice(config map[string]any, key string) []string {
 		result = append(result, text)
 	}
 	return result
+}
+
+type rssAutomationReplacementRule struct {
+	Keyword     string
+	Replacement string
+}
+
+func rssAutomationConfigReplacementRules(config map[string]any, key string) ([]rssAutomationReplacementRule, error) {
+	value, ok := config[key]
+	if !ok || value == nil {
+		return nil, nil
+	}
+	values, ok := value.([]any)
+	if !ok {
+		return nil, errors.New("关键词替换规则格式无效")
+	}
+	rules := make([]rssAutomationReplacementRule, 0, len(values))
+	for index, value := range values {
+		raw, ok := value.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("第 %d 条关键词替换规则格式无效", index+1)
+		}
+		keywordValue, keywordOK := raw["keyword"].(string)
+		replacementValue, replacementOK := raw["replacement"].(string)
+		keyword := strings.TrimSpace(keywordValue)
+		if !keywordOK || keyword == "" {
+			return nil, fmt.Errorf("第 %d 条关键词替换规则的关键词不能为空", index+1)
+		}
+		if !replacementOK {
+			return nil, fmt.Errorf("第 %d 条关键词替换规则的替换内容必须是文本", index+1)
+		}
+		rules = append(rules, rssAutomationReplacementRule{
+			Keyword: keyword, Replacement: replacementValue,
+		})
+	}
+	return rules, nil
+}
+
+func rssAutomationConfigRawString(config map[string]any, key string) string {
+	value, ok := config[key]
+	if !ok || value == nil {
+		return ""
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return fmt.Sprint(value)
 }

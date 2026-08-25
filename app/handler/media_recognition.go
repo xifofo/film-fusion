@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -100,6 +101,82 @@ func (h *MediaRecognitionHandler) UpdateCategoryConfig(c *gin.Context) {
 		return
 	}
 	h.success(c, result, "本地分类配置已保存并立即生效")
+}
+
+// GetRenameConfig 返回全局电影、电视剧重命名格式与可用变量。
+func (h *MediaRecognitionHandler) GetRenameConfig(c *gin.Context) {
+	result, err := h.service.LoadMediaRenameConfig()
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, "读取自定义重命名配置失败: "+err.Error())
+		return
+	}
+	h.success(c, result, "获取自定义重命名配置成功")
+}
+
+type updateMediaRecognitionRenameRequest struct {
+	MovieFormat string `json:"movie_format"`
+	TVFormat    string `json:"tv_format"`
+}
+
+// UpdateRenameConfig 覆盖保存电影与电视剧格式；首次保存后立即接管整理命名。
+func (h *MediaRecognitionHandler) UpdateRenameConfig(c *gin.Context) {
+	var request updateMediaRecognitionRenameRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	result, err := h.service.SaveMediaRenameConfig(request.MovieFormat, request.TVFormat)
+	if err != nil {
+		var validationErr *service.MediaRenameValidationError
+		if errors.As(err, &validationErr) {
+			c.JSON(http.StatusBadRequest, ApiResponse{
+				Code: http.StatusBadRequest, Message: "保存自定义重命名配置失败: " + err.Error(),
+				Data: gin.H{"media_type": validationErr.MediaType, "validation": validationErr.Validation},
+			})
+			return
+		}
+		h.error(c, http.StatusInternalServerError, "保存自定义重命名配置失败: "+err.Error())
+		return
+	}
+	h.success(c, result, "电影与电视剧重命名格式已保存并立即生效")
+}
+
+type mediaRecognitionRenameTemplateRequest struct {
+	MediaType string         `json:"media_type"`
+	Template  string         `json:"template"`
+	Sample    map[string]any `json:"sample,omitempty"`
+}
+
+// ValidateRenameTemplate 校验页面中的未保存模板。
+func (h *MediaRecognitionHandler) ValidateRenameTemplate(c *gin.Context) {
+	var request mediaRecognitionRenameTemplateRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	result, err := service.ValidateMediaRenameTemplate(request.MediaType, request.Template)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, ApiResponse{
+			Code: http.StatusBadRequest, Message: "重命名模板校验失败: " + err.Error(), Data: result,
+		})
+		return
+	}
+	h.success(c, result, "重命名模板校验通过")
+}
+
+// PreviewRenameTemplate 使用未保存模板和可选示例变量生成路径预览。
+func (h *MediaRecognitionHandler) PreviewRenameTemplate(c *gin.Context) {
+	var request mediaRecognitionRenameTemplateRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	result, err := h.service.PreviewMediaRenameTemplate(request.MediaType, request.Template, request.Sample)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, "生成重命名预览失败: "+err.Error())
+		return
+	}
+	h.success(c, result, "重命名预览生成成功")
 }
 
 type testMediaRecognitionRequest struct {

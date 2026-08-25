@@ -448,7 +448,11 @@ func (h *OrganizeHandler) CheckMediaLocalStatus(c *gin.Context) {
 	if !dir.ClassifyByCategory {
 		categoryForPath = ""
 	}
-	targetDir := buildMediaLookupTargetDir(dir.DirectoryName, categoryForPath, info)
+	targetDir, err := h.buildMediaLookupTargetDir(dir.DirectoryName, categoryForPath, info)
+	if err != nil {
+		h.error(c, http.StatusInternalServerError, 500, "生成媒体本地状态查询路径失败: "+err.Error())
+		return
+	}
 	items := []Organize115ItemResult{
 		{
 			TmdbID:    tmdbID,
@@ -581,7 +585,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			item.RecognizeName = recognizeName
 			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
 
-			info, _, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
+			info, recognitionRaw, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
 			if recErr != nil {
 				item.Error = recErr.Error()
 				continue
@@ -598,7 +602,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			)
 			item.RecognizeInput = recognizeInput
 
-			transferName, _, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
+			transferName, transferRaw, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
 			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
@@ -618,7 +622,20 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			if item.Category == "" {
 				item.Category = service.SelectMoviePilotCategory(info.MediaType, info, categoryCfg)
 			}
-			item.TargetPath = service.BuildMoviePilotTargetPath(item.Category, info, transferName, file.Fn)
+			targetPath, targetErr := h.moviePilotSvc.BuildOrganizeTargetPath(item.Category, service.MediaRenameInput{
+				Info: info, MediaType: item.MediaType, Category: item.Category,
+				RecognizeName: recognizeName, TransferName: transferName, OriginalName: file.Fn,
+				RecognitionRaw: recognitionRaw, TransferRaw: transferRaw,
+			})
+			if targetErr != nil {
+				if item.Error == "" {
+					item.Error = "生成重命名路径失败: " + targetErr.Error()
+				} else {
+					item.Error += "; 生成重命名路径失败: " + targetErr.Error()
+				}
+			} else {
+				item.TargetPath = targetPath
+			}
 
 			results = append(results, item)
 		}
@@ -1967,7 +1984,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				ext = strings.TrimPrefix(filepath.Ext(file.Name), ".")
 			}
 
-			info, recognizeInput, recErr := h.recognizeFileWithContext(file.Name, recognizeName, args.context, recognitionSource)
+			info, recognizeInput, recognitionRaw, recErr := h.recognizeFileWithContext(file.Name, recognizeName, args.context, recognitionSource)
 			item.RecognizeInput = recognizeInput
 			if recErr != nil {
 				item.Error = recErr.Error()
@@ -2018,7 +2035,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 				}
 			}
 
-			transferName, _, transErr := h.moviePilotSvc.TransferNameWithSource(transferInput, ext, recognitionSource)
+			transferName, transferRaw, transErr := h.moviePilotSvc.TransferNameWithSource(transferInput, ext, recognitionSource)
 			transferName = dedupeConsecutiveTransferTags(transferName)
 			if transErr != nil {
 				if item.Error == "" {
@@ -2055,7 +2072,24 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			if !dir.ClassifyByCategory {
 				categoryForPath = ""
 			}
-			item.TargetPath = buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, info, transferName, targetOriginalName)
+			targetPath, targetErr := h.buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, service.MediaRenameInput{
+				Info: info, MediaType: item.MediaType, Category: item.Category,
+				RecognizeName: item.RecognizeName, TransferName: transferName, OriginalName: file.Name,
+				LegacyOriginalName: targetOriginalName,
+				RecognitionRaw:     recognitionRaw, TransferRaw: transferRaw,
+			})
+			if targetErr != nil {
+				item.Error = "生成重命名路径失败: " + targetErr.Error()
+				results = append(results, item)
+				if !dryRun {
+					group.Error = item.Error
+					group.Total = totalFiles
+					group.Items = results
+					return group
+				}
+				continue
+			}
+			item.TargetPath = targetPath
 			item.TargetDir = path.Dir(item.TargetPath)
 			item.RenameTo = path.Base(item.TargetPath)
 			item.SourceSeason, item.SourceEpisode = inferSourceSeasonEpisode(file.Name, recognizeName, recognizeInput, args.context, info)
@@ -2124,13 +2158,13 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	return group
 }
 
-func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName string, context Organize115FolderContext, recognitionSource string) (service.MoviePilotMediaInfo, string, error) {
+func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName string, context Organize115FolderContext, recognitionSource string) (service.MoviePilotMediaInfo, string, map[string]any, error) {
 	candidates := buildRecognizeInputs(fileName, recognizeName, context)
 	var lastErr error
 	lastInput := ""
 	for _, input := range candidates {
 		lastInput = input
-		info, _, err := h.moviePilotSvc.RecognizeFileWithSource(input, recognitionSource)
+		info, raw, err := h.moviePilotSvc.RecognizeFileWithSource(input, recognitionSource)
 		if err != nil {
 			lastErr = err
 			continue
@@ -2139,12 +2173,12 @@ func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName strin
 			lastErr = fmt.Errorf("未识别到 TMDB ID")
 			continue
 		}
-		return info, input, nil
+		return info, input, raw, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("识别失败")
 	}
-	return service.MoviePilotMediaInfo{}, lastInput, lastErr
+	return service.MoviePilotMediaInfo{}, lastInput, nil, lastErr
 }
 
 // enhanceEpisodeRecognizeInputWithTMDBEnglish handles episode-only release
@@ -2847,13 +2881,16 @@ func normalizeFileIDSet(ids []string) map[string]struct{} {
 	return seen
 }
 
-func buildTargetPathWithDirectory(directoryName, category string, info service.MoviePilotMediaInfo, transferName, originalName string) string {
-	base := service.BuildMoviePilotTargetPath(category, info, transferName, originalName)
+func (h *OrganizeHandler) buildTargetPathWithDirectory(directoryName, category string, input service.MediaRenameInput) (string, error) {
+	base, err := h.moviePilotSvc.BuildOrganizeTargetPath(category, input)
+	if err != nil {
+		return "", err
+	}
 	dirName := strings.Trim(strings.TrimSpace(directoryName), "/")
 	if dirName == "" {
-		return base
+		return base, nil
 	}
-	return path.Join("/", dirName, strings.TrimPrefix(base, "/"))
+	return path.Join("/", dirName, strings.TrimPrefix(base, "/")), nil
 }
 
 func buildTitleYear(title, year string) string {
@@ -2868,30 +2905,22 @@ func buildTitleYear(title, year string) string {
 	return fmt.Sprintf("%s (%s)", title, year)
 }
 
-func buildMediaLookupTargetDir(directoryName, category string, info service.MoviePilotMediaInfo) string {
-	folderName := strings.TrimSpace(info.TitleYear)
-	if folderName == "" {
-		folderName = buildTitleYear(info.Title, info.Year)
+func (h *OrganizeHandler) buildMediaLookupTargetDir(directoryName, category string, info service.MoviePilotMediaInfo) (string, error) {
+	probeName := "FilmFusion.Media.Lookup.Probe.mkv"
+	targetPath, err := h.buildTargetPathWithDirectory(directoryName, category, service.MediaRenameInput{
+		Info: info, MediaType: info.MediaType, Category: info.Category,
+		RecognizeName: probeName, TransferName: probeName, OriginalName: probeName,
+	})
+	if err != nil {
+		return "", err
 	}
-	if folderName == "" {
-		folderName = strings.TrimSpace(info.Title)
+	targetDir := path.Dir(targetPath)
+	if isOrganizeTVMedia(info.MediaType, info.Category) {
+		if _, ok := parseSeasonDirNumber(path.Base(targetDir)); ok {
+			targetDir = path.Dir(targetDir)
+		}
 	}
-	if folderName == "" {
-		folderName = strings.TrimSpace(info.TmdbID)
-	}
-	if tmdbID := strings.TrimSpace(info.TmdbID); tmdbID != "" && !strings.Contains(folderName, "{tmdb-") {
-		folderName = strings.TrimRight(folderName, " ") + " {tmdb-" + tmdbID + "}"
-	}
-
-	parts := []string{"/"}
-	if dirName := strings.Trim(strings.TrimSpace(directoryName), "/"); dirName != "" {
-		parts = append(parts, dirName)
-	}
-	if cat := strings.Trim(strings.TrimSpace(category), "/"); cat != "" {
-		parts = append(parts, cat)
-	}
-	parts = append(parts, folderName)
-	return path.Join(parts...)
+	return targetDir, nil
 }
 
 func findLocalDirByTmdbID(savePath, tmdbID string) (string, bool) {

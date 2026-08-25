@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"film-fusion/app/model"
 
@@ -275,6 +277,76 @@ func (s *RSSAutomationService) executeRSSAutomationOffline115OpenAPI(ctx context
 		"access_method": "openapi",
 		"content_key":   rssAutomationContentKey(downloadURL), "submitted": true,
 	}, nil
+}
+
+func (s *RSSAutomationService) executeRSSAutomationRename115OpenAPI(ctx context.Context, node RSSAutomationNode, runContext map[string]any) (map[string]any, error) {
+	storageID := rssAutomationConfigUint(node.Config, "cloud_storage_id")
+	var storage model.CloudStorage
+	if err := s.db.First(&storage, storageID).Error; err != nil {
+		return nil, fmt.Errorf("115 OpenAPI 账号不存在: %w", err)
+	}
+	if storage.StorageType != model.StorageType115Open {
+		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
+	}
+	if storage.Status != model.StatusActive {
+		return nil, fmt.Errorf("115 OpenAPI 账号当前状态为 %s", storage.Status)
+	}
+	accessToken := strings.TrimSpace(storage.AccessToken)
+	if accessToken == "" {
+		return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
+	}
+
+	fileID, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "file_id"))
+	if err != nil {
+		return nil, fmt.Errorf("解析 115 文件 ID 失败: %w", err)
+	}
+	if fileID == "0" || len(fileID) > 100 || strings.IndexFunc(fileID, unicode.IsSpace) >= 0 {
+		return nil, errors.New("115 文件或文件夹 ID 无效")
+	}
+	newName, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "new_name"))
+	if err != nil {
+		return nil, fmt.Errorf("解析 115 新名称失败: %w", err)
+	}
+	if err := validateRSSAutomation115RenameName(newName); err != nil {
+		return nil, err
+	}
+
+	client := sdk115.New(sdk115.WithAccessToken(accessToken))
+	if s.httpClient != nil {
+		client.SetHttpClient(s.httpClient)
+	}
+	response, err := client.UpdateFile(ctx, &sdk115.UpdateFileReq{FileID: fileID, FileNma: newName})
+	if err != nil {
+		return nil, fmt.Errorf("通过 115 OpenAPI 重命名失败: %w", err)
+	}
+	fileName := newName
+	if response != nil && strings.TrimSpace(response.FileName) != "" {
+		fileName = strings.TrimSpace(response.FileName)
+	}
+	return map[string]any{
+		"renamed": true, "file_id": fileID, "file_name": fileName, "new_name": newName,
+		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName, "access_method": "openapi",
+	}, nil
+}
+
+func validateRSSAutomation115RenameName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("115 新名称不能为空")
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("115 新名称不是有效的 UTF-8 文本")
+	}
+	if len(name) > 255 {
+		return errors.New("115 新名称不能超过 255 字节")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return errors.New("115 新名称不能包含路径分隔符")
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return errors.New("115 新名称不能包含控制字符")
+	}
+	return nil
 }
 
 func (s *RSSAutomationService) executeRSSAutomationNotification(ctx context.Context, node RSSAutomationNode, runContext map[string]any) (map[string]any, error) {

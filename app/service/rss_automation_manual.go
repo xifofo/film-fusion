@@ -310,6 +310,10 @@ func executeRSSAutomationPreviewNode(node RSSAutomationNode, runContext map[stri
 		return executeRSSAutomationRegexNode(node, runContext)
 	case RSSAutomationNodeKeyword:
 		return executeRSSAutomationKeywordNode(node, runContext)
+	case RSSAutomationNodeKeywordReplace:
+		return executeRSSAutomationKeywordReplaceNode(node, runContext)
+	case RSSAutomationNodeRegexReplace:
+		return executeRSSAutomationRegexReplaceNode(node, runContext)
 	case RSSAutomationNodeConvert:
 		return executeRSSAutomationConvertNode(node, runContext)
 	case RSSAutomationNodeIf:
@@ -352,7 +356,25 @@ func previewRSSAutomationActionNode(node RSSAutomationNode, runContext map[strin
 	case RSSAutomationNodeWait115:
 		return map[string]any{
 			"selected_port": "success", "preview": true, "completed": true,
+			"file_id": "preview-file", "file_name": "运行时读取 115 下载结果",
+			"file_ids": []string{"preview-file"}, "file_names": []string{"运行时读取 115 下载结果"},
 			"tasks": []map[string]any{{"status": 2, "file_id": "preview-file", "name": "运行时读取 115 下载结果"}},
+		}, nil
+	case RSSAutomationNodeRename115OpenAPI:
+		fileID, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "file_id"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		newName, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "new_name"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		if err := validateRSSAutomation115RenameName(newName); err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		return map[string]any{
+			"selected_port": "success", "preview": true, "renamed": true,
+			"file_id": fileID, "file_name": newName, "new_name": newName, "access_method": "openapi",
 		}, nil
 	case RSSAutomationNodeMoviePilotTitle:
 		input, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "input"))

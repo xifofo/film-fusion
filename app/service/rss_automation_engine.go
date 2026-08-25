@@ -275,6 +275,10 @@ func (s *RSSAutomationService) executeRSSAutomationNode(ctx context.Context, run
 		return executeRSSAutomationRegexNode(node, runContext)
 	case RSSAutomationNodeKeyword:
 		return executeRSSAutomationKeywordNode(node, runContext)
+	case RSSAutomationNodeKeywordReplace:
+		return executeRSSAutomationKeywordReplaceNode(node, runContext)
+	case RSSAutomationNodeRegexReplace:
+		return executeRSSAutomationRegexReplaceNode(node, runContext)
 	case RSSAutomationNodeConvert:
 		return executeRSSAutomationConvertNode(node, runContext)
 	case RSSAutomationNodeIf:
@@ -310,6 +314,9 @@ func (s *RSSAutomationService) executeRSSAutomationNode(ctx context.Context, run
 		return withRSSAutomationSelectedPort(output, err), err
 	case RSSAutomationNodeWait115:
 		return s.executeRSSAutomationWait115(ctx, nodeRun, node, definition, runContext)
+	case RSSAutomationNodeRename115OpenAPI:
+		output, err := s.executeRSSAutomationRename115OpenAPI(ctx, node, runContext)
+		return withRSSAutomationSelectedPort(output, err), err
 	case RSSAutomationNodeMoviePilotTitle:
 		return s.executeRSSAutomationMoviePilotTitleRecognize(ctx, node, runContext)
 	case RSSAutomationNodeFilmFusionRecognize:
@@ -430,6 +437,63 @@ func executeRSSAutomationKeywordNode(node RSSAutomationNode, runContext map[stri
 		"matched":          matched,
 		"matched_keywords": matchedKeywords,
 		"match_mode":       mode,
+	}, nil
+}
+
+func executeRSSAutomationKeywordReplaceNode(node RSSAutomationNode, runContext map[string]any) (map[string]any, error) {
+	input, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "input"))
+	if err != nil {
+		return map[string]any{"selected_port": "failure"}, err
+	}
+	rules, err := rssAutomationConfigReplacementRules(node.Config, "replacements")
+	if err != nil {
+		return map[string]any{"selected_port": "failure"}, err
+	}
+	if len(rules) == 0 {
+		return map[string]any{"selected_port": "failure"}, errors.New("关键词替换规则不能为空")
+	}
+	caseSensitive, _ := node.Config["case_sensitive"].(bool)
+	result := input
+	replacementCount := 0
+	for _, rule := range rules {
+		if caseSensitive {
+			replacementCount += strings.Count(result, rule.Keyword)
+			result = strings.ReplaceAll(result, rule.Keyword, rule.Replacement)
+			continue
+		}
+		pattern := regexp.MustCompile(`(?i)` + regexp.QuoteMeta(rule.Keyword))
+		replacementCount += len(pattern.FindAllStringIndex(result, -1))
+		result = pattern.ReplaceAllStringFunc(result, func(string) string { return rule.Replacement })
+	}
+	variable := rssAutomationConfigString(node.Config, "variable")
+	return map[string]any{
+		"selected_port":     "success",
+		"input":             input,
+		"result":            result,
+		"replacement_count": replacementCount,
+		"variables":         map[string]any{variable: result},
+	}, nil
+}
+
+func executeRSSAutomationRegexReplaceNode(node RSSAutomationNode, runContext map[string]any) (map[string]any, error) {
+	input, err := resolveRSSAutomationString(runContext, rssAutomationConfigString(node.Config, "input"))
+	if err != nil {
+		return map[string]any{"selected_port": "failure"}, err
+	}
+	pattern, err := regexp.Compile(rssAutomationConfigString(node.Config, "pattern"))
+	if err != nil {
+		return map[string]any{"selected_port": "failure"}, err
+	}
+	replacement := rssAutomationConfigRawString(node.Config, "replacement")
+	replacementCount := len(pattern.FindAllStringIndex(input, -1))
+	result := pattern.ReplaceAllString(input, replacement)
+	variable := rssAutomationConfigString(node.Config, "variable")
+	return map[string]any{
+		"selected_port":     "success",
+		"input":             input,
+		"result":            result,
+		"replacement_count": replacementCount,
+		"variables":         map[string]any{variable: result},
 	}, nil
 }
 

@@ -72,6 +72,26 @@ func (s *MoviePilotService) SetLocalMediaRecognition(local *MediaRecognitionServ
 	s.local = local
 }
 
+// BuildOrganizeTargetPath uses the saved custom Jinja2-compatible format once
+// FilmFusion has taken ownership of rename configuration. Until the first save,
+// it deliberately preserves the historical FilmFusion target path.
+func (s *MoviePilotService) BuildOrganizeTargetPath(category string, input MediaRenameInput) (string, error) {
+	if s != nil && s.local != nil {
+		target, configured, err := s.local.BuildMediaRenameTargetPath(category, input)
+		if err != nil {
+			return "", err
+		}
+		if configured {
+			return target, nil
+		}
+	}
+	legacyOriginalName := strings.TrimSpace(input.LegacyOriginalName)
+	if legacyOriginalName == "" {
+		legacyOriginalName = input.OriginalName
+	}
+	return BuildMoviePilotTargetPath(category, input.Info, input.TransferName, legacyOriginalName), nil
+}
+
 func (s *MoviePilotService) Start() {
 	if !s.isConfigured() {
 		s.logger.Warn("MoviePilot 未配置，跳过令牌定时刷新")

@@ -973,7 +973,7 @@ func isRSSAutomationActionNode(nodeType string) bool {
 	switch nodeType {
 	case RSSAutomationNodeQBittorrent, RSSAutomationNodeWaitQBittorrent, RSSAutomationNodeDeleteQBittorrent,
 		RSSAutomationNodeOffline115, RSSAutomationNodeOffline115OpenAPI,
-		RSSAutomationNodeWait115, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
+		RSSAutomationNodeWait115, RSSAutomationNodeRename115OpenAPI, RSSAutomationNodeMoviePilotTitle, RSSAutomationNodeFilmFusionRecognize, RSSAutomationNodeMoviePilotTransfer, RSSAutomationNodeMediaExists,
 		RSSAutomationNodeHDHiveQuery, RSSAutomationNodeHDHiveUnlock,
 		RSSAutomationNodeMoviePilotRecognize, RSSAutomationNodeOrganizeStrm,
 		RSSAutomationNodeStrmVerify, RSSAutomationNodeStrmRegenerate, RSSAutomationNodeEmbyRefreshWait,

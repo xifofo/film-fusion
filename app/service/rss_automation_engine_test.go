@@ -149,6 +149,61 @@ func TestExecuteRSSAutomationKeywordNodeModes(t *testing.T) {
 	}
 }
 
+func TestExecuteRSSAutomationKeywordReplaceNodeAppliesOrderedLiteralRules(t *testing.T) {
+	node := RSSAutomationNode{Type: RSSAutomationNodeKeywordReplace, Config: map[string]any{
+		"input": "$item.title", "variable": "normalized_title", "case_sensitive": false,
+		"replacements": []any{
+			map[string]any{"keyword": "WEB-DL", "replacement": "WebDL"},
+			map[string]any{"keyword": "WebDL", "replacement": "WEB"},
+			map[string]any{"keyword": "[字幕组]", "replacement": "$clean"},
+		},
+	}}
+	output, err := executeRSSAutomationKeywordReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "[字幕组] Show web-dl WEB-DL"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := output["result"]; got != "$clean Show WEB WEB" {
+		t.Fatalf("result = %#v", got)
+	}
+	if got := output["replacement_count"]; got != 5 {
+		t.Fatalf("replacement_count = %#v, want 5", got)
+	}
+	variables := output["variables"].(map[string]any)
+	if got := variables["normalized_title"]; got != output["result"] {
+		t.Fatalf("normalized_title = %#v, result = %#v", got, output["result"])
+	}
+}
+
+func TestExecuteRSSAutomationRegexReplaceNodeSupportsCaptureGroupsAndDeletion(t *testing.T) {
+	node := RSSAutomationNode{Type: RSSAutomationNodeRegexReplace, Config: map[string]any{
+		"input": "$item.title", "pattern": `(?P<season>S\d{2})E(\d{2})`,
+		"replacement": `${season} 第${2}集`, "variable": "normalized_title",
+	}}
+	output, err := executeRSSAutomationRegexReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "Show S01E02 S01E03"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := output["result"]; got != "Show S01 第02集 S01 第03集" {
+		t.Fatalf("result = %#v", got)
+	}
+	if got := output["replacement_count"]; got != 2 {
+		t.Fatalf("replacement_count = %#v, want 2", got)
+	}
+
+	node.Config["pattern"] = `\s+S\d{2}E\d{2}`
+	node.Config["replacement"] = ""
+	output, err = executeRSSAutomationRegexReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "Show S01E02"},
+	})
+	if err != nil || output["result"] != "Show" {
+		t.Fatalf("delete replacement output = %#v, err = %v", output, err)
+	}
+}
+
 func TestEvaluateRSSAutomationConditionSupportsUnifiedTemplateReferences(t *testing.T) {
 	contextValue := map[string]any{
 		"item": map[string]any{"title": "Example 2160p"},

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +10,55 @@ import (
 	"film-fusion/app/config"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
+
+func TestBuildMediaLookupTargetDirFollowsActiveRenameTemplate(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "-"))), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.SystemConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	rename := service.NewMediaRecognitionService(db, nil, nil)
+	moviePilot := service.NewMoviePilotService(&config.Config{}, nil)
+	moviePilot.SetLocalMediaRecognition(rename)
+	handler := &OrganizeHandler{moviePilotSvc: moviePilot}
+	movieInfo := service.MoviePilotMediaInfo{
+		MediaType: "movie", Title: "流浪地球", Year: "2019", TitleYear: "流浪地球 (2019)", TmdbID: "535167",
+	}
+
+	legacy, err := handler.buildMediaLookupTargetDir("影视", "华语电影", movieInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != "/影视/华语电影/流浪地球 (2019) {tmdb-535167}" {
+		t.Fatalf("legacy lookup dir=%q", legacy)
+	}
+	if _, err := rename.SaveMediaRenameConfig(service.DefaultMovieRenameFormat, service.DefaultTVRenameFormat); err != nil {
+		t.Fatal(err)
+	}
+	customMovie, err := handler.buildMediaLookupTargetDir("影视", "华语电影", movieInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customMovie != "/影视/华语电影/流浪地球 (2019)" {
+		t.Fatalf("custom movie lookup dir=%q", customMovie)
+	}
+
+	customTV, err := handler.buildMediaLookupTargetDir("影视", "国产剧", service.MoviePilotMediaInfo{
+		MediaType: "show", Title: "三体", Year: "2023", TitleYear: "三体 (2023)", TmdbID: "136315",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customTV != "/影视/国产剧/三体 (2023)" {
+		t.Fatalf("custom tv lookup dir=%q", customTV)
+	}
+}
 
 func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
 	inputs := buildRecognizeInputs(

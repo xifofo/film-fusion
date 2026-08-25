@@ -44,12 +44,26 @@ var rssAutomationNodeProtocols = []RSSAutomationNodeProtocol{
 		rssAutomationVariable("matched_keywords", "array", "命中关键词", "本次命中的关键词列表。", []string{"2160p"}),
 		rssAutomationVariable("match_mode", "string", "匹配规则", "实际使用的关键词匹配规则。", "contains_any"),
 	}},
+	{Type: RSSAutomationNodeKeywordReplace, Label: "关键词替换", Inputs: []RSSAutomationVariableProtocol{
+		rssAutomationTemplateVariable("input", "string", "输入字段", "要按顺序执行关键词替换的 RSS 字段或上游变量。", "$item.title", true),
+	}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("result", "string", "替换结果", "完成全部关键词规则后的文本。", "示例剧 S01E01 2160p"),
+		rssAutomationVariable("replacement_count", "integer", "替换次数", "全部关键词规则实际完成的替换次数。", 2),
+		rssAutomationVariable("variables", "object", "生成变量", "替换结果写入 $vars.* 的变量对象。", map[string]any{"normalized_title": "示例剧 S01E01 2160p"}),
+	}},
 	{Type: RSSAutomationNodeRegex, Label: "正则提取", Inputs: []RSSAutomationVariableProtocol{
 		rssAutomationTemplateVariable("input", "string", "输入字段", "要执行正则提取的 RSS 字段或上游变量。", "$item.title", true),
 	}, Outputs: []RSSAutomationVariableProtocol{
 		rssAutomationVariable("matched", "boolean", "是否匹配", "正则表达式是否命中。", true),
 		rssAutomationVariable("captured", "string", "捕获内容", "指定捕获组的原始文本。", "12"),
 		rssAutomationVariable("variables", "object", "生成变量", "写入 $vars.* 的变量对象。", map[string]any{"episode": 12}),
+	}},
+	{Type: RSSAutomationNodeRegexReplace, Label: "正则替换", Inputs: []RSSAutomationVariableProtocol{
+		rssAutomationTemplateVariable("input", "string", "输入字段", "要执行正则全局替换的 RSS 字段或上游变量。", "$item.title", true),
+	}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("result", "string", "替换结果", "使用 Go/RE2 捕获组替换后的文本。", "示例剧 S01E01"),
+		rssAutomationVariable("replacement_count", "integer", "替换次数", "正则表达式实际命中的次数。", 1),
+		rssAutomationVariable("variables", "object", "生成变量", "替换结果写入 $vars.* 的变量对象。", map[string]any{"clean_title": "示例剧 S01E01"}),
 	}},
 	{Type: RSSAutomationNodeConvert, Label: "类型转换", Inputs: []RSSAutomationVariableProtocol{
 		rssAutomationTemplateVariable("input", "any", "输入字段", "要转换的 RSS 字段或上游变量。", "$vars.episode", true),
@@ -137,6 +151,18 @@ var rssAutomationNodeProtocols = []RSSAutomationNodeProtocol{
 		rssAutomationVariable("directory_id", "string", "下载目录 ID", "115 离线任务保存目录 ID。", "0"),
 		rssAutomationVariable("cloud_storage_id", "integer", "115 账号 ID", "执行下载的云存储账号 ID。", 1),
 		rssAutomationVariable("tasks", "array", "完成任务", "115 云下载任务详情。", []any{}),
+	}},
+	{Type: RSSAutomationNodeRename115OpenAPI, Label: "115 API 重命名", Inputs: []RSSAutomationVariableProtocol{
+		rssAutomationTemplateVariable("file_id", "string", "文件或文件夹 ID", "要通过 115 OpenAPI 重命名的对象 ID，通常引用等待节点的 file_id。", "{{nodes.wait115.output.file_id}}", true),
+		rssAutomationTemplateVariable("new_name", "string", "新名称", "完整的新文件名或文件夹名；重命名文件时请按需保留扩展名。", "{{item.title}}.mkv", true),
+	}, Outputs: []RSSAutomationVariableProtocol{
+		rssAutomationVariable("renamed", "boolean", "重命名成功", "115 OpenAPI 是否已成功完成重命名。", true),
+		rssAutomationVariable("file_id", "string", "文件或文件夹 ID", "已重命名对象的 115 ID。", "123456"),
+		rssAutomationVariable("file_name", "string", "实际名称", "115 OpenAPI 返回的实际文件名或文件夹名。", "示例剧.S01E01.mkv"),
+		rssAutomationVariable("new_name", "string", "请求名称", "本次提交给 115 OpenAPI 的新名称。", "示例剧.S01E01.mkv"),
+		rssAutomationVariable("cloud_storage_id", "integer", "115 账号 ID", "执行重命名的云存储账号 ID。", 1),
+		rssAutomationVariable("storage_name", "string", "115 账号名称", "执行重命名的账号名称。", "115 主账号"),
+		rssAutomationVariable("access_method", "string", "访问方式", "固定为 openapi。", "openapi"),
 	}},
 	{Type: RSSAutomationNodeMoviePilotTitle, Label: "MP 标题识别", Inputs: rssAutomationRecognitionInputs("$item.title"), Outputs: rssAutomationRecognitionOutputs()},
 	{Type: RSSAutomationNodeFilmFusionRecognize, Label: "FilmFusion 本地识别", Inputs: []RSSAutomationVariableProtocol{
