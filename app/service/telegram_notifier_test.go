@@ -66,7 +66,7 @@ func TestTelegramChannelSendPhoto(t *testing.T) {
 	}}}
 	channel := NewTelegramChannel(cfg, nil)
 	if err := channel.Send(context.Background(), NotificationEvent{
-		Type: NotificationEventRSSMatched, Message: "百花杀 (2026) S01E01",
+		Type: NotificationEventAutomationTriggered, Message: "百花杀 (2026) S01E01",
 		ImageURL: "https://image.tmdb.org/t/p/w780/poster.jpg",
 	}); err != nil {
 		t.Fatalf("Send: %v", err)

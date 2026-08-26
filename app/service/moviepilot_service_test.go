@@ -154,13 +154,13 @@ func TestMoviePilotBusinessFailureIsReturned(t *testing.T) {
 	}
 }
 
-func TestMoviePilotRecognitionFallsBackToFilmFusionLocalEngine(t *testing.T) {
+func TestSystemDefaultLocalRecognitionUsesFilmFusionEngine(t *testing.T) {
 	db := newMediaRecognitionTestDB(t)
 	local := NewMediaRecognitionService(db, nil, nil)
 	if _, err := local.SaveWords([]string{"S04 => S01"}); err != nil {
 		t.Fatal(err)
 	}
-	svc := NewMoviePilotService(&config.Config{}, nil)
+	svc := NewMoviePilotService(&config.Config{MediaRecognition: config.MediaRecognitionConfig{Source: "local"}}, nil)
 	svc.SetLocalMediaRecognition(local)
 
 	info, raw, err := svc.RecognizeFile("Example.Show.S04E02.1080p.WEB-DL.mkv")
@@ -170,7 +170,7 @@ func TestMoviePilotRecognitionFallsBackToFilmFusionLocalEngine(t *testing.T) {
 	if info.Title != "Example Show" || info.MediaType != "tv" || info.SeasonEpisode != "S01E02" {
 		t.Fatalf("info=%+v", info)
 	}
-	if raw["engine"] != "local" || !strings.Contains(raw["fallback_reason"].(string), "未配置") {
+	if raw["engine"] != "local" {
 		t.Fatalf("raw=%#v", raw)
 	}
 
@@ -235,13 +235,141 @@ func TestMoviePilotExplicitRecognitionSourceDoesNotCrossFallbackBoundary(t *test
 	}
 }
 
+func TestMoviePilotRecognitionKeepsPrimaryResultAndAttachesLocalShadowDiff(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize_file":
+			_, _ = w.Write([]byte(`{
+				"success":true,
+				"data":{
+					"media_info":{"media_type":"tv","title":"MP2 Show","title_year":"MP2 Show (2026)","year":"2026","tmdb_id":123},
+					"meta_info":{"season_episode":"S01E02"}
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	info, raw, err := svc.RecognizeFile("Local.Show.2026.S01E02.{tmdb-456}.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Title != "MP2 Show" || info.TmdbID != "123" {
+		t.Fatalf("primary result was replaced by shadow: %+v", info)
+	}
+	comparison, ok := raw[mediaRecognitionShadowRawKey].(MediaRecognitionShadowComparison)
+	if !ok {
+		t.Fatalf("shadow comparison missing from raw result: %#v", raw)
+	}
+	if comparison.Status != MediaRecognitionShadowDifferent || comparison.Matched {
+		t.Fatalf("comparison=%+v", comparison)
+	}
+	if comparison.MoviePilot == nil || comparison.Local == nil || comparison.MoviePilot.TMDBID != "123" || comparison.Local.TMDBID != "456" {
+		t.Fatalf("unexpected snapshots: %+v", comparison)
+	}
+	foundTMDBDiff := false
+	for _, difference := range comparison.Differences {
+		if difference.Field == "tmdb_id" && difference.MoviePilot == "123" && difference.Local == "456" {
+			foundTMDBDiff = true
+		}
+	}
+	if !foundTMDBDiff {
+		t.Fatalf("TMDB difference missing: %+v", comparison.Differences)
+	}
+	extracted, localInfo, localRaw, ok := MediaRecognitionShadowFromRaw(raw)
+	if !ok || extracted.Status != MediaRecognitionShadowDifferent || localInfo == nil || localInfo.TmdbID != "456" || localRaw == nil {
+		t.Fatalf("organize shadow context missing: comparison=%+v local=%+v raw=%#v", extracted, localInfo, localRaw)
+	}
+}
+
+func TestMoviePilotRecognitionIgnoresLocalShadowFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize_file":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"media_info":{"media_type":"movie","title":"Primary","tmdb_id":99}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(nil, nil, nil))
+	info, raw, err := svc.RecognizeFile("Primary.2026.mkv")
+	if err != nil || info.Title != "Primary" || info.TmdbID != "99" {
+		t.Fatalf("info=%+v err=%v", info, err)
+	}
+	comparison, ok := raw[mediaRecognitionShadowRawKey].(MediaRecognitionShadowComparison)
+	if !ok || comparison.Status != MediaRecognitionShadowLocalError || comparison.LocalError == "" {
+		t.Fatalf("comparison=%+v raw=%#v", comparison, raw)
+	}
+}
+
+func TestCompareRecognitionUsesSameDraftRulesForMP2AndLocal(t *testing.T) {
+	var gotTitle, gotWords string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize":
+			gotTitle = r.URL.Query().Get("title")
+			gotWords = r.URL.Query().Get("custom_words")
+			_, _ = w.Write([]byte(`{
+				"success":true,
+				"data":{
+					"media_info":{"media_type":"tv","title":"Example","title_year":"Example"},
+					"meta_info":{"season_episode":"S02E04"}
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	result, err := svc.CompareRecognition(context.Background(), "Example.S01E03.mkv", MediaRecognitionOptions{
+		Mode: MediaRecognitionModeFile, LookupTMDB: false,
+		Words: []string{"S01 => S02", `S02E <> \.mkv >> EP+1`}, UseProvidedWords: true,
+		CategoryYAML: "movie:\n  临时电影:\ntv:\n  临时剧集:\n", UseProvidedCategory: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotTitle != "Example.S01E03.mkv" || gotWords != "S01 => S02\nS02E <> \\.mkv >> EP+1" {
+		t.Fatalf("title=%q words=%q", gotTitle, gotWords)
+	}
+	if result.Local == nil || result.Local.MetaInfo.SeasonEpisode != "S02E04" {
+		t.Fatalf("local result=%+v", result.Local)
+	}
+	if result.Comparison.Status != MediaRecognitionShadowMatched || !result.Comparison.Matched {
+		t.Fatalf("comparison=%+v", result.Comparison)
+	}
+	if result.Comparison.MoviePilot.Category != "电视剧/临时剧集" || result.Comparison.Local.Category != "电视剧/临时剧集" {
+		t.Fatalf("categories were not compared with the same draft: %+v", result.Comparison)
+	}
+}
+
 func TestNormalizeMediaRecognitionSource(t *testing.T) {
 	tests := map[string]string{
-		"":           MediaRecognitionSourceMoviePilot,
+		"":           MediaRecognitionSourceShadow,
 		"MP":         MediaRecognitionSourceMoviePilot,
 		"moviepilot": MediaRecognitionSourceMoviePilot,
 		"local":      MediaRecognitionSourceLocal,
 		"FilmFusion": MediaRecognitionSourceLocal,
+		"影子模式":       MediaRecognitionSourceShadow,
 	}
 	for input, want := range tests {
 		got, err := NormalizeMediaRecognitionSource(input)
@@ -251,6 +379,75 @@ func TestNormalizeMediaRecognitionSource(t *testing.T) {
 	}
 	if _, err := NormalizeMediaRecognitionSource("unknown"); err == nil {
 		t.Fatal("unknown recognition source should fail validation")
+	}
+}
+
+func TestMediaRecognitionShadowCategoryUsesMP2Path(t *testing.T) {
+	if got := mediaRecognitionCategoryPath("tv", "国产剧集"); got != "电视剧/国产剧集" {
+		t.Fatalf("category path=%q", got)
+	}
+	if got := mediaRecognitionCategoryPath("movie", "movie/华语电影"); got != "电影/华语电影" {
+		t.Fatalf("legacy category path=%q", got)
+	}
+}
+
+func TestMediaRecognitionShadowTreatsEquivalentProviderValuesAsEqual(t *testing.T) {
+	seasonZero := 0
+	comparison := buildMediaRecognitionShadowComparison(
+		&MoviePilotMediaInfo{
+			MediaType: "电影", Title: "乌云背后的幸福线", OriginalTitle: "Silver Linings Playbook",
+			Year: "2012", TitleYear: "乌云背后的幸福线 (2012)", TmdbID: "82693",
+			Category: "欧美电影", ResourceType: "BluRay", ResourcePix: "1080p",
+			VideoEncode: "x264", BeginSeason: seasonZero, HasBeginSeason: true,
+		},
+		nil,
+		&MoviePilotMediaInfo{
+			MediaType: "movie", Title: "乌云背后的幸福线", OriginalTitle: "Silver Linings Playbook",
+			Year: "2012", TitleYear: "乌云背后的幸福线 (2012)", TmdbID: "82693",
+			Category: "欧美电影", ResourceType: "BluRay", ResourcePix: "1080p",
+			VideoEncode: "H.264",
+		},
+		nil,
+		false,
+	)
+	if !comparison.Matched || comparison.Status != MediaRecognitionShadowMatched || len(comparison.Differences) != 0 {
+		t.Fatalf("comparison=%+v", comparison)
+	}
+	if comparison.MoviePilot.MediaType != "movie" || comparison.Local.MediaType != "movie" ||
+		comparison.MoviePilot.VideoEncode != "H.264" || comparison.Local.VideoEncode != "H.264" {
+		t.Fatalf("snapshots were not canonicalized: %+v", comparison)
+	}
+}
+
+func TestTransferNameShadowRunsLocalComparisonButKeepsMP2Result(t *testing.T) {
+	const input = "[乌云背后的幸福线].Silver.Linings.Playbook.(2012).FIN.BluRay.1080p.x264.DDP.5.1.2Audios-CMCT.{tmdb-82693}.mkv"
+	const mp2Name = "Silver Linings Playbook.2012.BluRay.1080p.x264.DDP 5.1 2Audios-CMCT.mkv"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/transfer/name":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"name":"` + mp2Name + `"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	name, raw, err := svc.TransferNameWithSource(input, "mkv", MediaRecognitionSourceShadow)
+	if err != nil || name != mp2Name {
+		t.Fatalf("name=%q err=%v raw=%#v", name, err, raw)
+	}
+	comparison, ok := raw[mediaTransferShadowRawKey].(MediaTransferShadowComparison)
+	if !ok || !comparison.Matched || comparison.Status != MediaRecognitionShadowMatched || comparison.Local != mp2Name {
+		t.Fatalf("comparison=%+v raw=%#v", comparison, raw)
+	}
+	extracted, ok := MediaTransferShadowFromRaw(raw)
+	if !ok || !extracted.Matched || extracted.Local != mp2Name {
+		t.Fatalf("transfer shadow extraction failed: %+v", extracted)
 	}
 }
 
@@ -332,7 +529,7 @@ tv:
 	}
 }
 
-func TestMoviePilotFallbackCircuitAvoidsRepeatedUnavailableRequests(t *testing.T) {
+func TestShadowModeDoesNotReplaceMoviePilotFailureWithLocalResult(t *testing.T) {
 	recognitionRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -351,12 +548,16 @@ func TestMoviePilotFallbackCircuitAvoidsRepeatedUnavailableRequests(t *testing.T
 	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
 	for _, input := range []string{"Show.S01E01.mkv", "Show.S01E02.mkv"} {
 		info, raw, err := svc.RecognizeFile(input)
-		if err != nil || info.Title != "Show" || raw["engine"] != "local" {
+		if err == nil || info.Title != "" {
 			t.Fatalf("input=%q info=%+v raw=%#v err=%v", input, info, raw, err)
 		}
+		comparison, ok := raw[mediaRecognitionShadowRawKey].(MediaRecognitionShadowComparison)
+		if !ok || comparison.Status != MediaRecognitionShadowMoviePilotError || comparison.Local == nil {
+			t.Fatalf("shadow comparison=%+v raw=%#v", comparison, raw)
+		}
 	}
-	if recognitionRequests != 1 {
-		t.Fatalf("recognition requests=%d want=1", recognitionRequests)
+	if recognitionRequests != 2 {
+		t.Fatalf("recognition requests=%d want=2", recognitionRequests)
 	}
 }
 

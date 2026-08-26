@@ -42,7 +42,7 @@ notifications:
   routes:
     emby_brute_force: [telegram]
     system_brute_force: [telegram]
-    rss_matched: [telegram]
+    automation_triggered: [telegram]
     web_115_cookie_invalid: [telegram]
   telegram:
     enabled: false

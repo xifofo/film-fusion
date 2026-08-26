@@ -16,11 +16,11 @@ import (
 type NotificationEventType string
 
 const (
-	NotificationEventEmbySecurity  NotificationEventType = config.NotificationEventEmbySecurity
-	NotificationEventAppSecurity   NotificationEventType = config.NotificationEventAppSecurity
-	NotificationEventRSSMatched    NotificationEventType = config.NotificationEventRSSMatched
-	NotificationEventWeb115Invalid NotificationEventType = config.NotificationEventWeb115Invalid
-	NotificationEventTest          NotificationEventType = "system.test"
+	NotificationEventEmbySecurity        NotificationEventType = config.NotificationEventEmbySecurity
+	NotificationEventAppSecurity         NotificationEventType = config.NotificationEventAppSecurity
+	NotificationEventAutomationTriggered NotificationEventType = config.NotificationEventAutomationTriggered
+	NotificationEventWeb115Invalid       NotificationEventType = config.NotificationEventWeb115Invalid
+	NotificationEventTest                NotificationEventType = "system.test"
 )
 
 type NotificationSeverity string

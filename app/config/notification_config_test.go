@@ -48,7 +48,7 @@ func TestApplyNotificationDefaultsPreservesExplicitlyEmptyRoute(t *testing.T) {
 	contents := "notifications:\n" +
 		"  instance_name: FilmFusion\n" +
 		"  routes:\n" +
-		"    rss_matched: []\n"
+		"    automation_triggered: []\n"
 	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestApplyNotificationDefaultsPreservesExplicitlyEmptyRoute(t *testing.T) {
 		t.Fatalf("unmarshal config: %v", err)
 	}
 	applyNotificationDefaults(&cfg)
-	if len(cfg.Notifications.Routes.RSSMatched) != 0 {
+	if len(cfg.Notifications.Routes.AutomationTriggered) != 0 {
 		t.Fatalf("explicitly empty route received defaults: %+v", cfg.Notifications.Routes)
 	}
 	if len(cfg.Notifications.Routes.EmbyBruteForce) != 1 {
@@ -81,7 +81,7 @@ func TestNotificationConfigFromLegacyPreservesExistingBehavior(t *testing.T) {
 	if !reflect.DeepEqual(settings.Routes.EmbyBruteForce, []string{NotificationChannelTelegram}) || len(settings.Routes.SystemBruteForce) != 0 {
 		t.Fatalf("security routes were not migrated: %+v", settings.Routes)
 	}
-	if !reflect.DeepEqual(settings.Routes.RSSMatched, []string{NotificationChannelTelegram}) ||
+	if !reflect.DeepEqual(settings.Routes.AutomationTriggered, []string{NotificationChannelTelegram}) ||
 		!reflect.DeepEqual(settings.Routes.Web115CookieInvalid, []string{NotificationChannelTelegram}) {
 		t.Fatalf("business notification routes did not preserve legacy behavior: %+v", settings.Routes)
 	}
@@ -91,9 +91,9 @@ func TestMergeLegacyTelegramPreservesOtherChannels(t *testing.T) {
 	current := NotificationConfig{
 		InstanceName: "FilmFusion",
 		Routes: NotificationRoutesConfig{
-			EmbyBruteForce:   []string{NotificationChannelTelegram, NotificationChannelWebhook},
-			SystemBruteForce: []string{NotificationChannelWebhook},
-			RSSMatched:       []string{NotificationChannelWebhook},
+			EmbyBruteForce:      []string{NotificationChannelTelegram, NotificationChannelWebhook},
+			SystemBruteForce:    []string{NotificationChannelWebhook},
+			AutomationTriggered: []string{NotificationChannelWebhook},
 		},
 		Webhook: NotificationWebhookConfig{Enabled: true, URL: "https://example.com/hook", TimeoutSeconds: 10},
 	}
@@ -108,14 +108,14 @@ func TestMergeLegacyTelegramPreservesOtherChannels(t *testing.T) {
 	}
 	if !routeContainsChannel(merged.Routes.SystemBruteForce, NotificationChannelTelegram) ||
 		!routeContainsChannel(merged.Routes.SystemBruteForce, NotificationChannelWebhook) ||
-		!reflect.DeepEqual(merged.Routes.RSSMatched, []string{NotificationChannelWebhook}) {
+		!reflect.DeepEqual(merged.Routes.AutomationTriggered, []string{NotificationChannelWebhook}) {
 		t.Fatalf("legacy update damaged unrelated routes: %+v", merged.Routes)
 	}
 }
 
 func TestValidateNotificationsRejectsUnknownChannelAndInvalidWebhook(t *testing.T) {
 	settings := defaultNotificationConfig()
-	settings.Routes.RSSMatched = []string{"email"}
+	settings.Routes.AutomationTriggered = []string{"email"}
 	if err := ValidateNotifications(settings); err == nil {
 		t.Fatal("unknown notification channel was accepted")
 	}

@@ -1,0 +1,269 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"film-fusion/app/model"
+
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestAutomationEngineRegexCaptureNumericIfAndBranch(t *testing.T) {
+	db := newAutomationTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &AutomationService{
+		db: db, ctx: ctx, cancel: cancel,
+		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
+		workers: make(chan struct{}, 2),
+	}
+
+	definition := AutomationDefinition{
+		SchemaVersion: AutomationSchemaVersion,
+		Nodes: []AutomationNode{
+			{ID: "trigger", Type: AutomationNodeTrigger, Name: "收到条目"},
+			{ID: "capture", Type: AutomationNodeRegex, Name: "提取集数", Config: map[string]any{
+				"input": "$item.title", "pattern": `(\d+)集`, "group": "1", "variable": "episode", "value_type": "integer",
+			}},
+			{ID: "if_episode", Type: AutomationNodeIf, Name: "集数大于 1000", Config: map[string]any{
+				"condition": map[string]any{"field": "$vars.episode", "operator": "gt", "value": 1000},
+			}},
+			{ID: "end_pass", Type: AutomationNodeEnd, Name: "通过"},
+			{ID: "end_reject", Type: AutomationNodeEnd, Name: "忽略"},
+			{ID: "end_no_match", Type: AutomationNodeEnd, Name: "未匹配"},
+		},
+		Edges: []AutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "capture"},
+			{ID: "e2", Source: "capture", SourcePort: "success", Target: "if_episode"},
+			{ID: "e3", Source: "capture", SourcePort: "failure", Target: "end_no_match"},
+			{ID: "e4", Source: "if_episode", SourcePort: "true", Target: "end_pass"},
+			{ID: "e5", Source: "if_episode", SourcePort: "false", Target: "end_reject"},
+		},
+	}
+	if validation := ValidateAutomationDefinition(definition); !validation.Valid {
+		t.Fatalf("test definition invalid: %#v", validation.Errors)
+	}
+	definitionJSON, _ := MarshalAutomationDefinition(definition)
+	source := model.AutomationSource{
+		Name: "115 目录更新", Enabled: true, TriggerType: model.AutomationTrigger115Directory,
+		CloudStorageID: 1, DirectoryID: "0", DirectoryPath: "/", IntervalSeconds: 300,
+	}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	workflow := model.AutomationWorkflow{SourceID: source.ID, Name: "高集数流程", Enabled: true, Version: 1, DefinitionJSON: definitionJSON}
+	if err := db.Create(&workflow).Error; err != nil {
+		t.Fatal(err)
+	}
+	fieldsJSON, _ := json.Marshal(map[string]any{"title": "示例动画 第1001集", "download_url": "magnet:?xt=urn:btih:ABC"})
+	entry := model.AutomationEntry{
+		SourceID: source.ID, Fingerprint: "fingerprint", EventKey: "115:1:episode-1001",
+		ItemID: "episode-1001", Title: "示例动画 第1001集", Path: "/示例动画 第1001集",
+		FieldsJSON: string(fieldsJSON), DiscoveredAt: time.Now(),
+	}
+	if err := db.Create(&entry).Error; err != nil {
+		t.Fatal(err)
+	}
+	if created, err := service.createAutomationRuns(entry); err != nil || created != 1 {
+		t.Fatalf("createAutomationRuns() = %d, %v", created, err)
+	}
+	service.Start()
+	t.Cleanup(service.Stop)
+
+	run := waitForAutomationRun(t, db, model.AutomationRunSucceeded)
+	var nodeRuns []model.AutomationNodeRun
+	if err := db.Where("run_id = ?", run.ID).Find(&nodeRuns).Error; err != nil {
+		t.Fatal(err)
+	}
+	byNode := make(map[string]model.AutomationNodeRun)
+	for _, nodeRun := range nodeRuns {
+		byNode[nodeRun.NodeID] = nodeRun
+	}
+	if byNode["end_pass"].Status != model.AutomationNodeSucceeded {
+		t.Fatalf("pass branch did not execute: %#v", byNode)
+	}
+	if byNode["end_reject"].Status != model.AutomationNodeSkipped || byNode["end_no_match"].Status != model.AutomationNodeSkipped {
+		t.Fatalf("inactive branches not skipped: %#v", byNode)
+	}
+	var captureOutput map[string]any
+	if err := json.Unmarshal([]byte(byNode["capture"].OutputJSON), &captureOutput); err != nil {
+		t.Fatal(err)
+	}
+	variables := captureOutput["variables"].(map[string]any)
+	if got := variables["episode"]; got != float64(1001) {
+		t.Fatalf("captured episode = %#v", got)
+	}
+}
+
+func TestAutomationSharedEndReadinessUsesActiveConditionalBranch(t *testing.T) {
+	predecessor := &model.AutomationNodeRun{
+		NodeID:     "if_episode",
+		Status:     model.AutomationNodeSucceeded,
+		OutputJSON: `{"selected_port":"true"}`,
+	}
+	ready, inactive := automationNodeReadiness(
+		AutomationNode{ID: "end", Type: AutomationNodeEnd},
+		[]AutomationEdge{
+			{Source: "if_episode", SourcePort: "true", Target: "end"},
+			{Source: "if_episode", SourcePort: "false", Target: "end"},
+		},
+		map[string]*model.AutomationNodeRun{"if_episode": predecessor},
+	)
+	if !ready || inactive {
+		t.Fatalf("shared end readiness = %v, inactive = %v", ready, inactive)
+	}
+}
+
+func TestExecuteAutomationKeywordNodeModes(t *testing.T) {
+	tests := []struct {
+		name          string
+		title         string
+		keywords      []any
+		mode          string
+		caseSensitive bool
+		wantPort      string
+	}{
+		{name: "contains any ignores case", title: "Show.WEB-DL.1080p", keywords: []any{"web-dl", "BluRay"}, mode: "contains_any", wantPort: "matched"},
+		{name: "contains all", title: "Show 1080p HEVC", keywords: []any{"1080p", "HEVC"}, mode: "contains_all", wantPort: "matched"},
+		{name: "contains none passes clean title", title: "Show 1080p WEB-DL", keywords: []any{"CAM", "TS"}, mode: "contains_none", wantPort: "matched"},
+		{name: "contains none rejects forbidden keyword", title: "Show 1080p CAM", keywords: []any{"CAM", "TS"}, mode: "contains_none", wantPort: "unmatched"},
+		{name: "case sensitive", title: "Show web-dl", keywords: []any{"WEB-DL"}, mode: "contains_any", caseSensitive: true, wantPort: "unmatched"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			node := AutomationNode{Type: AutomationNodeKeyword, Config: map[string]any{
+				"input": "$item.title", "keywords": test.keywords, "match_mode": test.mode,
+				"case_sensitive": test.caseSensitive,
+			}}
+			output, err := executeAutomationKeywordNode(node, map[string]any{
+				"item": map[string]any{"title": test.title},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := output["selected_port"]; got != test.wantPort {
+				t.Fatalf("selected_port = %#v, want %q; output = %#v", got, test.wantPort, output)
+			}
+		})
+	}
+}
+
+func TestExecuteAutomationKeywordReplaceNodeAppliesOrderedLiteralRules(t *testing.T) {
+	node := AutomationNode{Type: AutomationNodeKeywordReplace, Config: map[string]any{
+		"input": "$item.title", "variable": "normalized_title", "case_sensitive": false,
+		"replacements": []any{
+			map[string]any{"keyword": "WEB-DL", "replacement": "WebDL"},
+			map[string]any{"keyword": "WebDL", "replacement": "WEB"},
+			map[string]any{"keyword": "[字幕组]", "replacement": "$clean"},
+		},
+	}}
+	output, err := executeAutomationKeywordReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "[字幕组] Show web-dl WEB-DL"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := output["result"]; got != "$clean Show WEB WEB" {
+		t.Fatalf("result = %#v", got)
+	}
+	if got := output["replacement_count"]; got != 5 {
+		t.Fatalf("replacement_count = %#v, want 5", got)
+	}
+	variables := output["variables"].(map[string]any)
+	if got := variables["normalized_title"]; got != output["result"] {
+		t.Fatalf("normalized_title = %#v, result = %#v", got, output["result"])
+	}
+}
+
+func TestExecuteAutomationRegexReplaceNodeSupportsCaptureGroupsAndDeletion(t *testing.T) {
+	node := AutomationNode{Type: AutomationNodeRegexReplace, Config: map[string]any{
+		"input": "$item.title", "pattern": `(?P<season>S\d{2})E(\d{2})`,
+		"replacement": `${season} 第${2}集`, "variable": "normalized_title",
+	}}
+	output, err := executeAutomationRegexReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "Show S01E02 S01E03"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := output["result"]; got != "Show S01 第02集 S01 第03集" {
+		t.Fatalf("result = %#v", got)
+	}
+	if got := output["replacement_count"]; got != 2 {
+		t.Fatalf("replacement_count = %#v, want 2", got)
+	}
+
+	node.Config["pattern"] = `\s+S\d{2}E\d{2}`
+	node.Config["replacement"] = ""
+	output, err = executeAutomationRegexReplaceNode(node, map[string]any{
+		"item": map[string]any{"title": "Show S01E02"},
+	})
+	if err != nil || output["result"] != "Show" {
+		t.Fatalf("delete replacement output = %#v, err = %v", output, err)
+	}
+}
+
+func TestEvaluateAutomationConditionSupportsUnifiedTemplateReferences(t *testing.T) {
+	contextValue := map[string]any{
+		"item": map[string]any{"title": "Example 2160p"},
+		"vars": map[string]any{"minimum": 1000},
+		"nodes": map[string]any{
+			"mp": map[string]any{"output": map[string]any{"tmdb_id": "1396"}},
+		},
+	}
+	tests := []struct {
+		name      string
+		condition map[string]any
+	}{
+		{name: "template field", condition: map[string]any{"field": "{{item.title}}", "operator": "contains", "value": "2160p"}},
+		{name: "template right value", condition: map[string]any{"field": "$nodes.mp.output.tmdb_id", "operator": "eq", "value": "{{nodes.mp.output.tmdb_id}}"}},
+		{name: "template list item", condition: map[string]any{"field": "$vars.minimum", "operator": "in", "value": []any{999, "{{vars.minimum}}"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			matched, err := evaluateAutomationCondition(test.condition, contextValue)
+			if err != nil || !matched {
+				t.Fatalf("condition result = %v, %v", matched, err)
+			}
+		})
+	}
+}
+
+func newAutomationTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:automations-%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(
+		&model.SystemConfig{},
+		&model.AutomationSource{}, &model.AutomationWorkflow{}, &model.AutomationTarget{},
+		&model.AutomationEntry{}, &model.AutomationRun{}, &model.AutomationNodeRun{},
+		&model.Automation115DirectoryCursor{}, &model.Automation115SeenItem{}, &model.Automation115Candidate{},
+		&model.CloudStorage{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
+
+func waitForAutomationRun(t *testing.T, db *gorm.DB, wanted string) model.AutomationRun {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var run model.AutomationRun
+		if err := db.Order("id DESC").First(&run).Error; err == nil && run.Status == wanted {
+			return run
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var run model.AutomationRun
+	_ = db.Order("id DESC").First(&run).Error
+	t.Fatalf("run did not reach %s: %#v", wanted, run)
+	return model.AutomationRun{}
+}

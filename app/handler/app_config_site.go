@@ -114,7 +114,7 @@ func (h *AppConfigHandler) saveConfigAndSiteSettings(in *config.Config) error {
 		tx.Rollback()
 		return err
 	}
-	if err := database.SaveRSSAutomationSettings(tx, in.RSSAutomation.UserAgent); err != nil {
+	if err := database.SaveMediaRecognitionSettings(tx, in.MediaRecognition); err != nil {
 		tx.Rollback()
 		return err
 	}

@@ -6,6 +6,9 @@ import (
 )
 
 func AutoMigrate() error {
+	if err := preserveLegacyAutomationTargets(); err != nil {
+		return fmt.Errorf("迁移下载器配置失败: %v", err)
+	}
 	// 首先检查是否需要移除email的唯一索引
 	if err := removeEmailUniqueIndex(); err != nil {
 		return fmt.Errorf("移除email唯一索引失败: %v", err)
@@ -27,10 +30,9 @@ func AutoMigrate() error {
 		return fmt.Errorf("迁移Match302负载均衡唯一索引失败: %v", err)
 	}
 
-	// RSS 自动化以源为生命周期根，一个源必须且只能拥有一个流程。
-	// 在建立唯一索引前先拒绝有歧义的旧数据，避免迁移时静默删除配置。
-	if err := validateRSSAutomationOneToOneData(); err != nil {
-		return fmt.Errorf("迁移RSS自动化一对一关系失败: %v", err)
+	// 每个触发源必须且只能拥有一个流程。
+	if err := validateAutomationOneToOneData(); err != nil {
+		return fmt.Errorf("迁移自动化一对一关系失败: %v", err)
 	}
 
 	// 自动迁移表结构
@@ -60,12 +62,15 @@ func AutoMigrate() error {
 		&model.EmbyWatchUser{},
 		&model.EmbyWatchRecord{},
 		&model.EmbyWatchSetting{},
-		&model.RSSAutomationSource{},
-		&model.RSSAutomationWorkflow{},
-		&model.RSSAutomationTarget{},
-		&model.RSSAutomationEntry{},
-		&model.RSSAutomationRun{},
-		&model.RSSAutomationNodeRun{},
+		&model.AutomationSource{},
+		&model.AutomationWorkflow{},
+		&model.AutomationTarget{},
+		&model.AutomationEntry{},
+		&model.Automation115DirectoryCursor{},
+		&model.Automation115SeenItem{},
+		&model.Automation115Candidate{},
+		&model.AutomationRun{},
+		&model.AutomationNodeRun{},
 	); err != nil {
 		return err
 	}
@@ -73,21 +78,57 @@ func AutoMigrate() error {
 	if err := migrateMatch302CacheQuotaToGB(); err != nil {
 		return fmt.Errorf("迁移Match302缓存空间单位失败: %v", err)
 	}
+	if err := migrateLegacyRSSAutomations(); err != nil {
+		return fmt.Errorf("迁移旧 RSS 自动化失败: %v", err)
+	}
+	if err := validateAutomationOneToOneData(); err != nil {
+		return fmt.Errorf("校验自动化一对一关系失败: %v", err)
+	}
 
 	return nil
 }
 
-func validateRSSAutomationOneToOneData() error {
-	if !DB.Migrator().HasTable(&model.RSSAutomationSource{}) ||
-		!DB.Migrator().HasTable(&model.RSSAutomationWorkflow{}) {
+// qBittorrent targets were stored under the RSS-prefixed table even after the
+// downloader settings became an independent page. They are independent
+// connection settings, so move them to the generic table before the shared
+// automation tables are created.
+func preserveLegacyAutomationTargets() error {
+	const legacyTable = "rss_automation_targets"
+	const targetTable = "automation_targets"
+	if !DB.Migrator().HasTable(legacyTable) {
+		return nil
+	}
+	if !DB.Migrator().HasTable(targetTable) {
+		return DB.Migrator().RenameTable(legacyTable, targetTable)
+	}
+	if err := DB.Exec(`
+		INSERT INTO automation_targets (name, type, enabled, config_json, created_at, updated_at)
+		SELECT legacy.name, legacy.type, legacy.enabled, legacy.config_json, legacy.created_at, legacy.updated_at
+		FROM rss_automation_targets AS legacy
+		WHERE NOT EXISTS (
+			SELECT 1
+			FROM automation_targets AS current
+			WHERE current.name = legacy.name
+				AND current.type = legacy.type
+				AND current.config_json = legacy.config_json
+		)
+	`).Error; err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAutomationOneToOneData() error {
+	if !DB.Migrator().HasTable(&model.AutomationSource{}) ||
+		!DB.Migrator().HasTable(&model.AutomationWorkflow{}) {
 		return nil
 	}
 
 	var invalidWorkflowCount int64
 	if err := DB.Raw(`
 		SELECT count(*)
-		FROM rss_automation_workflows AS workflow
-		LEFT JOIN rss_automation_sources AS source ON source.id = workflow.source_id
+		FROM automation_workflows AS workflow
+		LEFT JOIN automation_sources AS source ON source.id = workflow.source_id
 		WHERE workflow.source_id <= 0 OR source.id IS NULL
 	`).Scan(&invalidWorkflowCount).Error; err != nil {
 		return err
@@ -98,7 +139,7 @@ func validateRSSAutomationOneToOneData() error {
 		SELECT count(*)
 		FROM (
 			SELECT source_id
-			FROM rss_automation_workflows
+			FROM automation_workflows
 			GROUP BY source_id
 			HAVING count(*) > 1
 		)
@@ -109,8 +150,8 @@ func validateRSSAutomationOneToOneData() error {
 	var sourceWithoutWorkflowCount int64
 	if err := DB.Raw(`
 		SELECT count(*)
-		FROM rss_automation_sources AS source
-		LEFT JOIN rss_automation_workflows AS workflow ON workflow.source_id = source.id
+		FROM automation_sources AS source
+		LEFT JOIN automation_workflows AS workflow ON workflow.source_id = source.id
 		WHERE workflow.id IS NULL
 	`).Scan(&sourceWithoutWorkflowCount).Error; err != nil {
 		return err
@@ -118,7 +159,7 @@ func validateRSSAutomationOneToOneData() error {
 
 	if invalidWorkflowCount > 0 || duplicateSourceCount > 0 || sourceWithoutWorkflowCount > 0 {
 		return fmt.Errorf(
-			"现有数据不满足一个 RSS 源对应一个流程（无有效源的流程 %d 个、存在重复流程的源 %d 个、没有流程的源 %d 个）",
+			"现有数据不满足一个触发源对应一个流程（无有效源的流程 %d 个、存在重复流程的源 %d 个、没有流程的源 %d 个）",
 			invalidWorkflowCount,
 			duplicateSourceCount,
 			sourceWithoutWorkflowCount,

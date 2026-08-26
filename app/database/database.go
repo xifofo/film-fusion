@@ -53,9 +53,9 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 		return err
 	}
 
-	// RSS 自动化请求配置只保存在数据库，缺失时写入程序默认值。
-	if err := InitRSSAutomationSettings(); err != nil {
-		log.Errorf("初始化 RSS 自动化运行配置失败: %v", err)
+	// 媒体识别方式是数据库运行配置；新安装和升级默认进入影子模式。
+	if err := InitMediaRecognitionSettings(cfg); err != nil {
+		log.Errorf("初始化媒体识别配置失败: %v", err)
 		return err
 	}
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"film-fusion/app/config"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
 
@@ -26,7 +27,7 @@ func TestMediaRecognitionHandlerSavesWordsAndTestsUnsavedRules(t *testing.T) {
 	if err := db.AutoMigrate(&model.SystemConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	handler := NewMediaRecognitionHandler(service.NewMediaRecognitionService(db, nil, nil))
+	handler := NewMediaRecognitionHandler(service.NewMediaRecognitionService(db, nil, nil), nil)
 	router := gin.New()
 	router.GET("/words", handler.GetWords)
 	router.PUT("/words", handler.UpdateWords)
@@ -140,6 +141,63 @@ func TestMediaRecognitionHandlerSavesWordsAndTestsUnsavedRules(t *testing.T) {
 	tv, _ := response.Data["tv"].([]any)
 	if len(tv) != 1 || tv[0].(map[string]any)["name"] != "已保存剧集" {
 		t.Fatalf("stored category=%#v", response.Data)
+	}
+}
+
+func TestMediaRecognitionHandlerRunsMP2FirstShadowComparison(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "-"))), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.SystemConfig{}); err != nil {
+		t.Fatal(err)
+	}
+
+	moviePilotServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize":
+			_, _ = w.Write([]byte(`{
+				"success":true,
+				"data":{
+					"media_info":{"media_type":"tv","title":"MP2 Example","title_year":"MP2 Example"},
+					"meta_info":{"season_episode":"S02E04"}
+				}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer moviePilotServer.Close()
+
+	local := service.NewMediaRecognitionService(db, nil, nil)
+	moviePilot := service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
+		API: moviePilotServer.URL, Username: "user", Password: "pass",
+	}}, nil)
+	moviePilot.SetLocalMediaRecognition(local)
+	handler := NewMediaRecognitionHandler(local, moviePilot)
+	router := gin.New()
+	router.POST("/shadow-test", handler.ShadowTest)
+
+	response := performMediaRecognitionRequest(t, router, http.MethodPost, "/shadow-test", `{
+		"input":"Example.S01E03.mkv","mode":"file","lookup_tmdb":false,
+		"words":["S01 => S02","S02E <> \\.mkv >> EP+1"],
+		"category_yaml":"movie:\n  电影:\ntv:\n  剧集:\n"
+	}`)
+	if response.Code != 0 || response.Data["primary_engine"] != "moviepilot" {
+		t.Fatalf("shadow response=%+v", response)
+	}
+	comparison, _ := response.Data["comparison"].(map[string]any)
+	if comparison["status"] != service.MediaRecognitionShadowDifferent || comparison["matched"] != false {
+		t.Fatalf("comparison=%#v", comparison)
+	}
+	moviePilotSnapshot, _ := comparison["moviepilot"].(map[string]any)
+	localSnapshot, _ := comparison["local"].(map[string]any)
+	if moviePilotSnapshot["title"] != "MP2 Example" || localSnapshot["title"] != "Example" || localSnapshot["season_episode"] != "S02E04" {
+		t.Fatalf("snapshots mp=%#v local=%#v", moviePilotSnapshot, localSnapshot)
 	}
 }
 

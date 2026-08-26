@@ -34,6 +34,28 @@ tv:
 	}
 }
 
+func TestMediaRecognitionCategoryUsesMP2ChineseRootsAndMigratesLegacyRoots(t *testing.T) {
+	parsed, _, err := ParseMediaRecognitionCategoryYAML(`
+movie:
+  华语电影:
+tv:
+  国产剧集:
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.Movie) != 1 || len(parsed.TV) != 1 {
+		t.Fatalf("parsed=%+v", parsed)
+	}
+	normalized := normalizeMediaRecognitionCategoryYAML("movie:\n  华语电影:\ntv:\n  国产剧集:\n")
+	if !strings.Contains(normalized, "电影:\n") || !strings.Contains(normalized, "电视剧:\n") || strings.Contains(normalized, "\ntv:\n") {
+		t.Fatalf("normalized YAML did not use MP2 roots:\n%s", normalized)
+	}
+	if !strings.Contains(DefaultMediaRecognitionCategoryYAML, "电影:\n") || !strings.Contains(DefaultMediaRecognitionCategoryYAML, "电视剧:\n") {
+		t.Fatalf("default YAML did not use MP2 roots:\n%s", DefaultMediaRecognitionCategoryYAML)
+	}
+}
+
 func TestMediaRecognitionCategorySupportsExclusionAndYearRange(t *testing.T) {
 	parsed, _, err := ParseMediaRecognitionCategoryYAML(`
 movie:

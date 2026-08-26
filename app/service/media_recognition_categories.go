@@ -19,17 +19,17 @@ const maxMediaRecognitionCategoryYAML = 128 << 10
 // DefaultMediaRecognitionCategoryYAML 与 MoviePilot 默认 category.yaml 的有效规则保持一致。
 // 注释有意保留在原始 YAML 中，页面可直接以配置文件方式编辑。
 const DefaultMediaRecognitionCategoryYAML = `# FilmFusion 本地媒体分类配置（兼容 MoviePilot category.yaml）
-# movie、tv 为固定一级键；分类按书写顺序匹配，第一个命中即结束。
+# 电影、电视剧为 MP2 一级键；旧版 movie、tv 会自动转换并继续兼容。
 # 同一分类内的条件需要全部满足，逗号表示任一值，!值表示排除。
 # 空规则是兜底分类，建议放在对应分组最后。
-movie:
+电影:
   动画电影:
     genre_ids: '16'
   华语电影:
     original_language: 'zh,cn,bo,za'
   外语电影:
 
-tv:
+电视剧:
   国漫:
     genre_ids: '16'
     origin_country: 'CN,TW,HK'
@@ -105,7 +105,7 @@ func ParseMediaRecognitionCategoryYAML(source string) (MediaRecognitionCategoryC
 		return MediaRecognitionCategoryConfig{}, nil, errors.New("分类配置只能包含一个 YAML 文档")
 	}
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return MediaRecognitionCategoryConfig{}, nil, errors.New("分类配置根节点必须是 movie、tv 组成的对象")
+		return MediaRecognitionCategoryConfig{}, nil, errors.New("分类配置根节点必须是电影、电视剧组成的对象")
 	}
 
 	root := document.Content[0]
@@ -113,12 +113,12 @@ func ParseMediaRecognitionCategoryYAML(source string) (MediaRecognitionCategoryC
 	seenGroups := map[string]struct{}{}
 	for index := 0; index < len(root.Content); index += 2 {
 		keyNode, valueNode := root.Content[index], root.Content[index+1]
-		key := strings.TrimSpace(keyNode.Value)
-		if key != "movie" && key != "tv" {
-			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("第 %d 行：一级分类只能是 movie 或 tv，当前为 %q", keyNode.Line, key)
+		key, ok := canonicalMediaRecognitionCategoryGroup(keyNode.Value)
+		if !ok {
+			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("第 %d 行：一级分类只能是电影或电视剧，当前为 %q", keyNode.Line, strings.TrimSpace(keyNode.Value))
 		}
 		if _, exists := seenGroups[key]; exists {
-			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("第 %d 行：一级分类 %s 重复", keyNode.Line, key)
+			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("第 %d 行：一级分类 %s 重复", keyNode.Line, mediaRecognitionCategoryGroupLabel(key))
 		}
 		seenGroups[key] = struct{}{}
 		rules, err := parseMediaRecognitionCategoryGroup(key, valueNode)
@@ -129,7 +129,7 @@ func ParseMediaRecognitionCategoryYAML(source string) (MediaRecognitionCategoryC
 	}
 	for _, group := range []string{"movie", "tv"} {
 		if _, exists := seenGroups[group]; !exists {
-			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("缺少固定一级分类 %s", group)
+			return MediaRecognitionCategoryConfig{}, nil, fmt.Errorf("缺少固定一级分类 %s", mediaRecognitionCategoryGroupLabel(group))
 		}
 	}
 
@@ -139,8 +139,9 @@ func ParseMediaRecognitionCategoryYAML(source string) (MediaRecognitionCategoryC
 }
 
 func parseMediaRecognitionCategoryGroup(group string, node *yaml.Node) ([]MediaRecognitionCategoryRule, error) {
+	groupLabel := mediaRecognitionCategoryGroupLabel(group)
 	if node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("第 %d 行：%s 必须是分类对象", node.Line, group)
+		return nil, fmt.Errorf("第 %d 行：%s 必须是分类对象", node.Line, groupLabel)
 	}
 	rules := make([]MediaRecognitionCategoryRule, 0, len(node.Content)/2)
 	seen := map[string]struct{}{}
@@ -236,7 +237,7 @@ func categoryFallbackWarnings(group string, rules []MediaRecognitionCategoryRule
 	warnings := make([]string, 0)
 	for index, rule := range rules {
 		if rule.Fallback && index < len(rules)-1 {
-			warnings = append(warnings, fmt.Sprintf("%s 的兜底分类 %q 后还有规则，后续规则不会被匹配", group, rule.Name))
+			warnings = append(warnings, fmt.Sprintf("%s 的兜底分类 %q 后还有规则，后续规则不会被匹配", mediaRecognitionCategoryGroupLabel(group), rule.Name))
 		}
 	}
 	return warnings
@@ -250,7 +251,37 @@ func normalizeMediaRecognitionCategoryYAML(source string) string {
 	if source == "" {
 		return ""
 	}
-	return source + "\n"
+	lines := strings.Split(source, "\n")
+	for index, line := range lines {
+		switch {
+		case strings.HasPrefix(line, "movie:"):
+			lines[index] = "电影" + strings.TrimPrefix(line, "movie")
+		case strings.HasPrefix(line, "tv:"):
+			lines[index] = "电视剧" + strings.TrimPrefix(line, "tv")
+		}
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func canonicalMediaRecognitionCategoryGroup(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "movie", "电影":
+		return "movie", true
+	case "tv", "电视剧":
+		return "tv", true
+	default:
+		return "", false
+	}
+}
+
+func mediaRecognitionCategoryGroupLabel(group string) string {
+	if group == "movie" {
+		return "电影"
+	}
+	if group == "tv" {
+		return "电视剧"
+	}
+	return group
 }
 
 // LoadCategoryConfig 读取已保存分类配置；未保存时返回 MoviePilot 兼容默认值。
@@ -289,7 +320,8 @@ func (s *MediaRecognitionService) ValidateCategoryConfig(source string) (MediaRe
 	return buildMediaRecognitionCategoryConfigResult(false, source, config, warnings), nil
 }
 
-// SaveCategoryConfig 保存完整 category.yaml，后续本地识别和 MP2 降级链路立即使用。
+// SaveCategoryConfig 保存完整 category.yaml，后续本地识别、影子对比
+// 与整理分类链路立即使用。
 func (s *MediaRecognitionService) SaveCategoryConfig(source string) (MediaRecognitionCategoryConfigResult, error) {
 	if s == nil || s.db == nil {
 		return MediaRecognitionCategoryConfigResult{}, errors.New("数据库未初始化")

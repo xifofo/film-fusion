@@ -12,12 +12,13 @@ import (
 
 // MediaRecognitionHandler 提供本地识别词管理和媒体识别测试接口。
 type MediaRecognitionHandler struct {
-	service *service.MediaRecognitionService
+	service    *service.MediaRecognitionService
+	moviePilot *service.MoviePilotService
 }
 
 // NewMediaRecognitionHandler 创建本地媒体识别处理器。
-func NewMediaRecognitionHandler(recognition *service.MediaRecognitionService) *MediaRecognitionHandler {
-	return &MediaRecognitionHandler{service: recognition}
+func NewMediaRecognitionHandler(recognition *service.MediaRecognitionService, moviePilot *service.MoviePilotService) *MediaRecognitionHandler {
+	return &MediaRecognitionHandler{service: recognition, moviePilot: moviePilot}
 }
 
 // GetWords 返回已保存的完整识别词及其结构化展示信息。
@@ -187,17 +188,10 @@ type testMediaRecognitionRequest struct {
 	LookupTMDB   *bool     `json:"lookup_tmdb,omitempty"`
 }
 
-// Test 在不写入配置的前提下执行一次 FilmFusion 本地媒体识别。
-func (h *MediaRecognitionHandler) Test(c *gin.Context) {
-	var request testMediaRecognitionRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
-		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
-		return
-	}
+func (request *testMediaRecognitionRequest) options() (service.MediaRecognitionOptions, error) {
 	request.Mode = strings.ToLower(strings.TrimSpace(request.Mode))
 	if request.Mode != "" && request.Mode != service.MediaRecognitionModeFile && request.Mode != service.MediaRecognitionModeTitle {
-		h.error(c, http.StatusBadRequest, "识别模式必须是 file 或 title")
-		return
+		return service.MediaRecognitionOptions{}, errors.New("识别模式必须是 file 或 title")
 	}
 	lookupTMDB := true
 	if request.LookupTMDB != nil {
@@ -213,12 +207,56 @@ func (h *MediaRecognitionHandler) Test(c *gin.Context) {
 	if request.CategoryYAML != nil {
 		options.CategoryYAML = *request.CategoryYAML
 	}
+	return options, nil
+}
+
+// Test 在不写入配置的前提下执行一次 FilmFusion 本地媒体识别。
+func (h *MediaRecognitionHandler) Test(c *gin.Context) {
+	var request testMediaRecognitionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	options, err := request.options()
+	if err != nil {
+		h.error(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	result, err := h.service.Recognize(c.Request.Context(), request.Input, options)
 	if err != nil {
 		h.error(c, http.StatusBadRequest, "本地媒体识别失败: "+err.Error())
 		return
 	}
 	h.success(c, result, "本地媒体识别完成")
+}
+
+// ShadowTest 先执行 MoviePilot，再以完全相同的输入和草稿配置运行
+// FilmFusion 本地识别。MoviePilot 的结果是基准，本地失败不会遮蔽它。
+func (h *MediaRecognitionHandler) ShadowTest(c *gin.Context) {
+	if h.moviePilot == nil {
+		h.error(c, http.StatusServiceUnavailable, "MoviePilot 媒体识别服务未初始化")
+		return
+	}
+	var request testMediaRecognitionRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.error(c, http.StatusBadRequest, "请求参数错误: "+err.Error())
+		return
+	}
+	options, err := request.options()
+	if err != nil {
+		h.error(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := h.moviePilot.CompareRecognition(c.Request.Context(), request.Input, options)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, "媒体识别影子对比失败: "+err.Error())
+		return
+	}
+	message := "媒体识别影子对比完成"
+	if result.Comparison.Status == service.MediaRecognitionShadowMatched {
+		message = "MP2 与 FilmFusion 本地识别一致"
+	}
+	h.success(c, result, message)
 }
 
 func (h *MediaRecognitionHandler) success(c *gin.Context, data any, message string) {

@@ -11,41 +11,66 @@ import (
 )
 
 type Config struct {
-	Server        ServerConfig       `mapstructure:"server" json:"server"`
-	Site          SiteConfig         `mapstructure:"site" json:"site"`
-	Webhook       WebhookConfig      `mapstructure:"webhook" json:"webhook"`
-	Notifications NotificationConfig `mapstructure:"notifications" json:"notifications"`
-	Log           LogConfig          `mapstructure:"log" json:"log"`
-	JWT           JWTConfig          `mapstructure:"jwt" json:"jwt"`
-	Emby          EmbyConfig         `mapstructure:"emby" json:"emby"`
+	Server ServerConfig `mapstructure:"server" json:"server"`
+	Site   SiteConfig   `mapstructure:"site" json:"site"`
+	// MediaRecognition 由 system_configs 管理，不写入 config.yaml。
+	MediaRecognition MediaRecognitionConfig `mapstructure:"-" json:"media_recognition"`
+	Webhook          WebhookConfig          `mapstructure:"webhook" json:"webhook"`
+	Notifications    NotificationConfig     `mapstructure:"notifications" json:"notifications"`
+	Log              LogConfig              `mapstructure:"log" json:"log"`
+	JWT              JWTConfig              `mapstructure:"jwt" json:"jwt"`
+	Emby             EmbyConfig             `mapstructure:"emby" json:"emby"`
 	// Telegram 保留旧版配置读写兼容；运行时以 Notifications 为唯一来源。
 	Telegram   TelegramConfig   `mapstructure:"telegram" json:"telegram"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
 	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
-	// RSSAutomation 仅作为系统设置 API 的数据库配置视图，不参与 YAML 读写。
-	RSSAutomation RSSAutomationConfig `mapstructure:"-" json:"rss_automation"`
 }
 
 const (
-	DefaultLoginTitle              = "Film Fusion"
-	DefaultLoginSubtitle           = "Film Fusion 是简单的 Emby + 网盘的辅助工具"
-	DefaultLoginFormTitle          = "欢迎回来"
-	DefaultLoginFormSubtitle       = "使用管理员账户进入 Film Fusion 控制台"
-	DefaultFooterText              = "Powered by Kumayi"
-	DefaultLoginBackgroundSource   = "custom"
-	DefaultLoginBackgroundMode     = "latest"
-	DefaultLoginBackgroundInterval = 12
-	DefaultLoginBackgroundLimit    = 10
-	DefaultCookie115App            = "alipaymini"
-	MaxWeb115UserAgentLength       = 2048
-	NotificationChannelTelegram    = "telegram"
-	NotificationChannelWebhook     = "webhook"
-	NotificationEventEmbySecurity  = "security.emby_brute_force"
-	NotificationEventAppSecurity   = "security.filmfusion_brute_force"
-	NotificationEventRSSMatched    = "rss.matched"
-	NotificationEventWeb115Invalid = "storage.115_cookie_invalid"
+	DefaultLoginTitle                    = "Film Fusion"
+	DefaultLoginSubtitle                 = "Film Fusion 是简单的 Emby + 网盘的辅助工具"
+	DefaultLoginFormTitle                = "欢迎回来"
+	DefaultLoginFormSubtitle             = "使用管理员账户进入 Film Fusion 控制台"
+	DefaultFooterText                    = "Powered by Kumayi"
+	DefaultLoginBackgroundSource         = "custom"
+	DefaultLoginBackgroundMode           = "latest"
+	DefaultLoginBackgroundInterval       = 12
+	DefaultLoginBackgroundLimit          = 10
+	DefaultCookie115App                  = "alipaymini"
+	MaxWeb115UserAgentLength             = 2048
+	NotificationChannelTelegram          = "telegram"
+	NotificationChannelWebhook           = "webhook"
+	NotificationEventEmbySecurity        = "security.emby_brute_force"
+	NotificationEventAppSecurity         = "security.filmfusion_brute_force"
+	NotificationEventAutomationTriggered = "automation.triggered"
+	NotificationEventWeb115Invalid       = "storage.115_cookie_invalid"
+	MediaRecognitionSourceMoviePilot     = "moviepilot"
+	MediaRecognitionSourceLocal          = "local"
+	MediaRecognitionSourceShadow         = "shadow"
+	DefaultMediaRecognitionSource        = MediaRecognitionSourceShadow
 )
+
+// MediaRecognitionConfig 保存系统级默认识别方式。它只持久化到
+// system_configs，避免运行设置与启动 YAML 混在一起。
+type MediaRecognitionConfig struct {
+	Source string `json:"source"`
+}
+
+// NormalizeMediaRecognitionSource 将兼容别名转换成稳定的 API 值。
+// 空值用于首次初始化，因此采用产品默认的影子模式。
+func NormalizeMediaRecognitionSource(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "shadow", "shadow-mode", "shadow_mode", "影子", "影子模式":
+		return MediaRecognitionSourceShadow, nil
+	case "moviepilot", "movie-pilot", "mp", "mp2":
+		return MediaRecognitionSourceMoviePilot, nil
+	case "local", "filmfusion", "film-fusion":
+		return MediaRecognitionSourceLocal, nil
+	default:
+		return "", fmt.Errorf("识别方式无效")
+	}
+}
 
 // SiteConfig 保存可安全展示给未登录用户的站点外观配置。
 type SiteConfig struct {
@@ -85,11 +110,6 @@ type ServerConfig struct {
 	Security               LoginSecurityConfig `mapstructure:"security" json:"security"`                   // FilmFusion 登录防爆破配置
 }
 
-// RSSAutomationConfig 保存由 system_configs 管理的 RSS 自动化请求配置。
-type RSSAutomationConfig struct {
-	UserAgent string `json:"user_agent"`
-}
-
 type LogConfig struct {
 	Level      string `mapstructure:"level" json:"level"`
 	Format     string `mapstructure:"format" json:"format"`           // json 或 text
@@ -118,7 +138,7 @@ type NotificationConfig struct {
 type NotificationRoutesConfig struct {
 	EmbyBruteForce      []string `mapstructure:"emby_brute_force" json:"emby_brute_force"`
 	SystemBruteForce    []string `mapstructure:"system_brute_force" json:"system_brute_force"`
-	RSSMatched          []string `mapstructure:"rss_matched" json:"rss_matched"`
+	AutomationTriggered []string `mapstructure:"automation_triggered" json:"automation_triggered"`
 	Web115CookieInvalid []string `mapstructure:"web_115_cookie_invalid" json:"web_115_cookie_invalid"`
 }
 
@@ -128,8 +148,8 @@ func (r NotificationRoutesConfig) Channels(event string) []string {
 		return append([]string(nil), r.EmbyBruteForce...)
 	case NotificationEventAppSecurity:
 		return append([]string(nil), r.SystemBruteForce...)
-	case NotificationEventRSSMatched:
-		return append([]string(nil), r.RSSMatched...)
+	case NotificationEventAutomationTriggered:
+		return append([]string(nil), r.AutomationTriggered...)
 	case NotificationEventWeb115Invalid:
 		return append([]string(nil), r.Web115CookieInvalid...)
 	default:
@@ -140,7 +160,7 @@ func (r NotificationRoutesConfig) Channels(event string) []string {
 func (c NotificationConfig) IsZero() bool {
 	return strings.TrimSpace(c.InstanceName) == "" && c.Telegram.IsZero() && c.Webhook.IsZero() &&
 		len(c.Routes.EmbyBruteForce) == 0 && len(c.Routes.SystemBruteForce) == 0 &&
-		len(c.Routes.RSSMatched) == 0 && len(c.Routes.Web115CookieInvalid) == 0
+		len(c.Routes.AutomationTriggered) == 0 && len(c.Routes.Web115CookieInvalid) == 0
 }
 
 // TelegramChannelConfig 只包含 Telegram 自身的投递参数。
@@ -372,7 +392,7 @@ func Save(c *Config) error {
 	viper.Set("notifications.instance_name", c.Notifications.InstanceName)
 	viper.Set("notifications.routes.emby_brute_force", c.Notifications.Routes.EmbyBruteForce)
 	viper.Set("notifications.routes.system_brute_force", c.Notifications.Routes.SystemBruteForce)
-	viper.Set("notifications.routes.rss_matched", c.Notifications.Routes.RSSMatched)
+	viper.Set("notifications.routes.automation_triggered", c.Notifications.Routes.AutomationTriggered)
 	viper.Set("notifications.routes.web_115_cookie_invalid", c.Notifications.Routes.Web115CookieInvalid)
 	viper.Set("notifications.telegram.enabled", c.Notifications.Telegram.Enabled)
 	viper.Set("notifications.telegram.bot_token", c.Notifications.Telegram.BotToken)
@@ -683,7 +703,7 @@ func defaultNotificationConfig() NotificationConfig {
 		Routes: NotificationRoutesConfig{
 			EmbyBruteForce:      []string{NotificationChannelTelegram},
 			SystemBruteForce:    []string{NotificationChannelTelegram},
-			RSSMatched:          []string{NotificationChannelTelegram},
+			AutomationTriggered: []string{NotificationChannelTelegram},
 			Web115CookieInvalid: []string{NotificationChannelTelegram},
 		},
 		Telegram: TelegramChannelConfig{
@@ -772,8 +792,8 @@ func applyNotificationDefaults(cfg *Config) {
 	if !viper.InConfig("notifications.routes.system_brute_force") {
 		settings.Routes.SystemBruteForce = defaults.Routes.SystemBruteForce
 	}
-	if !viper.InConfig("notifications.routes.rss_matched") {
-		settings.Routes.RSSMatched = defaults.Routes.RSSMatched
+	if !viper.InConfig("notifications.routes.automation_triggered") {
+		settings.Routes.AutomationTriggered = defaults.Routes.AutomationTriggered
 	}
 	if !viper.InConfig("notifications.routes.web_115_cookie_invalid") {
 		settings.Routes.Web115CookieInvalid = defaults.Routes.Web115CookieInvalid
@@ -816,7 +836,7 @@ func NormalizeNotificationConfig(settings *NotificationConfig) {
 	}
 	settings.Routes.EmbyBruteForce = normalizeNotificationRoute(settings.Routes.EmbyBruteForce)
 	settings.Routes.SystemBruteForce = normalizeNotificationRoute(settings.Routes.SystemBruteForce)
-	settings.Routes.RSSMatched = normalizeNotificationRoute(settings.Routes.RSSMatched)
+	settings.Routes.AutomationTriggered = normalizeNotificationRoute(settings.Routes.AutomationTriggered)
 	settings.Routes.Web115CookieInvalid = normalizeNotificationRoute(settings.Routes.Web115CookieInvalid)
 }
 
@@ -1091,10 +1111,10 @@ func ValidateNotifications(settings NotificationConfig) error {
 		return err
 	}
 	for event, channels := range map[string][]string{
-		NotificationEventEmbySecurity:  settings.Routes.EmbyBruteForce,
-		NotificationEventAppSecurity:   settings.Routes.SystemBruteForce,
-		NotificationEventRSSMatched:    settings.Routes.RSSMatched,
-		NotificationEventWeb115Invalid: settings.Routes.Web115CookieInvalid,
+		NotificationEventEmbySecurity:        settings.Routes.EmbyBruteForce,
+		NotificationEventAppSecurity:         settings.Routes.SystemBruteForce,
+		NotificationEventAutomationTriggered: settings.Routes.AutomationTriggered,
+		NotificationEventWeb115Invalid:       settings.Routes.Web115CookieInvalid,
 	} {
 		for _, channel := range channels {
 			switch strings.ToLower(strings.TrimSpace(channel)) {

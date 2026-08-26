@@ -21,7 +21,6 @@ import (
 func TestAppConfigHandlerGetUsesDatabase115Settings(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	const userAgent = "Mozilla/5.0 Chrome/150.0.0.0 Safari/537.36"
-	const rssUserAgent = "Mozilla/5.0 RSS-AUTOMATION"
 	db, err := gorm.Open(sqlite.Open("file:handler-settings-115?mode=memory&cache=shared"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("open database: %v", err)
@@ -35,8 +34,8 @@ func TestAppConfigHandlerGetUsesDatabase115Settings(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("save database settings: %v", err)
 	}
-	if err := database.SaveRSSAutomationSettings(db, rssUserAgent); err != nil {
-		t.Fatalf("save RSS automation settings: %v", err)
+	if err := database.SaveMediaRecognitionSettings(db, config.MediaRecognitionConfig{Source: "local"}); err != nil {
+		t.Fatalf("save media recognition settings: %v", err)
 	}
 
 	cfg := &config.Config{Server: config.ServerConfig{
@@ -73,8 +72,8 @@ func TestAppConfigHandlerGetUsesDatabase115Settings(t *testing.T) {
 	if got := response.Data.Config.Server.Cookie115DefaultApp; got != "wechatmini" {
 		t.Fatalf("cookie_115_default_app = %q, want database value wechatmini", got)
 	}
-	if got := response.Data.Config.RSSAutomation.UserAgent; got != rssUserAgent {
-		t.Fatalf("rss_automation.user_agent = %q, want %q", got, rssUserAgent)
+	if got := response.Data.Config.MediaRecognition.Source; got != "local" {
+		t.Fatalf("media_recognition.source = %q, want database value local", got)
 	}
 }
 
@@ -107,7 +106,7 @@ func TestSaveConfigWrites115SettingsOnlyToDatabase(t *testing.T) {
 		Port:                "9000",
 		Cookie115DefaultApp: "wechatmini",
 		Web115UserAgent:     "Mozilla/5.0 DATABASE",
-	}, RSSAutomation: config.RSSAutomationConfig{UserAgent: "Mozilla/5.0 RSS-DATABASE"}}
+	}}
 	handler := NewAppConfigHandler(nil, in, nil, nil)
 	handler.db = db
 	if err := handler.saveConfigAndSiteSettings(in); err != nil {
@@ -121,14 +120,6 @@ func TestSaveConfigWrites115SettingsOnlyToDatabase(t *testing.T) {
 	if stored.CookieDefaultApp != "wechatmini" || stored.WebUserAgent != "Mozilla/5.0 DATABASE" {
 		t.Fatalf("unexpected database settings: %+v", stored)
 	}
-	rssStored, err := database.LoadRSSAutomationSettings(db)
-	if err != nil {
-		t.Fatalf("load RSS automation settings: %v", err)
-	}
-	if rssStored.UserAgent != "Mozilla/5.0 RSS-DATABASE" {
-		t.Fatalf("RSS automation user agent = %q", rssStored.UserAgent)
-	}
-
 	reloaded := viper.New()
 	reloaded.SetConfigFile(path)
 	if err := reloaded.ReadInConfig(); err != nil {
@@ -139,9 +130,6 @@ func TestSaveConfigWrites115SettingsOnlyToDatabase(t *testing.T) {
 	}
 	if got := reloaded.GetString("server.web_115_user_agent"); got != "Mozilla/5.0 YAML" {
 		t.Fatalf("YAML user agent = %q, want unchanged legacy value", got)
-	}
-	if reloaded.IsSet("rss_automation.user_agent") {
-		t.Fatalf("RSS automation User-Agent was unexpectedly written to YAML")
 	}
 }
 
@@ -179,5 +167,13 @@ func TestAppConfigUpdatePayloadDistinguishesMissingAndEmpty115UserAgent(t *testi
 	}
 	if legacy.notificationsFieldPresent || !legacy.telegramFieldPresent {
 		t.Fatalf("legacy Telegram field presence was not detected: %+v", legacy)
+	}
+
+	var recognition appConfigUpdatePayload
+	if err := json.Unmarshal([]byte(`{"config":{"media_recognition":{"source":"shadow"}}}`), &recognition); err != nil {
+		t.Fatalf("decode media recognition payload: %v", err)
+	}
+	if !recognition.mediaRecognitionFieldPresent || recognition.Config.MediaRecognition.Source != "shadow" {
+		t.Fatalf("media recognition field presence was not detected: %+v", recognition)
 	}
 }

@@ -96,7 +96,7 @@ func ValidateRSSAutomationMapping(mapping RSSAutomationMapping) error {
 	seen := make(map[string]struct{}, len(mapping.Fields))
 	for _, field := range mapping.Fields {
 		name := strings.TrimSpace(field.Name)
-		if !rssAutomationNodeIDPattern.MatchString(name) {
+		if !automationNodeIDPattern.MatchString(name) {
 			return fmt.Errorf("字段名称 %q 无效", field.Name)
 		}
 		if _, exists := seen[name]; exists {

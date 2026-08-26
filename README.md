@@ -77,9 +77,9 @@ jwt:
 JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工配置。
 115 默认 App 与浏览器 UA 首次从上述 YAML 导入，之后只保存在数据库并通过系统设置维护；UA 暂未接入请求。
 
-通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、RSS 命中和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。
+通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、自动化事件触发和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。
 
-RSS 自动化可直接订阅外部 RSS/Atom 地址；需要把不提供 Feed 的网站转换为 RSS 时，可使用独立部署的 RSSHub。
+自动化中心支持监控 115 OpenAPI 目录。首次扫描只建立存量基线，之后按目录增量检查；新增媒体稳定后可执行 FilmFusion 或 MoviePilot 识别、媒体整理、STRM 生成和通知。
 
 ### Emby 集成配置
 ```yaml

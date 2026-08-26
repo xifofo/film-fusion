@@ -59,6 +59,7 @@ type MediaRecognitionMediaInfo struct {
 	TitleYear           string   `json:"title_year,omitempty"`
 	TMDBID              string   `json:"tmdb_id,omitempty"`
 	Category            string   `json:"category,omitempty"`
+	CategoryPath        string   `json:"category_path,omitempty"`
 	PosterPath          string   `json:"poster_path,omitempty"`
 	BackdropPath        string   `json:"backdrop_path,omitempty"`
 	Rating              float64  `json:"rating,omitempty"`
@@ -293,7 +294,7 @@ func (s *MediaRecognitionService) SearchMedia(ctx context.Context, keyword strin
 	return results, nil
 }
 
-// BuildTransferName 在 MP2 不可访问时保留应用识别词后的发布名，避免整理链路直接中断。
+// BuildTransferName 使用本地识别词与 MP2 兼容的发布名组装规则。
 func (s *MediaRecognitionService) BuildTransferName(input string) (string, map[string]any, error) {
 	words, _, err := s.LoadWords()
 	if err != nil {
@@ -310,6 +311,9 @@ func (s *MediaRecognitionService) BuildTransferName(input string) (string, map[s
 	if processedName == "" || processedName == "." || processedName == "/" {
 		return "", nil, errors.New("本地重命名未得到有效文件名")
 	}
+	if compatibleName, ok := buildLocalMovieTransferName(processedName); ok {
+		processedName = compatibleName
+	}
 	originalExt := path.Ext(originalName)
 	if originalExt != "" && path.Ext(processedName) == "" {
 		processedName += originalExt
@@ -318,6 +322,210 @@ func (s *MediaRecognitionService) BuildTransferName(input string) (string, map[s
 		"engine": "local", "name": processedName,
 		"meta_info": map[string]any{"apply_words": result.AppliedWords, "org_string": result.Processed},
 	}, nil
+}
+
+// buildLocalMovieTransferName 复刻 MP2 对电影发布名的稳定输出语义：
+// 清除中文别名、完成状态和辅助 TMDB 标记，保留英文标题与发布参数。
+// 只在能明确判定为电影时使用，避免改写剧集的季集结构。
+func buildLocalMovieTransferName(input string) (string, bool) {
+	fileName := path.Base(strings.ReplaceAll(strings.TrimSpace(input), "\\", "/"))
+	if fileName == "" || fileName == "." || fileName == "/" {
+		return "", false
+	}
+
+	extension := ""
+	stem := fileName
+	if match := localMediaExtensionRE.FindStringSubmatch(fileName); len(match) > 1 {
+		extension = "." + strings.ToLower(match[1])
+		stem = localMediaExtensionRE.ReplaceAllString(fileName, "")
+	}
+	hadTMDBMarker := localTMDBMarkerRE.MatchString(stem) || localRichMarkerRE.MatchString(stem)
+	stem = localRichMarkerRE.ReplaceAllString(stem, " ")
+	stem = localTMDBMarkerRE.ReplaceAllString(stem, " ")
+	stem = strings.Trim(stem, " ._-")
+
+	meta, err := parseLocalMediaMeta(fileName, MediaRecognitionWordResult{Processed: fileName}, MediaRecognitionModeFile)
+	if err != nil || meta.Year == "" || meta.BeginSeason != nil || meta.BeginEpisode != nil {
+		return "", false
+	}
+	mediaType := normalizeLocalMediaType(meta.MediaType)
+	if mediaType != "movie" && !(mediaType == "unknown" && hadTMDBMarker) {
+		return "", false
+	}
+
+	team := ""
+	if match := localReleaseTeamRE.FindStringSubmatch(stem); len(match) > 1 {
+		team = strings.TrimSpace(match[1])
+		stem = strings.TrimSpace(localReleaseTeamRE.ReplaceAllString(stem, ""))
+	}
+	stem = localLeadingGroupRE.ReplaceAllString(stem, "")
+	yearLocation := localYearRE.FindStringIndex(stem)
+	if yearLocation == nil {
+		return "", false
+	}
+	title := normalizeLocalMovieTransferTitle(stem[:yearLocation[0]])
+	if title == "" {
+		return "", false
+	}
+
+	tail := strings.Trim(stem[yearLocation[1]:], " ._-()[]{}")
+	tokens := splitLocalMovieReleaseTokens(tail)
+	for len(tokens) > 0 && isLocalMovieCompletionToken(tokens[0]) {
+		tokens = tokens[1:]
+	}
+	release := groupLocalMovieReleaseTokens(tokens)
+
+	parts := []string{title, meta.Year}
+	if release != "" {
+		parts = append(parts, release)
+	}
+	name := strings.Join(parts, ".")
+	if team != "" {
+		name += "-" + team
+	}
+	return name + extension, true
+}
+
+func normalizeLocalMovieTransferTitle(value string) string {
+	value = localLeadingGroupRE.ReplaceAllString(value, " ")
+	value = localBracketRE.ReplaceAllString(value, " ")
+	value = strings.NewReplacer(".", " ", "_", " ", " - ", " ").Replace(value)
+	value = strings.Trim(value, " ._-")
+	return localSpaceRE.ReplaceAllString(value, " ")
+}
+
+func splitLocalMovieReleaseTokens(value string) []string {
+	values := strings.FieldsFunc(value, func(char rune) bool {
+		return char == '.' || char == '_' || unicode.IsSpace(char)
+	})
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.Trim(value, " -()[]{}")
+		if value != "" && !isLocalMovieCompletionToken(value) {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func groupLocalMovieReleaseTokens(tokens []string) string {
+	groups := make([]string, 0, len(tokens))
+	for index := 0; index < len(tokens); {
+		token := tokens[index]
+		key := compactLocalReleaseToken(token)
+
+		if key == "h" && index+1 < len(tokens) && (tokens[index+1] == "264" || tokens[index+1] == "265") {
+			token = "H." + tokens[index+1]
+			key = compactLocalReleaseToken(token)
+			index++
+		}
+
+		if isLocalResourceTypeToken(key) {
+			group := token
+			for index+1 < len(tokens) && isLocalEffectToken(compactLocalReleaseToken(tokens[index+1])) {
+				index++
+				group += " " + tokens[index]
+			}
+			groups = append(groups, group)
+			index++
+			continue
+		}
+
+		if isLocalVideoCodecToken(key) {
+			group := token
+			if index+1 < len(tokens) && isLocalVideoBitToken(compactLocalReleaseToken(tokens[index+1])) {
+				index++
+				group += " " + tokens[index]
+			}
+			groups = append(groups, group)
+			index++
+			continue
+		}
+
+		if isLocalAudioCodecToken(key) {
+			group := token
+			if index+1 < len(tokens) && key == "dtshd" && strings.EqualFold(tokens[index+1], "MA") {
+				index++
+				group += " " + tokens[index]
+			}
+			if index+2 < len(tokens) && isSingleDigitToken(tokens[index+1]) && isSingleDigitToken(tokens[index+2]) {
+				group += " " + tokens[index+1] + "." + tokens[index+2]
+				index += 2
+			}
+			if index+1 < len(tokens) && isLocalAudioCountToken(compactLocalReleaseToken(tokens[index+1])) {
+				index++
+				group += " " + tokens[index]
+			}
+			groups = append(groups, group)
+			index++
+			continue
+		}
+
+		groups = append(groups, token)
+		index++
+	}
+	return strings.Join(groups, ".")
+}
+
+func compactLocalReleaseToken(value string) string {
+	return strings.ToLower(strings.NewReplacer(" ", "", ".", "", "_", "", "-", "").Replace(value))
+}
+
+func isLocalMovieCompletionToken(value string) bool {
+	switch compactLocalReleaseToken(value) {
+	case "fin", "end", "complete", "completed", "全集", "完结":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLocalResourceTypeToken(value string) bool {
+	switch value {
+	case "bluray", "bdrip", "remux", "webdl", "webrip", "hdtv", "hdrip", "dvdrip":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLocalEffectToken(value string) bool {
+	switch value {
+	case "dolbyvision", "dovi", "dv", "hdr10+", "hdr10", "hdr", "sdr":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLocalVideoCodecToken(value string) bool {
+	switch value {
+	case "h264", "x264", "avc", "h265", "x265", "hevc", "av1", "mpeg2":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLocalVideoBitToken(value string) bool {
+	return value == "8bit" || value == "10bit" || value == "12bit"
+}
+
+func isLocalAudioCodecToken(value string) bool {
+	switch value {
+	case "truehd", "truehdatmos", "dtshd", "dtshdma", "dts", "dtsx", "ddp", "eac3", "ac3", "aac", "flac", "opus", "mp3":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLocalAudioCountToken(value string) bool {
+	return strings.HasSuffix(value, "audio") || strings.HasSuffix(value, "audios")
+}
+
+func isSingleDigitToken(value string) bool {
+	return len(value) == 1 && value[0] >= '0' && value[0] <= '9'
 }
 
 func (s *MediaRecognitionService) enrichWithTMDB(ctx context.Context, result *MediaRecognitionResult) {
@@ -348,12 +556,14 @@ func applyMediaRecognitionCategories(result *MediaRecognitionResult, config Movi
 	for index := range result.Candidates {
 		candidate := &result.Candidates[index]
 		candidate.Category = classifyMediaRecognitionMediaInfo(candidate.MediaRecognitionMediaInfo, config)
+		candidate.CategoryPath = mediaRecognitionCategoryPath(candidate.MediaType, candidate.Category)
 	}
 	mediaType := normalizeLocalMediaType(result.MediaInfo.MediaType)
 	if mediaType != "movie" && mediaType != "tv" {
 		return
 	}
 	result.MediaInfo.Category = classifyMediaRecognitionMediaInfo(result.MediaInfo, config)
+	result.MediaInfo.CategoryPath = mediaRecognitionCategoryPath(result.MediaInfo.MediaType, result.MediaInfo.Category)
 }
 
 func normalizeMediaRecognitionMode(mode string) string {
@@ -845,7 +1055,7 @@ func moviePilotInfoFromLocalResult(result MediaRecognitionResult) MoviePilotMedi
 	media := result.MediaInfo
 	meta := result.MetaInfo
 	info := MoviePilotMediaInfo{
-		MediaType: media.MediaType, Title: media.Title, Year: media.Year,
+		MediaType: media.MediaType, Title: media.Title, OriginalTitle: media.OriginalTitle, Year: media.Year,
 		Category: media.Category, TitleYear: media.TitleYear, TmdbID: media.TMDBID,
 		PosterPath: media.PosterPath, BackdropPath: media.BackdropPath,
 		Rating: media.Rating, Genres: media.Genres, GenreIDs: media.GenreIDs,
@@ -870,7 +1080,8 @@ func buildLocalMediaRecognitionRaw(result MediaRecognitionResult) map[string]any
 	mediaMap := map[string]any{
 		"source": media.Source, "media_type": media.MediaType, "title": media.Title,
 		"original_title": media.OriginalTitle, "year": media.Year, "title_year": media.TitleYear,
-		"tmdb_id": media.TMDBID, "category": media.Category, "poster_path": media.PosterPath,
+		"tmdb_id": media.TMDBID, "category": media.Category,
+		"category_path": media.CategoryPath, "poster_path": media.PosterPath,
 		"backdrop_path": media.BackdropPath, "vote_average": media.Rating,
 		"genres": media.Genres, "genre_ids": media.GenreIDs, "overview": media.Overview,
 		"original_language": media.OriginalLanguage, "origin_country": media.OriginCountries,

@@ -40,7 +40,7 @@ func TestWebhookNotificationChannelSendsStructuredEvent(t *testing.T) {
 	}}
 	channel := NewWebhookNotificationChannel(cfg, nil)
 	event := NotificationEvent{
-		Type: NotificationEventRSSMatched, Title: "RSS 上新", Message: "百花杀 S01E01",
+		Type: NotificationEventAutomationTriggered, Title: "115 目录上新", Message: "百花杀 S01E01",
 		ImageURL: "https://image.example/poster.jpg", Severity: NotificationSeverityInfo,
 		OccurredAt: time.Date(2026, 8, 10, 12, 0, 0, 0, time.Local),
 		Metadata:   map[string]string{"rule": "首集"},
@@ -49,10 +49,10 @@ func TestWebhookNotificationChannelSendsStructuredEvent(t *testing.T) {
 		t.Fatalf("Send() error = %v", err)
 	}
 
-	if gotAuthorization != "Bearer secret-token" || gotEvent != string(NotificationEventRSSMatched) {
+	if gotAuthorization != "Bearer secret-token" || gotEvent != string(NotificationEventAutomationTriggered) {
 		t.Fatalf("unexpected headers auth=%q event=%q", gotAuthorization, gotEvent)
 	}
-	if gotPayload.Instance != "家庭媒体" || gotPayload.Event != string(NotificationEventRSSMatched) ||
+	if gotPayload.Instance != "家庭媒体" || gotPayload.Event != string(NotificationEventAutomationTriggered) ||
 		gotPayload.Message != "百花杀 S01E01" || gotPayload.ImageURL == "" || gotPayload.Metadata["rule"] != "首集" {
 		t.Fatalf("unexpected payload: %+v", gotPayload)
 	}

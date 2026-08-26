@@ -23,22 +23,14 @@ const (
 	moviePilotTokenSkew              = 2 * time.Minute
 	moviePilotRequestTimeout         = 8 * time.Second
 	moviePilotLocalFallbackTTL       = 2 * time.Minute
-	MediaRecognitionSourceMoviePilot = "moviepilot"
-	MediaRecognitionSourceLocal      = "local"
+	MediaRecognitionSourceMoviePilot = config.MediaRecognitionSourceMoviePilot
+	MediaRecognitionSourceLocal      = config.MediaRecognitionSourceLocal
+	MediaRecognitionSourceShadow     = config.MediaRecognitionSourceShadow
 )
 
-// NormalizeMediaRecognitionSource returns the canonical recognition engine
-// used by organize requests. Empty values keep the historical MoviePilot
-// default for API compatibility.
+// NormalizeMediaRecognitionSource returns the canonical recognition mode.
 func NormalizeMediaRecognitionSource(value string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "moviepilot", "movie-pilot", "mp", "mp2":
-		return MediaRecognitionSourceMoviePilot, nil
-	case "local", "filmfusion", "film-fusion":
-		return MediaRecognitionSourceLocal, nil
-	default:
-		return "", errors.New("识别方式无效")
-	}
+	return config.NormalizeMediaRecognitionSource(value)
 }
 
 type MoviePilotService struct {
@@ -67,9 +59,30 @@ func NewMoviePilotService(cfg *config.Config, log *logger.Logger) *MoviePilotSer
 	}
 }
 
-// SetLocalMediaRecognition 为现有 MoviePilot 调用链接入 FilmFusion 本地降级识别。
+// SetLocalMediaRecognition 为识别路由和影子对比接入 FilmFusion 本地引擎。
 func (s *MoviePilotService) SetLocalMediaRecognition(local *MediaRecognitionService) {
 	s.local = local
+}
+
+// DefaultMediaRecognitionSource 返回系统设置中的默认识别方式。
+func (s *MoviePilotService) DefaultMediaRecognitionSource() string {
+	value := ""
+	if s != nil && s.cfg != nil {
+		value = s.cfg.MediaRecognition.Source
+	}
+	normalized, err := NormalizeMediaRecognitionSource(value)
+	if err != nil {
+		return MediaRecognitionSourceShadow
+	}
+	return normalized
+}
+
+// ResolveMediaRecognitionSource 将空请求解析为系统默认值，显式值则保持单次覆盖语义。
+func (s *MoviePilotService) ResolveMediaRecognitionSource(value string) (string, error) {
+	if strings.TrimSpace(value) == "" {
+		return s.DefaultMediaRecognitionSource(), nil
+	}
+	return NormalizeMediaRecognitionSource(value)
 }
 
 // BuildOrganizeTargetPath uses the saved custom Jinja2-compatible format once
@@ -523,7 +536,7 @@ func (s *MoviePilotService) GetCategoryConfig() (MoviePilotCategoryConfig, error
 // GetCategoryConfigWithSource avoids contacting MoviePilot when an organize
 // request explicitly selects FilmFusion's local recognition engine.
 func (s *MoviePilotService) GetCategoryConfigWithSource(source string) (MoviePilotCategoryConfig, error) {
-	normalized, err := NormalizeMediaRecognitionSource(source)
+	normalized, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return MoviePilotCategoryConfig{}, err
 	}
@@ -635,23 +648,14 @@ func (s *MoviePilotService) SearchMedia(keyword string, count int) ([]MoviePilot
 }
 
 func (s *MoviePilotService) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
-	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
-		return s.recognizeMediaLocally(filePath, MediaRecognitionModeFile, fallbackErr)
-	}
-	info, raw, err := s.recognizeFileWithMoviePilot(filePath)
-	if err == nil {
-		s.clearLocalRecognitionFallback()
-		return info, raw, nil
-	}
-	return s.recognizeMediaLocally(filePath, MediaRecognitionModeFile, err)
+	return s.RecognizeFileWithSource(filePath, "")
 }
 
-// RecognizeFileWithSource uses exactly the requested recognition engine. This
-// is intentionally strict so the organize-page switch has deterministic
-// semantics; legacy callers can keep using RecognizeFile for automatic local
-// fallback.
+// RecognizeFileWithSource uses exactly the requested recognition mode. An
+// empty source resolves to the system setting; shadow mode always keeps MP2 as
+// the authoritative result even when local recognition succeeds.
 func (s *MoviePilotService) RecognizeFileWithSource(filePath, source string) (MoviePilotMediaInfo, map[string]any, error) {
-	normalized, err := NormalizeMediaRecognitionSource(source)
+	normalized, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return MoviePilotMediaInfo{}, nil, err
 	}
@@ -664,6 +668,9 @@ func (s *MoviePilotService) RecognizeFileWithSource(filePath, source string) (Mo
 	info, raw, err := s.recognizeFileWithMoviePilot(filePath)
 	if err == nil {
 		s.clearLocalRecognitionFallback()
+	}
+	if normalized == MediaRecognitionSourceShadow {
+		return s.finishRecognitionWithShadow(filePath, MediaRecognitionModeFile, info, raw, err)
 	}
 	return info, raw, err
 }
@@ -690,27 +697,33 @@ func (s *MoviePilotService) recognizeFileWithMoviePilot(filePath string) (MovieP
 
 // RecognizeTitle identifies a release title without treating it as a filesystem path.
 func (s *MoviePilotService) RecognizeTitle(title string) (MoviePilotMediaInfo, map[string]any, error) {
+	return s.RecognizeTitleWithSource(title, "")
+}
+
+// RecognizeTitleWithSource mirrors RecognizeFileWithSource for title input.
+func (s *MoviePilotService) RecognizeTitleWithSource(title, source string) (MoviePilotMediaInfo, map[string]any, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		return MoviePilotMediaInfo{}, nil, errors.New("识别标题不能为空")
 	}
-	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
-		return s.recognizeMediaLocally(title, MediaRecognitionModeTitle, fallbackErr)
+	normalized, err := s.ResolveMediaRecognitionSource(source)
+	if err != nil {
+		return MoviePilotMediaInfo{}, nil, err
 	}
-	values := url.Values{}
-	values.Set("title", title)
-	if customWords, configured := s.localRecognitionWords(); configured {
-		values.Set("custom_words", customWords)
+	if normalized == MediaRecognitionSourceLocal {
+		if s.local == nil {
+			return MoviePilotMediaInfo{}, nil, errors.New("FilmFusion 本地识别未初始化")
+		}
+		return s.local.RecognizeFallback(context.Background(), title, MediaRecognitionModeTitle)
 	}
-	info, raw, err := s.recognizeMedia("/api/v1/media/recognize", values)
-	if err == nil && strings.TrimSpace(info.Title) != "" {
-		s.clearLocalRecognitionFallback()
-		return info, raw, nil
-	}
+	info, raw, err := s.recognizeTitleWithMoviePilot(title)
 	if err == nil {
-		err = errors.New("MoviePilot 未识别到媒体信息")
+		s.clearLocalRecognitionFallback()
 	}
-	return s.recognizeMediaLocally(title, MediaRecognitionModeTitle, err)
+	if normalized == MediaRecognitionSourceShadow {
+		return s.finishRecognitionWithShadow(title, MediaRecognitionModeTitle, info, raw, err)
+	}
+	return info, raw, err
 }
 
 func (s *MoviePilotService) recognizeMedia(endpoint string, values url.Values) (MoviePilotMediaInfo, map[string]any, error) {
@@ -759,7 +772,7 @@ func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map
 
 // TransferNameWithSource mirrors RecognizeFileWithSource for the naming stage.
 func (s *MoviePilotService) TransferNameWithSource(filePath, fileType, source string) (string, map[string]any, error) {
-	normalized, err := NormalizeMediaRecognitionSource(source)
+	normalized, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return "", nil, err
 	}
@@ -772,6 +785,9 @@ func (s *MoviePilotService) TransferNameWithSource(filePath, fileType, source st
 	name, raw, err := s.transferNameWithMoviePilot(filePath, fileType)
 	if err == nil {
 		s.clearLocalRecognitionFallback()
+	}
+	if normalized == MediaRecognitionSourceShadow {
+		return s.finishTransferNameWithShadow(filePath, name, raw, err)
 	}
 	return name, raw, err
 }
@@ -827,22 +843,6 @@ func (s *MoviePilotService) localRecognitionWords() (string, bool) {
 		return "# FilmFusion empty word list", true
 	}
 	return strings.Join(words, "\n"), true
-}
-
-func (s *MoviePilotService) recognizeMediaLocally(input, mode string, upstreamErr error) (MoviePilotMediaInfo, map[string]any, error) {
-	if s.local == nil {
-		return MoviePilotMediaInfo{}, nil, upstreamErr
-	}
-	info, raw, localErr := s.local.RecognizeFallback(context.Background(), input, mode)
-	if localErr != nil {
-		return MoviePilotMediaInfo{}, raw, fmt.Errorf("MoviePilot 识别失败: %v；本地识别也失败: %w", upstreamErr, localErr)
-	}
-	if raw == nil {
-		raw = map[string]any{}
-	}
-	raw["fallback_reason"] = upstreamErr.Error()
-	s.logLocalRecognitionFallback("媒体识别", upstreamErr)
-	return info, raw, nil
 }
 
 func (s *MoviePilotService) searchMediaLocally(keyword string, count int, upstreamErr error) ([]MoviePilotSearchResult, error) {

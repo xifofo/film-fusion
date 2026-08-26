@@ -1,0 +1,493 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/cookiejar"
+	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"film-fusion/app/model"
+
+	sdk115 "github.com/OpenListTeam/115-sdk-go"
+)
+
+var automationTemplatePattern = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
+
+func (s *AutomationService) TestTarget(ctx context.Context, targetID uint) error {
+	var target model.AutomationTarget
+	if err := s.db.First(&target, targetID).Error; err != nil {
+		return err
+	}
+	if !target.Enabled {
+		return errors.New("目标已停用")
+	}
+	switch target.Type {
+	case model.AutomationTargetQBittorrent:
+		client, err := s.newAutomationQBClient(ctx, target)
+		if err != nil {
+			return err
+		}
+		return client.testConnection(ctx)
+	default:
+		return fmt.Errorf("不支持的目标类型 %q", target.Type)
+	}
+}
+
+func (s *AutomationService) executeAutomationQBittorrent(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	targetID := automationConfigUint(node.Config, "target_id")
+	var target model.AutomationTarget
+	if err := s.db.First(&target, targetID).Error; err != nil {
+		return nil, fmt.Errorf("qBittorrent 目标不存在: %w", err)
+	}
+	if !target.Enabled {
+		return nil, errors.New("qBittorrent 目标已停用")
+	}
+	client, err := s.newAutomationQBClient(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAutomationDownloadURL(downloadURL); err != nil {
+		return nil, err
+	}
+	contentKey := automationContentKey(downloadURL)
+	torrentTag := "filmfusion-automation-" + contentKey
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	configuredTags := renderAutomationTemplate(automationConfigString(node.Config, "tags"), runContext)
+	allTags := torrentTag
+	if strings.TrimSpace(configuredTags) != "" {
+		allTags = configuredTags + "," + torrentTag
+	}
+	fields := map[string]string{
+		"urls":     downloadURL,
+		"savepath": renderAutomationTemplate(automationConfigString(node.Config, "save_path"), runContext),
+		"category": renderAutomationTemplate(automationConfigString(node.Config, "category"), runContext),
+		"tags":     allTags,
+	}
+	if automationConfigBool(node.Config, "paused") {
+		fields["paused"] = "true"
+	}
+	if automationConfigBool(node.Config, "sequential") {
+		fields["sequentialDownload"] = "true"
+	}
+	for key, value := range fields {
+		if strings.TrimSpace(value) != "" {
+			_ = writer.WriteField(key, value)
+		}
+	}
+	_ = writer.Close()
+	req, err := client.newRequest(ctx, http.MethodPost, "/api/v2/torrents/add", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := client.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("提交 qBittorrent 任务失败: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.EqualFold(strings.TrimSpace(string(responseBody)), "Ok.") {
+		return nil, fmt.Errorf("qBittorrent 返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return map[string]any{
+		"target_id": target.ID, "target_name": target.Name,
+		"content_key": contentKey, "torrent_tag": torrentTag, "submitted": true,
+	}, nil
+}
+
+type automationQBClient struct {
+	baseURL string
+	client  *http.Client
+	apiKey  string
+}
+
+func (client *automationQBClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(client.baseURL, "/")+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if client.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+client.apiKey)
+	}
+	return req, nil
+}
+
+func (client *automationQBClient) testConnection(ctx context.Context) error {
+	req, err := client.newRequest(ctx, http.MethodGet, "/api/v2/app/version", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("连接 qBittorrent API 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if client.apiKey != "" {
+			return fmt.Errorf("qBittorrent API Key 验证失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		return fmt.Errorf("qBittorrent API 连接失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	if strings.TrimSpace(string(body)) == "" {
+		return errors.New("qBittorrent API 未返回应用版本")
+	}
+	return nil
+}
+
+func (s *AutomationService) newAutomationQBClient(ctx context.Context, target model.AutomationTarget) (*automationQBClient, error) {
+	var config AutomationQBittorrentConfig
+	if err := json.Unmarshal([]byte(target.ConfigJSON), &config); err != nil {
+		return nil, errors.New("qBittorrent 目标配置损坏")
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Timeout: 20 * time.Second, Jar: jar}
+	apiKey := strings.TrimSpace(config.APIKey)
+	if apiKey != "" {
+		return &automationQBClient{baseURL: config.BaseURL, client: client, apiKey: apiKey}, nil
+	}
+	form := url.Values{"username": {config.Username}, "password": {config.Password}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(config.BaseURL, "/")+"/api/v2/auth/login", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("连接 qBittorrent 失败: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.EqualFold(strings.TrimSpace(string(body)), "Ok.") {
+		return nil, fmt.Errorf("qBittorrent 登录失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return &automationQBClient{baseURL: config.BaseURL, client: client}, nil
+}
+
+func (s *AutomationService) executeAutomationOffline115(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	storageID := automationConfigUint(node.Config, "cloud_storage_id")
+	var storage model.CloudStorage
+	if err := s.db.First(&storage, storageID).Error; err != nil {
+		return nil, fmt.Errorf("115 账号不存在: %w", err)
+	}
+	if storage.StorageType != model.StorageType115Open {
+		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
+	}
+	if storage.Status != model.StatusActive {
+		return nil, fmt.Errorf("115 账号当前状态为 %s", storage.Status)
+	}
+	if strings.TrimSpace(storage.Cookie) == "" {
+		return nil, errors.New("115 账号没有可用 Cookie")
+	}
+	downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAutomationDownloadURL(downloadURL); err != nil {
+		return nil, err
+	}
+	directoryID := strings.TrimSpace(automationConfigString(node.Config, "directory_id"))
+	if directoryID == "" {
+		directoryID = "0"
+	}
+	timeout := 30 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+	}
+	if timeout <= 0 {
+		return nil, context.DeadlineExceeded
+	}
+	client, err := s.web115.NewClientWithContext(ctx, storage.Cookie, timeout)
+	if err != nil {
+		return nil, err
+	}
+	hashes, err := client.AddOfflineTaskURIs([]string{downloadURL}, directoryID)
+	if err != nil {
+		return nil, fmt.Errorf("提交 115 离线任务失败: %w", err)
+	}
+	return map[string]any{
+		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName,
+		"directory_id": directoryID, "hashes": hashes,
+		"access_method": "cookie",
+		"content_key":   automationContentKey(downloadURL), "submitted": true,
+	}, nil
+}
+
+func (s *AutomationService) executeAutomationOffline115OpenAPI(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	storageID := automationConfigUint(node.Config, "cloud_storage_id")
+	var storage model.CloudStorage
+	if err := s.db.First(&storage, storageID).Error; err != nil {
+		return nil, fmt.Errorf("115 OpenAPI 账号不存在: %w", err)
+	}
+	if storage.StorageType != model.StorageType115Open {
+		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
+	}
+	if storage.Status != model.StatusActive {
+		return nil, fmt.Errorf("115 OpenAPI 账号当前状态为 %s", storage.Status)
+	}
+	accessToken := strings.TrimSpace(storage.AccessToken)
+	if accessToken == "" {
+		return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
+	}
+
+	downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
+	if err != nil {
+		return nil, err
+	}
+	if err := validateAutomationDownloadURL(downloadURL); err != nil {
+		return nil, err
+	}
+	directoryID := strings.TrimSpace(automationConfigString(node.Config, "directory_id"))
+	if directoryID == "" {
+		directoryID = "0"
+	}
+
+	client := sdk115.New(sdk115.WithAccessToken(accessToken))
+	if s.httpClient != nil {
+		client.SetHttpClient(s.httpClient)
+	}
+	hashes, err := client.AddOfflineTaskURIs(ctx, []string{downloadURL}, directoryID)
+	if err != nil {
+		return nil, fmt.Errorf("通过 115 OpenAPI 提交离线任务失败: %w", err)
+	}
+	if len(hashes) == 0 {
+		return nil, errors.New("115 OpenAPI 未返回已创建的离线任务")
+	}
+	return map[string]any{
+		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName,
+		"directory_id": directoryID, "hashes": hashes,
+		"access_method": "openapi",
+		"content_key":   automationContentKey(downloadURL), "submitted": true,
+	}, nil
+}
+
+func (s *AutomationService) executeAutomationRename115OpenAPI(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	storageID := automationConfigUint(node.Config, "cloud_storage_id")
+	var storage model.CloudStorage
+	if err := s.db.First(&storage, storageID).Error; err != nil {
+		return nil, fmt.Errorf("115 OpenAPI 账号不存在: %w", err)
+	}
+	if storage.StorageType != model.StorageType115Open {
+		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
+	}
+	if storage.Status != model.StatusActive {
+		return nil, fmt.Errorf("115 OpenAPI 账号当前状态为 %s", storage.Status)
+	}
+	accessToken := strings.TrimSpace(storage.AccessToken)
+	if accessToken == "" {
+		return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
+	}
+
+	fileID, err := resolveAutomationString(runContext, automationConfigString(node.Config, "file_id"))
+	if err != nil {
+		return nil, fmt.Errorf("解析 115 文件 ID 失败: %w", err)
+	}
+	if fileID == "0" || len(fileID) > 100 || strings.IndexFunc(fileID, unicode.IsSpace) >= 0 {
+		return nil, errors.New("115 文件或文件夹 ID 无效")
+	}
+	newName, err := resolveAutomationString(runContext, automationConfigString(node.Config, "new_name"))
+	if err != nil {
+		return nil, fmt.Errorf("解析 115 新名称失败: %w", err)
+	}
+	if err := validateAutomation115RenameName(newName); err != nil {
+		return nil, err
+	}
+
+	client := sdk115.New(sdk115.WithAccessToken(accessToken))
+	if s.httpClient != nil {
+		client.SetHttpClient(s.httpClient)
+	}
+	response, err := client.UpdateFile(ctx, &sdk115.UpdateFileReq{FileID: fileID, FileNma: newName})
+	if err != nil {
+		return nil, fmt.Errorf("通过 115 OpenAPI 重命名失败: %w", err)
+	}
+	fileName := newName
+	if response != nil && strings.TrimSpace(response.FileName) != "" {
+		fileName = strings.TrimSpace(response.FileName)
+	}
+	return map[string]any{
+		"renamed": true, "file_id": fileID, "file_name": fileName, "new_name": newName,
+		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName, "access_method": "openapi",
+	}, nil
+}
+
+func validateAutomation115RenameName(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return errors.New("115 新名称不能为空")
+	}
+	if !utf8.ValidString(name) {
+		return errors.New("115 新名称不是有效的 UTF-8 文本")
+	}
+	if len(name) > 255 {
+		return errors.New("115 新名称不能超过 255 字节")
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		return errors.New("115 新名称不能包含路径分隔符")
+	}
+	if strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return errors.New("115 新名称不能包含控制字符")
+	}
+	return nil
+}
+
+func (s *AutomationService) executeAutomationNotification(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	if s.notifier == nil {
+		return nil, errors.New("通知服务未初始化")
+	}
+	message := renderAutomationTemplate(automationConfigString(node.Config, "message"), runContext)
+	title := renderAutomationTemplate(automationConfigString(node.Config, "title"), runContext)
+	imageURL := renderAutomationTemplate(automationConfigString(node.Config, "image_url"), runContext)
+	if strings.TrimSpace(message) == "" {
+		return nil, errors.New("渲染后的通知内容为空")
+	}
+	if len(imageURL) > 4096 {
+		return nil, errors.New("渲染后的通知图片地址超过 4096 字节")
+	}
+	report := s.notifier.Publish(ctx, NotificationEvent{
+		Type: NotificationEventAutomationTriggered, Title: title, Message: message, ImageURL: imageURL,
+		Severity: NotificationSeverityInfo, OccurredAt: time.Now(),
+		Metadata: map[string]string{"source": "automation"},
+	})
+	output := map[string]any{"skipped": report.Skipped, "skip_reason": report.SkipReason, "deliveries": report.Deliveries, "image_url": imageURL}
+	if report.Skipped {
+		return output, nil
+	}
+	if !report.AnySuccess() {
+		return output, fmt.Errorf("通知发送失败: %s", report.FailureMessage())
+	}
+	if report.HasFailures() {
+		output["partial"] = true
+		output["warning"] = report.FailureMessage()
+	}
+	return output, nil
+}
+
+func validateAutomationDownloadURL(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return errors.New("下载地址为空")
+	}
+	if len(value) > 65535 {
+		return errors.New("下载地址超过 65535 字节限制")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return errors.New("下载地址格式无效")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "magnet":
+		if !strings.Contains(strings.ToLower(value), "xt=urn:btih:") {
+			return errors.New("磁力链接缺少 BTIH")
+		}
+	case "http", "https":
+		if parsed.Host == "" {
+			return errors.New("HTTP 下载地址缺少主机名")
+		}
+	default:
+		return fmt.Errorf("不支持下载地址协议 %q", parsed.Scheme)
+	}
+	return nil
+}
+
+func renderAutomationTemplate(template string, runContext map[string]any) string {
+	return strings.TrimSpace(automationTemplatePattern.ReplaceAllStringFunc(template, func(match string) string {
+		parts := automationTemplatePattern.FindStringSubmatch(match)
+		if len(parts) != 2 {
+			return match
+		}
+		value, ok := resolveAutomationReference(runContext, parts[1])
+		if !ok || value == nil {
+			return ""
+		}
+		switch typed := value.(type) {
+		case string:
+			return typed
+		case json.Number:
+			return typed.String()
+		default:
+			return fmt.Sprint(typed)
+		}
+	}))
+}
+
+func resolveAutomationString(runContext map[string]any, expression string) (string, error) {
+	expression = strings.TrimSpace(expression)
+	if expression == "" {
+		return "", errors.New("输入值为空")
+	}
+	if strings.Contains(expression, "{{") {
+		value := renderAutomationTemplate(expression, runContext)
+		if value == "" {
+			return "", fmt.Errorf("模板 %q 没有解析出值", expression)
+		}
+		return value, nil
+	}
+	trimmedReference := strings.TrimPrefix(expression, "$")
+	if strings.HasPrefix(expression, "$") || strings.HasPrefix(trimmedReference, "item.") ||
+		strings.HasPrefix(trimmedReference, "vars.") || strings.HasPrefix(trimmedReference, "nodes.") {
+		value, ok := resolveAutomationReference(runContext, expression)
+		if !ok || value == nil {
+			return "", fmt.Errorf("变量 %q 不存在", expression)
+		}
+		return strings.TrimSpace(fmt.Sprint(value)), nil
+	}
+	return expression, nil
+}
+
+func resolveAutomationReference(runContext map[string]any, reference string) (any, bool) {
+	reference = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(reference), "$"))
+	if reference == "" {
+		return nil, false
+	}
+	parts := strings.Split(reference, ".")
+	var current any = runContext
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		mapping, ok := current.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		current, ok = mapping[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return current, true
+}
+
+func automationConfigBool(config map[string]any, key string) bool {
+	value, ok := config[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, _ := strconv.ParseBool(strings.TrimSpace(typed))
+		return parsed
+	case float64:
+		return typed != 0
+	default:
+		return false
+	}
+}

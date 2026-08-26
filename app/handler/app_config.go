@@ -95,7 +95,7 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
 	v.Site = h.currentSiteConfig()
 	v.Server.Cookie115DefaultApp, v.Server.Web115UserAgent = h.current115Settings()
-	v.RSSAutomation.UserAgent = h.currentRSSAutomationUserAgent()
+	v.MediaRecognition = h.currentMediaRecognitionSettings()
 	if v.Notifications.IsZero() {
 		v.Notifications = config.NotificationConfigFromLegacy(v.Telegram)
 	}
@@ -131,10 +131,11 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 }
 
 type appConfigUpdatePayload struct {
-	Config                      config.Config `json:"config"`
-	web115UserAgentFieldPresent bool
-	notificationsFieldPresent   bool
-	telegramFieldPresent        bool
+	Config                       config.Config `json:"config"`
+	web115UserAgentFieldPresent  bool
+	mediaRecognitionFieldPresent bool
+	notificationsFieldPresent    bool
+	telegramFieldPresent         bool
 }
 
 func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
@@ -152,14 +153,16 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 	}
 
 	var fields struct {
-		Server        map[string]json.RawMessage `json:"server"`
-		Notifications json.RawMessage            `json:"notifications"`
-		Telegram      json.RawMessage            `json:"telegram"`
+		Server           map[string]json.RawMessage `json:"server"`
+		MediaRecognition json.RawMessage            `json:"media_recognition"`
+		Notifications    json.RawMessage            `json:"notifications"`
+		Telegram         json.RawMessage            `json:"telegram"`
 	}
 	if err := json.Unmarshal(raw.Config, &fields); err != nil {
 		return err
 	}
 	_, p.web115UserAgentFieldPresent = fields.Server["web_115_user_agent"]
+	p.mediaRecognitionFieldPresent = len(fields.MediaRecognition) > 0 && string(fields.MediaRecognition) != "null"
 	p.notificationsFieldPresent = len(fields.Notifications) > 0 && string(fields.Notifications) != "null"
 	p.telegramFieldPresent = len(fields.Telegram) > 0 && string(fields.Telegram) != "null"
 	return nil
@@ -174,7 +177,7 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	in := payload.Config
 	current115App, current115UserAgent := h.current115Settings()
-	currentRSSAutomationUserAgent := h.currentRSSAutomationUserAgent()
+	currentMediaRecognition := h.currentMediaRecognitionSettings()
 	if strings.TrimSpace(in.Server.Cookie115DefaultApp) == "" {
 		in.Server.Cookie115DefaultApp = current115App
 	}
@@ -184,11 +187,16 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		in.Server.Web115UserAgent = current115UserAgent
 	}
 	in.Server.Web115UserAgent = config.NormalizeWeb115UserAgent(in.Server.Web115UserAgent)
-	// 旧版前端没有 rss_automation 字段时保留数据库现值；User-Agent 不允许为空。
-	if strings.TrimSpace(in.RSSAutomation.UserAgent) == "" {
-		in.RSSAutomation.UserAgent = currentRSSAutomationUserAgent
+	// 旧版前端没有 media_recognition 字段时沿用数据库现值。
+	if !payload.mediaRecognitionFieldPresent {
+		in.MediaRecognition = currentMediaRecognition
 	}
-	in.RSSAutomation.UserAgent = database.NormalizeRSSAutomationUserAgent(in.RSSAutomation.UserAgent)
+	recognitionSource, err := config.NormalizeMediaRecognitionSource(in.MediaRecognition.Source)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	in.MediaRecognition.Source = recognitionSource
 	// 系统设置页不编辑图片优化子配置，缺省时沿用专用页面保存的值。
 	if in.Emby.ImageOptimization.IsZero() {
 		in.Emby.ImageOptimization = h.cfg.Emby.ImageOptimization
@@ -273,10 +281,6 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	if err := config.ValidateWeb115UserAgent(in.Server.Web115UserAgent); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
-	}
-	if err := database.ValidateRSSAutomationUserAgent(in.RSSAutomation.UserAgent); err != nil {
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
@@ -388,7 +392,7 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		restart = append(restart, "115 下载并发数")
 	}
 
-	// 外观、115 与 RSS 自动化运行配置写入 system_configs；这些值不再写回 YAML。
+	// 外观与 115 运行配置写入 system_configs；这些值不再写回 YAML。
 	if err := h.saveConfigAndSiteSettings(&in); err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "写入配置失败: "+err.Error())
 		return

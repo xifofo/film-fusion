@@ -32,8 +32,7 @@ const (
 	CategorySystem           = "system"            // 系统配置
 	CategorySecurity         = "security"          // 安全配置
 	Category115Open          = "115_open"          // 115开放平台配置
-	CategoryRSSAutomation    = "rss_automation"    // RSS 自动化配置
-	CategoryMediaRecognition = "media_recognition" // 本地媒体识别配置
+	CategoryMediaRecognition = "media_recognition" // 媒体识别配置
 	CategoryAppearance       = "appearance"        // 站点外观配置
 )
 
@@ -68,11 +67,9 @@ const (
 	ConfigKey115WebUserAgent     = "server.web_115_user_agent"
 )
 
-// RSS 自动化运行配置键。只保存在 system_configs，不从 config.yaml 读取或写入。
-const ConfigKeyRSSAutomationUserAgent = "rss_automation.user_agent"
-
-// 本地媒体识别配置键。识别词、分类与重命名格式只保存在 system_configs，不依赖 MoviePilot 配置。
+// 媒体识别配置键。默认识别方式、识别词、分类与重命名格式只保存在 system_configs。
 const (
+	ConfigKeyMediaRecognitionSource     = "media_recognition.source"
 	ConfigKeyMediaRecognitionWords      = "media_recognition.words"
 	ConfigKeyMediaRecognitionCategories = "media_recognition.categories"
 	ConfigKeyMediaRecognitionRename     = "media_recognition.rename_formats"

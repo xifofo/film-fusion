@@ -41,7 +41,7 @@ type Server struct {
 	embyLoginProtection     *service.EmbyLoginProtection
 	appLoginProtection      *service.EmbyLoginProtection
 	notificationService     *service.NotificationService
-	rssAutomationService    *service.RSSAutomationService
+	automationService       *service.AutomationService
 	taskQueue               *service.PersistentTaskQueue
 }
 
@@ -110,8 +110,8 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		notificationService:     notificationService,
 		taskQueue:               taskQueue,
 	}
-	s.rssAutomationService = service.NewRSSAutomationService(log, s.notificationService, s.moviePilotService)
-	s.rssAutomationService.SetLocalMediaRecognition(s.mediaRecognitionService)
+	s.automationService = service.NewAutomationService(log, s.notificationService, s.moviePilotService)
+	s.automationService.SetLocalMediaRecognition(s.mediaRecognitionService)
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.notificationService)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.notificationService)
 
@@ -177,8 +177,8 @@ func (s *Server) Start() error {
 	// 启动 Emby 本地多版本定时检查调度
 	s.versionCheckHandler.Start()
 
-	// 启动独立的 RSS 自动化流程调度
-	s.rssAutomationService.Start()
+	// 启动独立的 115 目录自动化调度
+	s.automationService.Start()
 
 	// 启动Emby代理服务器（如果启用）
 	if s.embyProxyServer != nil {
@@ -230,8 +230,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.versionCheckHandler.Stop()
 	}
 
-	if s.rssAutomationService != nil {
-		s.rssAutomationService.Stop()
+	if s.automationService != nil {
+		s.automationService.Stop()
 	}
 
 	// 停止Emby代理服务器
@@ -280,10 +280,10 @@ func (s *Server) setupRoutes() {
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
-	rssAutomationHandler := handler.NewRSSAutomationHandler(s.rssAutomationService)
+	automationHandler := handler.NewAutomationHandler(s.automationService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
-	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService)
+	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService, s.moviePilotService)
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
@@ -293,9 +293,9 @@ func (s *Server) setupRoutes() {
 	pickcodeCacheHandler := handler.NewPickcodeCacheHandler()
 	match302Handler := handler.NewMatch302Handler(s.Logger)
 	organizeHandler := handler.NewOrganizeHandler(s.Logger, s.moviePilotService, s.tmdbService, s.download115Service, s.embyClient)
-	s.rssAutomationService.SetOrganizer(organizeHandler)
-	s.rssAutomationService.SetMediaStatusChecker(organizeHandler)
-	s.rssAutomationService.SetEmbyClient(s.embyClient)
+	s.automationService.SetOrganizer(organizeHandler)
+	s.automationService.SetMediaStatusChecker(organizeHandler)
+	s.automationService.SetEmbyClient(s.embyClient)
 	organizePreviewQueue := service.NewOrganizePreviewQueue(s.Logger, organizeHandler.ProcessPreviewTask)
 	organizeHandler.SetPreviewQueue(organizePreviewQueue)
 	s.organizePreviewQueue = organizePreviewQueue
@@ -308,7 +308,7 @@ func (s *Server) setupRoutes() {
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
 	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger, s.hdhiveRefreshService)
-	s.rssAutomationService.SetHDHiveGateway(hdhiveHandler)
+	s.automationService.SetHDHiveGateway(hdhiveHandler)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 	systemInfoHandler := handler.NewSystemInfoHandler(service.NewSystemInfoCollector())
@@ -365,42 +365,41 @@ func (s *Server) setupRoutes() {
 		// 旧版前端兼容入口。
 		protected.POST("/telegram/test", notificationHandler.TestTelegram)
 
-		rssAutomation := protected.Group("/rss-automation")
+		automation := protected.Group("/automations")
 		{
-			rssAutomation.GET("", rssAutomationHandler.Dashboard)
-			rssAutomation.GET("/node-protocols", rssAutomationHandler.NodeProtocols)
-			rssAutomation.POST("/automations", rssAutomationHandler.CreateAutomation)
-			rssAutomation.PATCH("/automations/:id/enabled", rssAutomationHandler.SetAutomationEnabled)
-			rssAutomation.DELETE("/automations/:id", rssAutomationHandler.DeleteAutomation)
-			rssAutomation.PUT("/sources/:id", rssAutomationHandler.UpdateSource)
-			rssAutomation.POST("/sources/sample", rssAutomationHandler.SampleSource)
-			rssAutomation.POST("/refresh", rssAutomationHandler.Refresh)
-			rssAutomation.POST("/workflows/validate", rssAutomationHandler.ValidateWorkflow)
-			rssAutomation.PUT("/workflows/:id", rssAutomationHandler.UpdateWorkflow)
-			rssAutomation.GET("/workflows/:id/manual-candidates", rssAutomationHandler.ListManualCandidates)
-			rssAutomation.POST("/workflows/:id/manual-runs", rssAutomationHandler.CreateManualRuns)
-			rssAutomation.GET("/targets", rssAutomationHandler.ListTargets)
-			rssAutomation.GET("/targets/status", rssAutomationHandler.ListTargetStatuses)
-			rssAutomation.POST("/targets", rssAutomationHandler.CreateTarget)
-			rssAutomation.PUT("/targets/:id", rssAutomationHandler.UpdateTarget)
-			rssAutomation.DELETE("/targets/:id", rssAutomationHandler.DeleteTarget)
-			rssAutomation.POST("/targets/:id/test", rssAutomationHandler.TestTarget)
-			rssAutomation.GET("/entries", rssAutomationHandler.ListEntries)
-			rssAutomation.GET("/runs", rssAutomationHandler.ListRuns)
-			rssAutomation.GET("/runs/:id", rssAutomationHandler.GetRun)
-			rssAutomation.POST("/runs/:id/retry", rssAutomationHandler.RetryRun)
-			rssAutomation.POST("/runs/:id/cancel", rssAutomationHandler.CancelRun)
+			automation.GET("", automationHandler.Dashboard)
+			automation.POST("", automationHandler.CreateAutomation)
+			automation.POST("/sources/sample", automationHandler.SampleRSSSource)
+			automation.PUT("/:id", automationHandler.UpdateAutomation)
+			automation.GET("/node-protocols", automationHandler.NodeProtocols)
+			automation.PATCH("/:id/enabled", automationHandler.SetAutomationEnabled)
+			automation.DELETE("/:id", automationHandler.DeleteAutomation)
+			automation.PUT("/:id/source", automationHandler.UpdateSource)
+			automation.POST("/:id/scan", automationHandler.Scan)
+			automation.POST("/workflow/validate", automationHandler.ValidateWorkflow)
+			automation.PUT("/workflows/:id", automationHandler.UpdateWorkflow)
+			automation.GET("/targets", automationHandler.ListTargets)
+			automation.GET("/targets/status", automationHandler.ListTargetStatuses)
+			automation.POST("/targets", automationHandler.CreateTarget)
+			automation.PUT("/targets/:id", automationHandler.UpdateTarget)
+			automation.DELETE("/targets/:id", automationHandler.DeleteTarget)
+			automation.POST("/targets/:id/test", automationHandler.TestTarget)
+			automation.GET("/entries", automationHandler.ListEntries)
+			automation.GET("/runs", automationHandler.ListRuns)
+			automation.GET("/runs/:id", automationHandler.GetRun)
+			automation.POST("/runs/:id/retry", automationHandler.RetryRun)
+			automation.POST("/runs/:id/cancel", automationHandler.CancelRun)
 		}
 
-		// 下载器账号由独立设置页管理；旧的 RSS 自动化目标接口继续保留兼容。
+		// 下载器账号由独立设置页管理。
 		downloaders := protected.Group("/downloaders")
 		{
-			downloaders.GET("", rssAutomationHandler.ListTargets)
-			downloaders.GET("/status", rssAutomationHandler.ListTargetStatuses)
-			downloaders.POST("", rssAutomationHandler.CreateTarget)
-			downloaders.PUT("/:id", rssAutomationHandler.UpdateTarget)
-			downloaders.DELETE("/:id", rssAutomationHandler.DeleteTarget)
-			downloaders.POST("/:id/test", rssAutomationHandler.TestTarget)
+			downloaders.GET("", automationHandler.ListTargets)
+			downloaders.GET("/status", automationHandler.ListTargetStatuses)
+			downloaders.POST("", automationHandler.CreateTarget)
+			downloaders.PUT("/:id", automationHandler.UpdateTarget)
+			downloaders.DELETE("/:id", automationHandler.DeleteTarget)
+			downloaders.POST("/:id/test", automationHandler.TestTarget)
 		}
 
 		config := protected.Group("/config")
@@ -523,6 +522,7 @@ func (s *Server) setupRoutes() {
 			mediaRecognition.POST("/rename-config/validate", mediaRecognitionHandler.ValidateRenameTemplate)
 			mediaRecognition.POST("/rename-config/preview", mediaRecognitionHandler.PreviewRenameTemplate)
 			mediaRecognition.POST("/test", mediaRecognitionHandler.Test)
+			mediaRecognition.POST("/shadow-test", mediaRecognitionHandler.ShadowTest)
 		}
 
 		// 整理文件相关路由

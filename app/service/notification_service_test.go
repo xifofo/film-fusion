@@ -43,12 +43,12 @@ func TestNotificationServiceRoutesToMultipleChannels(t *testing.T) {
 	}
 	cfg := &config.Config{Notifications: config.NotificationConfig{
 		Routes: config.NotificationRoutesConfig{
-			RSSMatched: []string{config.NotificationChannelTelegram, config.NotificationChannelWebhook},
+			AutomationTriggered: []string{config.NotificationChannelTelegram, config.NotificationChannelWebhook},
 		},
 	}}
 	notifications := NewNotificationService(cfg, nil, telegram, webhook)
 	report := notifications.Publish(context.Background(), NotificationEvent{
-		Type: NotificationEventRSSMatched, Message: "new media",
+		Type: NotificationEventAutomationTriggered, Message: "new media",
 	})
 
 	if !report.AnySuccess() || !report.HasFailures() || report.Skipped {
@@ -65,24 +65,24 @@ func TestNotificationServiceTreatsEmptyRouteAsIntentionalSkip(t *testing.T) {
 		id: config.NotificationChannelTelegram, ready: false,
 	})
 	report := notifications.Publish(context.Background(), NotificationEvent{
-		Type: NotificationEventRSSMatched, Message: "new media",
+		Type: NotificationEventAutomationTriggered, Message: "new media",
 	})
-	if !report.Skipped || report.Err() != nil || !notifications.Ready(NotificationEventRSSMatched) {
+	if !report.Skipped || report.Err() != nil || !notifications.Ready(NotificationEventAutomationTriggered) {
 		t.Fatalf("empty route should be an intentional ready skip: %+v", report)
 	}
 }
 
 func TestNotificationServiceReportsUnreadyConfiguredChannel(t *testing.T) {
 	cfg := &config.Config{Notifications: config.NotificationConfig{
-		Routes: config.NotificationRoutesConfig{RSSMatched: []string{config.NotificationChannelTelegram}},
+		Routes: config.NotificationRoutesConfig{AutomationTriggered: []string{config.NotificationChannelTelegram}},
 	}}
 	notifications := NewNotificationService(cfg, nil, &recordingNotificationChannel{
 		id: config.NotificationChannelTelegram, ready: false,
 	})
 	report := notifications.Publish(context.Background(), NotificationEvent{
-		Type: NotificationEventRSSMatched, Message: "new media",
+		Type: NotificationEventAutomationTriggered, Message: "new media",
 	})
-	if report.AnySuccess() || !report.HasFailures() || notifications.Ready(NotificationEventRSSMatched) {
+	if report.AnySuccess() || !report.HasFailures() || notifications.Ready(NotificationEventAutomationTriggered) {
 		t.Fatalf("unready routed channel was not reported: %+v", report)
 	}
 }

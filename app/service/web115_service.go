@@ -21,12 +21,16 @@ type Web115Service struct {
 }
 
 type Web115File struct {
-	FileID   string `json:"file_id"`
-	Name     string `json:"name"`
-	PickCode string `json:"pick_code"`
-	SHA1     string `json:"sha1"`
-	IsFile   bool   `json:"is_file"`
-	Size     int64  `json:"size"`
+	FileID     string `json:"file_id"`
+	ParentID   string `json:"parent_id,omitempty"`
+	Name       string `json:"name"`
+	PickCode   string `json:"pick_code"`
+	SHA1       string `json:"sha1"`
+	IsFile     bool   `json:"is_file"`
+	Size       int64  `json:"size"`
+	UploadedAt int64  `json:"uploaded_at,omitempty"`
+	UpdatedAt  int64  `json:"updated_at,omitempty"`
+	Complete   bool   `json:"complete"`
 }
 
 type Web115ListResult struct {
@@ -107,6 +111,7 @@ func (s *Web115Service) GetFilesWithClient(client *driver.Pan115Client, cid stri
 			SHA1:     file.Sha1,
 			IsFile:   !file.IsDirectory,
 			Size:     file.Size,
+			Complete: true,
 		})
 	}
 
@@ -276,6 +281,7 @@ func (s *Web115Service) GetDirectoriesWithClient(client *driver.Pan115Client, ci
 			SHA1:     file.Sha1,
 			IsFile:   false,
 			Size:     file.Size,
+			Complete: true,
 		})
 	}
 
@@ -322,12 +328,59 @@ func (s *Web115Service) GetDirectoriesWithOpenAPI(ctx context.Context, accessTok
 			SHA1:     file.Sha1,
 			IsFile:   false,
 			Size:     file.FS,
+			Complete: true,
 		})
 	}
 	return Web115ListResult{
 		Items: items,
 		Total: result.Count,
 	}, nil
+}
+
+// GetDirectoryEntriesWithOpenAPI returns one directory page ordered by the
+// provider update time. It exposes the timestamps and completion flag needed
+// by the durable incremental-monitor cursor.
+func (s *Web115Service) GetDirectoryEntriesWithOpenAPI(
+	ctx context.Context,
+	accessToken string,
+	cid string,
+	offset int,
+	limit int,
+) (Web115ListResult, error) {
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return Web115ListResult{}, fmt.Errorf("115 OpenAPI AccessToken 为空")
+	}
+	if limit <= 0 || limit > int(driver.MaxDirPageLimit) {
+		limit = int(driver.MaxDirPageLimit)
+	}
+	client := sdk115.New(sdk115.WithAccessToken(accessToken))
+	result, err := client.GetFiles(ctx, &sdk115.GetFilesReq{
+		CID: strings.TrimSpace(cid), Limit: int64(limit), Offset: int64(offset),
+		O: "user_utime", ASC: false, Stdir: 1, Cur: 1, ShowDir: true,
+	})
+	if err != nil {
+		return Web115ListResult{}, err
+	}
+	items := make([]Web115File, 0, len(result.Data))
+	for _, file := range result.Data {
+		updatedAt := file.Upt
+		if file.Uet > updatedAt {
+			updatedAt = file.Uet
+		}
+		if file.UpPt > updatedAt {
+			updatedAt = file.UpPt
+		}
+		isFile := file.Fc == "1"
+		items = append(items, Web115File{
+			FileID: strings.TrimSpace(file.Fid), ParentID: strings.TrimSpace(file.Pid),
+			Name: strings.TrimSpace(file.Fn), PickCode: strings.TrimSpace(file.Pc),
+			SHA1: strings.TrimSpace(file.Sha1), IsFile: isFile, Size: file.FS,
+			UploadedAt: file.UpPt, UpdatedAt: updatedAt,
+			Complete: !isFile || strings.TrimSpace(file.Fta) == "1",
+		})
+	}
+	return Web115ListResult{Items: items, Total: result.Count}, nil
 }
 
 // web115BrowserUA 使用和 115 网页端完全一致的 UA，避免被风控识别为脚本客户端。

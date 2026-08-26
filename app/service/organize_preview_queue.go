@@ -201,7 +201,7 @@ func normalizeOrganizePreviewMediaType(value string) string {
 func normalizeOrganizePreviewRecognitionSource(value string) string {
 	source, err := NormalizeMediaRecognitionSource(value)
 	if err != nil {
-		return MediaRecognitionSourceMoviePilot
+		return MediaRecognitionSourceShadow
 	}
 	return source
 }

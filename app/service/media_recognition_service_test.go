@@ -42,6 +42,44 @@ func TestMediaRecognitionServiceParsesFileWithFolderContext(t *testing.T) {
 	}
 }
 
+func TestLocalMovieTransferNameMatchesObservedMP2Result(t *testing.T) {
+	service := NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil)
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{
+			input: "[乌云背后的幸福线].Silver.Linings.Playbook.(2012).FIN.BluRay.1080p.x264.DDP.5.1.2Audios-CMCT.{tmdb-82693}.mkv",
+			want:  "Silver Linings Playbook.2012.BluRay.1080p.x264.DDP 5.1 2Audios-CMCT.mkv",
+		},
+		{
+			input: "Insidious.(2011).BluRay.HDR.DoVi.2160p.x265.10bit.TrueHD.7.1.10bit.{tmdb-49018}.mkv",
+			want:  "Insidious.2011.BluRay HDR DoVi.2160p.x265 10bit.TrueHD 7.1.10bit.mkv",
+		},
+	}
+	for _, test := range tests {
+		name, raw, err := service.BuildTransferName(test.input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name != test.want {
+			t.Fatalf("transfer name=%q want=%q raw=%#v", name, test.want, raw)
+		}
+	}
+}
+
+func TestMoviePilotInfoFromLocalResultKeepsOriginalTitle(t *testing.T) {
+	info := moviePilotInfoFromLocalResult(MediaRecognitionResult{
+		MediaInfo: MediaRecognitionMediaInfo{
+			MediaType: "movie", Title: "乌云背后的幸福线",
+			OriginalTitle: "Silver Linings Playbook", Year: "2012",
+		},
+	})
+	if info.OriginalTitle != "Silver Linings Playbook" {
+		t.Fatalf("original title=%q", info.OriginalTitle)
+	}
+}
+
 func TestMediaRecognitionServiceMatchesExplicitTMDBID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/3/tv/123" || r.URL.Query().Get("api_key") != "test-key" {
@@ -89,6 +127,9 @@ tv:
 	}
 	if result.MediaInfo.Category != "华语悬疑剧" || result.Candidates[0].Category != "华语悬疑剧" {
 		t.Fatalf("categories media=%q candidates=%+v", result.MediaInfo.Category, result.Candidates)
+	}
+	if result.MediaInfo.CategoryPath != "电视剧/华语悬疑剧" || result.Candidates[0].CategoryPath != "电视剧/华语悬疑剧" {
+		t.Fatalf("category paths media=%q candidates=%+v", result.MediaInfo.CategoryPath, result.Candidates)
 	}
 	if len(result.Candidates) != 1 || result.Candidates[0].Confidence != 1 {
 		t.Fatalf("candidates=%+v", result.Candidates)
