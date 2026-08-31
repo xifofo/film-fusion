@@ -48,6 +48,12 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("tasks", "array", "115 媒体批次", "兼容识别与整理节点的已完成媒体批次。", []map[string]any{{"status": 2, "file_id": "123456"}}),
 		automationVariable("completed", "boolean", "上传已完成", "仅在对象稳定并完成上传后触发。", true),
 	}},
+	{Type: AutomationNodeDelay, Label: "延迟执行", Inputs: []AutomationVariableProtocol{}, Outputs: []AutomationVariableProtocol{
+		automationVariable("delay_seconds", "integer", "延迟秒数", "节点配置并实际等待的固定时长。", 600),
+		automationVariable("scheduled_at", "datetime", "开始等待时间", "延迟节点首次进入等待状态的时间。", "2026-08-30T12:00:00Z"),
+		automationVariable("resume_at", "datetime", "计划继续时间", "后续节点最早可以继续执行的时间。", "2026-08-30T12:10:00Z"),
+		automationVariable("resumed_at", "datetime", "实际继续时间", "延迟结束并恢复流程的实际时间。", "2026-08-30T12:10:00Z"),
+	}},
 	{Type: AutomationNodeKeyword, Label: "关键词判断", Inputs: []AutomationVariableProtocol{
 		automationTemplateVariable("input", "string", "输入字段", "要检查的 事件字段或上游变量。", "$item.title", true),
 	}, Outputs: []AutomationVariableProtocol{
@@ -81,6 +87,107 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 	}, Outputs: []AutomationVariableProtocol{
 		automationVariable("variables", "object", "生成变量", "转换后写入 $vars.* 的变量对象。", map[string]any{"episode": 12}),
 	}},
+	{Type: AutomationNodeSetVariable, Label: "设置变量", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("value", "any", "变量值", "普通值按字面量写入；精确 $ 引用保留原类型；模板输出文本。", "$item.title", true),
+		automationVariable("variable", "string", "变量名", "写入 $vars.* 的安全变量名。", "normalized_title"),
+	}, Outputs: automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的值。", "Example S01E01")},
+	{Type: AutomationNodeTemplate, Label: "文本模板", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("template", "string", "模板", "使用 {{item.*}}、{{vars.*}} 或 {{nodes.*}} 拼接文本。", "{{item.title}} - {{vars.quality}}", true),
+		automationVariable("variable", "string", "变量名", "模板结果写入的 $vars.* 变量名。", "display_title"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("result", "string", "模板结果", "模板解析后的完整文本。", "Example S01E01 - 2160p"),
+		automationVariable("missing_references", "array", "缺失引用", "模板中未能解析的变量引用。", []string{"vars.quality"}),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的模板文本。", "Example S01E01 - 2160p")...)},
+	{Type: AutomationNodeJSONExtract, Label: "JSON 提取", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "any", "JSON 输入", "JSON 文本、对象、数组或其精确变量引用。", "$nodes.http.output.json", true),
+		automationVariable("pointer", "string", "JSON Pointer", "RFC 6901 路径；空字符串表示完整输入。", "/data/items/0/title"),
+		automationVariable("variable", "string", "变量名", "提取结果写入的 $vars.* 变量名。", "remote_title"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("found", "boolean", "是否找到", "JSON Pointer 是否命中输入中的值。", true),
+		automationVariable("pointer", "string", "JSON Pointer", "本次实际使用的 RFC 6901 路径。", "/data/items/0/title"),
+		automationVariable("result", "any", "提取结果", "命中的 JSON 值或配置的默认值。", "Example S01E01"),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的 JSON 提取结果。", "Example S01E01")...)},
+	{Type: AutomationNodeMath, Label: "数学运算", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("left", "number", "左值", "固定数字或精确流程变量引用。", "$vars.file_size", true),
+		automationTemplateVariable("right", "number", "右值", "二元运算使用的固定数字或精确流程变量引用。", 1024, false),
+		automationVariable("variable", "string", "变量名", "数学结果写入的 $vars.* 变量名。", "total_size"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("operation", "string", "运算", "本次执行的数学操作。", "add"),
+		automationVariable("result", "number", "运算结果", "完成运算和显式精度处理后的有限数字。", 2048.5),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的数学结果。", 2048.5)...)},
+	{Type: AutomationNodeDatetimeOperation, Label: "日期时间运算", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "any", "日期时间", "日期文本、Unix 时间戳或精确流程变量引用。", "$item.published_at", true),
+		automationTemplateVariable("right", "any", "比较时间", "diff 操作使用的另一日期时间。", "$vars.baseline_at", false),
+		automationVariable("variable", "string", "变量名", "日期时间结果写入的 $vars.* 变量名。", "normalized_at"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("operation", "string", "操作", "本次执行的日期时间操作。", "format"),
+		automationVariable("result", "any", "结果", "格式化日期时间或日期时间差。", "2026-08-30T20:00:00+08:00"),
+		automationVariable("timezone", "string", "时区", "解析和格式化使用的 IANA 时区。", "Asia/Shanghai"),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的日期时间结果。", "2026-08-30T20:00:00+08:00")...)},
+	{Type: AutomationNodeListOperation, Label: "列表处理", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "any", "列表输入", "数组、JSON 数组文本或 split 使用的普通文本。", "$vars.items", true),
+		automationVariable("pointer", "string", "JSON Pointer", "unique、sort、pluck 可按 RFC 6901 子字段处理。", "/name"),
+		automationVariable("variable", "string", "变量名", "列表结果写入的 $vars.* 变量名。", "processed_items"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("operation", "string", "操作", "本次执行的列表操作。", "unique"),
+		automationVariable("result", "any", "结果", "列表、文本或列表长度结果。", []string{"a", "b"}),
+		automationVariable("input_count", "integer", "输入数量", "输入列表或分段的项目数。", 3),
+		automationVariable("output_count", "integer", "输出数量", "输出结果包含的项目数。", 2),
+		automationVariable("empty", "boolean", "是否为空", "结果是否为空并选择 empty 出口。", false),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的列表处理结果。", []string{"a", "b"})...)},
+	{Type: AutomationNodeSwitch, Label: "多路判断", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "any", "比较输入", "按顺序与 cases 比较的事件字段或流程变量。", "$vars.quality", true),
+		automationVariable("cases", "array", "分支条件", "1 到 20 个有稳定 ID 的有序条件。", []map[string]any{{"id": "uhd", "label": "4K", "operator": "eq", "value": "2160p"}}),
+	}, Outputs: []AutomationVariableProtocol{
+		automationVariable("matched", "boolean", "是否命中", "是否有 case 首次命中。", true),
+		automationVariable("case_id", "string", "分支 ID", "首个命中的 case ID。", "uhd"),
+		automationVariable("case_label", "string", "分支名称", "首个命中的 case 名称。", "4K"),
+		automationVariable("case_index", "integer", "分支序号", "首个命中 case 的零基序号。", 0),
+		automationVariable("value", "any", "比较值", "本次 Switch 实际比较的输入值。", "2160p"),
+		automationVariable("selected_port", "string", "流程出口", "case-<id>、default 或 failure。", "case-uhd"),
+	}},
+	{Type: AutomationNodeCoalesce, Label: "选择首个有效值", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("candidates", "array", "候选值", "按顺序解析，选择首个未被跳过的有效值。", []any{"$vars.custom_title", "$item.title"}, true),
+		automationVariable("variable", "string", "变量名", "选择结果写入的 $vars.* 变量名。", "effective_title"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("result", "any", "结果", "首个有效候选值或默认值。", "Example S01E01"),
+		automationVariable("selected_index", "integer", "候选序号", "命中候选的零基序号；默认值为 -1。", 1),
+		automationVariable("used_default", "boolean", "使用默认值", "是否在候选耗尽后使用 default_value。", false),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的首个有效值。", "Example S01E01")...)},
+	{Type: AutomationNodeDeduplicate, Label: "运行去重", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("key", "any", "去重键", "文本、数字、布尔值或精确变量引用；仅持久化 SHA-256 摘要。", "$item.guid", true),
+		automationVariable("scope", "string", "作用域", "source、workflow 或 global；global 必须配置命名空间。", "workflow"),
+		automationVariable("namespace", "string", "命名空间", "隔离不同业务用途的去重记录。", "media-entry"),
+	}, Outputs: []AutomationVariableProtocol{
+		automationVariable("duplicate", "boolean", "是否重复", "键是否已被仍在有效期内的成功运行处理。", false),
+		automationVariable("key_hash", "string", "键摘要", "去重键的 SHA-256 摘要，不返回原始键。", "sha256:..."),
+		automationVariable("state", "string", "记录状态", "首次命中先保留，流程成功后提交。", "reserved"),
+		automationVariable("expires_at", "datetime", "过期时间", "已提交记录的 TTL 到期时间。", "2026-09-06T12:00:00Z"),
+	}},
+	{Type: AutomationNodeRateLimit, Label: "频率限制", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("key", "any", "限流键", "文本、数字、布尔值或精确变量引用；仅持久化 SHA-256 摘要。", "$item.account_id", true),
+		automationVariable("scope", "string", "作用域", "source、workflow 或 global；global 必须配置命名空间。", "workflow"),
+		automationVariable("limit", "integer", "窗口额度", "固定 UTC 窗口内允许通过的次数。", 5),
+		automationVariable("window_seconds", "integer", "窗口秒数", "固定 UTC 窗口长度。", 60),
+	}, Outputs: []AutomationVariableProtocol{
+		automationVariable("allowed", "boolean", "是否允许", "本次运行是否成功消费额度。", true),
+		automationVariable("used", "integer", "已用额度", "当前窗口已消费次数。", 1),
+		automationVariable("remaining", "integer", "剩余额度", "当前窗口剩余可用次数。", 4),
+		automationVariable("window_end", "datetime", "窗口结束", "当前固定 UTC 窗口结束时间。", "2026-08-30T12:01:00Z"),
+		automationVariable("retry_at", "datetime", "重试时间", "受限时最早可重试时间。", "2026-08-30T12:01:00Z"),
+	}},
+	{Type: AutomationNodeForeach, Label: "遍历转换", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "array", "输入列表", "最多 1000 项的数组或 JSON 数组变量。", "$vars.items", true),
+		automationVariable("transform", "object", "转换器", "白名单纯节点及其 config；每项可引用 $each.*。", map[string]any{"type": "template", "config": map[string]any{"template": "{{each.index}}:{{each.item}}"}}),
+		automationVariable("variable", "string", "变量名", "有序转换结果写入的 $vars.* 变量名。", "mapped_items"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("results", "array", "结果列表", "与输入索引对齐的转换结果；collect 失败项为 null。", []any{"0:a", nil, "2:c"}),
+		automationVariable("count", "integer", "项目总数", "本次 Foreach 输入项目数。", 3),
+		automationVariable("succeeded_count", "integer", "成功数", "转换成功的项目数量。", 2),
+		automationVariable("failed_count", "integer", "失败数", "转换失败的项目数量。", 1),
+		automationVariable("errors", "array", "错误明细", "collect 模式保留项目索引和错误原因。", []map[string]any{{"index": 1, "reason": "字段不存在"}}),
+		automationVariable("selected_port", "string", "流程出口", "success、partial、empty 或 failure。", "partial"),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的有序 Foreach 结果。", []any{"0:a", nil, "2:c"})...)},
 	{Type: AutomationNodeIf, Label: "IF 判断", Inputs: []AutomationVariableProtocol{
 		automationTemplateVariable("condition.field", "any", "比较字段", "参与条件判断的 事件字段、变量或上游输出。", "$vars.episode", true),
 		automationTemplateVariable("condition.value", "any", "比较值", "固定值或另一个流程变量。", 10, false),
@@ -291,6 +398,18 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 	{Type: AutomationNodeEnd, Label: "结束", Inputs: []AutomationVariableProtocol{}, Outputs: []AutomationVariableProtocol{
 		automationVariable("completed", "boolean", "流程已结束", "结束节点已经执行。", true),
 	}},
+}
+
+func automationVariableWriterProtocolOutputs(valueLabel, valueDescription string, example any) []AutomationVariableProtocol {
+	return []AutomationVariableProtocol{
+		automationVariable("variable", "string", "变量名", "本节点尝试写入的 $vars.* 变量名。", "normalized_title"),
+		automationVariable("value", "any", valueLabel, valueDescription, example),
+		automationVariable("value_type", "string", "实际类型", "写入值最终持久化的 JSON 类型。", "string"),
+		automationVariable("existing", "boolean", "原值是否存在", "执行覆盖策略前是否已经存在同名流程变量。", false),
+		automationVariable("written", "boolean", "是否写入", "覆盖策略执行后是否实际写入变量。", true),
+		automationVariable("overwritten", "boolean", "是否覆盖", "本次写入是否覆盖了已有变量。", false),
+		automationVariable("variables", "object", "生成变量", "本节点实际写入 $vars.* 的变量对象。", map[string]any{"normalized_title": example}),
+	}
 }
 
 func automation115SubmitOutputs() []AutomationVariableProtocol {

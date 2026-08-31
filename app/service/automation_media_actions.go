@@ -587,18 +587,40 @@ func (s *AutomationService) automation115Gateway() automation115Gateway {
 }
 
 func automationPredecessorOutput(nodeID string, definition AutomationDefinition, runContext map[string]any) (string, map[string]any, error) {
-	predecessorID := ""
-	for _, edge := range definition.Edges {
-		if edge.Target != nodeID {
-			continue
-		}
-		if predecessorID != "" {
-			return "", nil, fmt.Errorf("节点 %s 有多个上游节点", nodeID)
-		}
-		predecessorID = edge.Source
+	nodesByID := make(map[string]AutomationNode, len(definition.Nodes))
+	for _, node := range definition.Nodes {
+		nodesByID[node.ID] = node
 	}
-	if predecessorID == "" {
+	incoming := make(map[string][]AutomationEdge, len(definition.Nodes))
+	for _, edge := range definition.Edges {
+		incoming[edge.Target] = append(incoming[edge.Target], edge)
+	}
+	if len(incoming[nodeID]) == 0 {
 		return "", nil, fmt.Errorf("节点 %s 没有上游节点", nodeID)
+	}
+	if len(incoming[nodeID]) > 1 {
+		return "", nil, fmt.Errorf("节点 %s 有多个上游节点", nodeID)
+	}
+	edge := incoming[nodeID][0]
+	predecessorID := edge.Source
+	port := strings.ToLower(strings.TrimSpace(edge.SourcePort))
+	visited := map[string]struct{}{}
+	for port == "success" {
+		predecessor, exists := nodesByID[predecessorID]
+		if !exists || predecessor.Type != AutomationNodeDelay {
+			break
+		}
+		if _, exists := visited[predecessorID]; exists {
+			break
+		}
+		visited[predecessorID] = struct{}{}
+		delayIncoming := incoming[predecessorID]
+		if len(delayIncoming) != 1 {
+			break
+		}
+		edge = delayIncoming[0]
+		predecessorID = edge.Source
+		port = strings.ToLower(strings.TrimSpace(edge.SourcePort))
 	}
 	nodes, _ := runContext["nodes"].(map[string]any)
 	nodeValue, _ := nodes[predecessorID].(map[string]any)

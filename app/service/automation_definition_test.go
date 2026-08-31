@@ -61,6 +61,33 @@ func TestValidateAutomationDefinitionAcceptsIfParallelAndJoin(t *testing.T) {
 	}
 }
 
+func TestValidateAutomationDefinitionAllowsDelayBetweenGuardedNodes(t *testing.T) {
+	definition := AutomationDefinition{
+		SchemaVersion: AutomationSchemaVersion,
+		Nodes: []AutomationNode{
+			{ID: "trigger", Type: AutomationNodeTrigger},
+			{ID: "qb", Type: AutomationNodeQBittorrent, Config: map[string]any{
+				"target_id": 1, "url": "$item.download_url",
+			}},
+			{ID: "delay", Type: AutomationNodeDelay, Config: map[string]any{"delay_seconds": 600}},
+			{ID: "wait", Type: AutomationNodeWaitQBittorrent, Config: map[string]any{
+				"poll_interval_seconds": 30, "max_wait_minutes": 60,
+			}},
+			{ID: "end", Type: AutomationNodeEnd},
+		},
+		Edges: []AutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "qb"},
+			{ID: "e2", Source: "qb", SourcePort: "success", Target: "delay"},
+			{ID: "e3", Source: "delay", SourcePort: "success", Target: "wait"},
+			{ID: "e4", Source: "wait", SourcePort: "success", Target: "end"},
+		},
+	}
+	result := ValidateAutomationDefinition(definition)
+	if !result.Valid {
+		t.Fatalf("definition with delay between guarded nodes invalid: %#v", result.Errors)
+	}
+}
+
 func TestValidateAutomationDefinitionRejectsMalformedCondition(t *testing.T) {
 	definition := DefaultAutomationDefinition()
 	definition.Nodes = append(definition.Nodes[:1], AutomationNode{
@@ -317,7 +344,7 @@ func TestValidateAutomationDefinitionRequiresMediaNodePredecessors(t *testing.T)
 		},
 	}
 	result := ValidateAutomationDefinition(definition)
-	if result.Valid || !containsAutomationValidationError(result.Errors, "必须直接连接在 115 离线节点之后") {
+	if result.Valid || !containsAutomationValidationError(result.Errors, "必须连接在 115 离线节点之后") {
 		t.Fatalf("unexpected validation result: %#v", result)
 	}
 }

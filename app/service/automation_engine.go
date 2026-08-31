@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -52,8 +53,8 @@ func (s *AutomationService) executionScheduleLoop() {
 }
 
 func (s *AutomationService) advanceAutomationRuns() {
-	var runs []model.AutomationRun
-	if err := s.db.Where("status IN ?", []string{model.AutomationRunPending, model.AutomationRunRunning}).Order("id ASC").Limit(100).Find(&runs).Error; err != nil {
+	runs, err := s.nextAutomationRunBatch()
+	if err != nil {
 		return
 	}
 	for _, run := range runs {
@@ -61,6 +62,31 @@ func (s *AutomationService) advanceAutomationRuns() {
 			s.log.Errorf("[AUTOMATION] 推进流程 run=%d 失败: %v", run.ID, err)
 		}
 	}
+}
+
+const automationRunAdvanceBatchSize = 100
+
+// nextAutomationRunBatch rotates through active runs instead of repeatedly
+// reading only the oldest batch. Long-lived wait and delay nodes therefore
+// cannot starve newer runs once the active queue grows past the batch limit.
+func (s *AutomationService) nextAutomationRunBatch() ([]model.AutomationRun, error) {
+	var runs []model.AutomationRun
+	query := s.db.Where("status IN ?", []string{model.AutomationRunPending, model.AutomationRunRunning})
+	if s.executionCursorID > 0 {
+		query = query.Where("id > ?", s.executionCursorID)
+	}
+	if err := query.Order("id ASC").Limit(automationRunAdvanceBatchSize).Find(&runs).Error; err != nil {
+		return nil, err
+	}
+	if len(runs) == 0 {
+		s.executionCursorID = 0
+		return runs, nil
+	}
+	s.executionCursorID = runs[len(runs)-1].ID
+	if len(runs) < automationRunAdvanceBatchSize {
+		s.executionCursorID = 0
+	}
+	return runs, nil
 }
 
 func (s *AutomationService) advanceAutomationRun(run model.AutomationRun) error {
@@ -252,7 +278,7 @@ func (s *AutomationService) executeAutomationNodeRun(runID, nodeRunID uint, defi
 		s.completeAutomationNode(nodeRun, nil, errors.New("流程定义中找不到节点"))
 		return
 	}
-	runContext, err := s.buildAutomationRunContext(run)
+	runContext, err := s.buildAutomationRunContext(run, nodeRun.NodeID)
 	if err != nil {
 		s.completeAutomationNode(nodeRun, nil, err)
 		return
@@ -277,6 +303,8 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 			}
 		}
 		return output, nil
+	case AutomationNodeDelay:
+		return executeAutomationDelay(nodeRun, node, time.Now())
 	case AutomationNodeRegex:
 		return executeAutomationRegexNode(node, runContext)
 	case AutomationNodeKeyword:
@@ -287,6 +315,28 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 		return executeAutomationRegexReplaceNode(node, runContext)
 	case AutomationNodeConvert:
 		return executeAutomationConvertNode(node, runContext)
+	case AutomationNodeSetVariable:
+		return executeAutomationSetVariableNode(node, runContext)
+	case AutomationNodeTemplate:
+		return executeAutomationTemplateNode(node, runContext)
+	case AutomationNodeJSONExtract:
+		return executeAutomationJSONExtractNode(node, runContext)
+	case AutomationNodeMath:
+		return executeAutomationMathNode(node, runContext)
+	case AutomationNodeDatetimeOperation:
+		return executeAutomationDatetimeOperationNode(node, runContext)
+	case AutomationNodeListOperation:
+		return executeAutomationListOperationNode(node, runContext)
+	case AutomationNodeSwitch:
+		return executeAutomationSwitchNode(node, runContext)
+	case AutomationNodeCoalesce:
+		return executeAutomationCoalesceNode(node, runContext)
+	case AutomationNodeDeduplicate:
+		return s.executeAutomationDeduplicateNode(run, nodeRun, node, runContext)
+	case AutomationNodeRateLimit:
+		return s.executeAutomationRateLimitNode(run, nodeRun, node, runContext)
+	case AutomationNodeForeach:
+		return executeAutomationForeachNode(node, runContext)
 	case AutomationNodeIf:
 		matched, err := evaluateAutomationCondition(node.Config["condition"], runContext)
 		if err != nil {
@@ -390,11 +440,9 @@ func executeAutomationRegexNode(node AutomationNode, runContext map[string]any) 
 	if err != nil {
 		return map[string]any{"selected_port": "failure", "matched": true, "reason": err.Error()}, nil
 	}
-	variable := automationConfigString(node.Config, "variable")
-	return map[string]any{
-		"selected_port": "success", "matched": true, "captured": matches[groupIndex],
-		"variables": map[string]any{variable: value},
-	}, nil
+	return automationVariableWrite(map[string]any{
+		"matched": true, "captured": matches[groupIndex],
+	}, runContext, node.Config, value), nil
 }
 
 func executeAutomationKeywordNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {
@@ -471,14 +519,11 @@ func executeAutomationKeywordReplaceNode(node AutomationNode, runContext map[str
 		replacementCount += len(pattern.FindAllStringIndex(result, -1))
 		result = pattern.ReplaceAllStringFunc(result, func(string) string { return rule.Replacement })
 	}
-	variable := automationConfigString(node.Config, "variable")
-	return map[string]any{
-		"selected_port":     "success",
+	return automationVariableWrite(map[string]any{
 		"input":             input,
 		"result":            result,
 		"replacement_count": replacementCount,
-		"variables":         map[string]any{variable: result},
-	}, nil
+	}, runContext, node.Config, result), nil
 }
 
 func executeAutomationRegexReplaceNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {
@@ -493,14 +538,11 @@ func executeAutomationRegexReplaceNode(node AutomationNode, runContext map[strin
 	replacement := automationConfigRawString(node.Config, "replacement")
 	replacementCount := len(pattern.FindAllStringIndex(input, -1))
 	result := pattern.ReplaceAllString(input, replacement)
-	variable := automationConfigString(node.Config, "variable")
-	return map[string]any{
-		"selected_port":     "success",
+	return automationVariableWrite(map[string]any{
 		"input":             input,
 		"result":            result,
 		"replacement_count": replacementCount,
-		"variables":         map[string]any{variable: result},
-	}, nil
+	}, runContext, node.Config, result), nil
 }
 
 func executeAutomationConvertNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {
@@ -512,10 +554,7 @@ func executeAutomationConvertNode(node AutomationNode, runContext map[string]any
 	if err != nil {
 		return map[string]any{"selected_port": "failure", "reason": err.Error()}, nil
 	}
-	return map[string]any{
-		"selected_port": "success",
-		"variables":     map[string]any{automationConfigString(node.Config, "variable"): converted},
-	}, nil
+	return automationVariableWrite(nil, runContext, node.Config, converted), nil
 }
 
 func (s *AutomationService) executeAutomationJoinNode(runID uint, node AutomationNode, definition AutomationDefinition) (map[string]any, error) {
@@ -657,7 +696,7 @@ func (s *AutomationService) deferAutomationNode(nodeRun model.AutomationNodeRun,
 	})
 }
 
-func (s *AutomationService) buildAutomationRunContext(run model.AutomationRun) (map[string]any, error) {
+func (s *AutomationService) buildAutomationRunContext(run model.AutomationRun, currentNodeID string) (map[string]any, error) {
 	contextValue := map[string]any{}
 	decoder := json.NewDecoder(strings.NewReader(run.ContextJSON))
 	decoder.UseNumber()
@@ -671,23 +710,44 @@ func (s *AutomationService) buildAutomationRunContext(run model.AutomationRun) (
 	}
 	nodeValues := map[string]any{}
 	contextValue["nodes"] = nodeValues
-	var nodeRuns []model.AutomationNodeRun
-	if err := s.db.Where("run_id = ?", run.ID).Order("id ASC").Find(&nodeRuns).Error; err != nil {
+	definition, err := ParseAutomationDefinition(run.DefinitionJSON)
+	if err != nil {
 		return nil, err
 	}
+	orderedAncestors, err := automationAncestorTopologicalOrder(definition, currentNodeID)
+	if err != nil {
+		return nil, err
+	}
+	if len(orderedAncestors) == 0 {
+		return contextValue, nil
+	}
+	var nodeRuns []model.AutomationNodeRun
+	if err := s.db.Where("run_id = ? AND node_id IN ?", run.ID, orderedAncestors).Find(&nodeRuns).Error; err != nil {
+		return nil, err
+	}
+	runsByNodeID := make(map[string]model.AutomationNodeRun, len(nodeRuns))
 	for _, nodeRun := range nodeRuns {
+		runsByNodeID[nodeRun.NodeID] = nodeRun
+	}
+	for _, nodeID := range orderedAncestors {
+		nodeRun, exists := runsByNodeID[nodeID]
+		if !exists {
+			continue
+		}
 		output := map[string]any{}
 		if nodeRun.OutputJSON != "" {
 			outputDecoder := json.NewDecoder(strings.NewReader(nodeRun.OutputJSON))
 			outputDecoder.UseNumber()
 			_ = outputDecoder.Decode(&output)
 		}
-		if produced, ok := output["variables"].(map[string]any); ok {
-			for key, value := range produced {
-				variables[key] = value
+		if nodeRun.Status == model.AutomationNodeSucceeded {
+			if produced, ok := output["variables"].(map[string]any); ok {
+				for key, value := range produced {
+					variables[key] = value
+				}
 			}
 		}
-		nodeValues[nodeRun.NodeID] = map[string]any{
+		nodeValues[nodeID] = map[string]any{
 			"status": nodeRun.Status, "attempt": nodeRun.Attempt, "output": output,
 		}
 	}
@@ -938,20 +998,32 @@ func (s *AutomationService) finalizeAutomationRun(runID uint) error {
 		status = model.AutomationRunPartial
 	}
 	now := time.Now()
-	return s.db.Model(&model.AutomationRun{}).
-		Where("id = ? AND status IN ?", runID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
-		Updates(map[string]any{
-			"status": status, "error_message": strings.Join(failed, "; "), "completed_at": now,
-		}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		updated := tx.Model(&model.AutomationRun{}).
+			Where("id = ? AND status IN ?", runID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
+			Updates(map[string]any{
+				"status": status, "error_message": strings.Join(failed, "; "), "completed_at": now,
+			})
+		if updated.Error != nil || updated.RowsAffected == 0 {
+			return updated.Error
+		}
+		return finalizeAutomationGuardRunWithDB(tx, runID, status, now)
+	})
 }
 
 func (s *AutomationService) failAutomationRun(runID uint, runErr error) error {
 	now := time.Now()
-	return s.db.Model(&model.AutomationRun{}).
-		Where("id = ? AND status IN ?", runID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
-		Updates(map[string]any{
-			"status": model.AutomationRunFailed, "error_message": runErr.Error(), "completed_at": now,
-		}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		updated := tx.Model(&model.AutomationRun{}).
+			Where("id = ? AND status IN ?", runID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
+			Updates(map[string]any{
+				"status": model.AutomationRunFailed, "error_message": runErr.Error(), "completed_at": now,
+			})
+		if updated.Error != nil || updated.RowsAffected == 0 {
+			return updated.Error
+		}
+		return finalizeAutomationGuardRunWithDB(tx, runID, model.AutomationRunFailed, now)
+	})
 }
 
 func (s *AutomationService) ListRuns(workflowID uint, status string, limit, offset int) ([]model.AutomationRun, int64, error) {
@@ -1017,16 +1089,30 @@ func (s *AutomationService) RetryRun(runID uint) error {
 	for nodeID := range resetNodes {
 		nodeIDs = append(nodeIDs, nodeID)
 	}
+	sort.Strings(nodeIDs)
+	now := time.Now()
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		updatedRun := tx.Model(&model.AutomationRun{}).
+			Where("id = ? AND status IN ?", runID, []string{model.AutomationRunFailed, model.AutomationRunPartial, model.AutomationRunCancelled}).
+			Updates(map[string]any{
+				"status": model.AutomationRunPending, "error_message": "", "completed_at": nil,
+			})
+		if updatedRun.Error != nil {
+			return updatedRun.Error
+		}
+		if updatedRun.RowsAffected != 1 {
+			return errors.New("当前流程状态已变化，请刷新后重试")
+		}
+		if err := restoreAutomationDedupReservationsForRetryWithDB(tx, run, definition, nodeRuns, resetNodes, now); err != nil {
+			return err
+		}
 		if err := tx.Model(&model.AutomationNodeRun{}).Where("run_id = ? AND node_id IN ?", runID, nodeIDs).Updates(map[string]any{
 			"status": model.AutomationNodePending, "attempt": 0, "next_attempt_at": nil,
 			"input_json": "", "output_json": "", "error_message": "", "started_at": nil, "completed_at": nil,
 		}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&run).Updates(map[string]any{
-			"status": model.AutomationRunPending, "error_message": "", "completed_at": nil,
-		}).Error
+		return nil
 	})
 }
 
@@ -1077,7 +1163,16 @@ func (s *AutomationService) CancelRun(runID uint) error {
 		}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&run).Updates(map[string]any{"status": model.AutomationRunCancelled, "completed_at": now}).Error
+		updated := tx.Model(&model.AutomationRun{}).
+			Where("id = ? AND status IN ?", runID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
+			Updates(map[string]any{"status": model.AutomationRunCancelled, "completed_at": now})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return errors.New("当前流程不能取消")
+		}
+		return finalizeAutomationGuardRunWithDB(tx, runID, model.AutomationRunCancelled, now)
 	})
 }
 

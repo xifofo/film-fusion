@@ -134,11 +134,12 @@ type AutomationService struct {
 	workerWG      sync.WaitGroup
 	scanWorkerWG  sync.WaitGroup
 
-	started     atomic.Bool
-	workers     chan struct{}
-	scanWorkers chan struct{}
-	scanMu      sync.Mutex
-	scanning    map[uint]struct{}
+	started           atomic.Bool
+	workers           chan struct{}
+	scanWorkers       chan struct{}
+	executionCursorID uint
+	scanMu            sync.Mutex
+	scanning          map[uint]struct{}
 }
 
 func NewAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService) *AutomationService {
@@ -512,6 +513,15 @@ func (s *AutomationService) DeleteAutomation(id uint) error {
 			return err
 		}
 		runIDs := tx.Model(&model.AutomationRun{}).Select("id").Where("workflow_id = ?", workflow.ID)
+		if err := deleteAutomationGuardStateForRuns(tx, runIDs); err != nil {
+			return err
+		}
+		if err := deleteAutomationGuardsForWorkflow(tx, workflow.ID); err != nil {
+			return err
+		}
+		if err := deleteAutomationGuardsForSource(tx, source.ID); err != nil {
+			return err
+		}
 		if err := tx.Where("run_id IN (?)", runIDs).Delete(&model.AutomationNodeRun{}).Error; err != nil {
 			return err
 		}

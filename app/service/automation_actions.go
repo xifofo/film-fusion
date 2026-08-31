@@ -462,12 +462,23 @@ func resolveAutomationReference(runContext map[string]any, reference string) (an
 	var current any = runContext
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
-		mapping, ok := current.(map[string]any)
-		if !ok {
-			return nil, false
-		}
-		current, ok = mapping[part]
-		if !ok {
+		switch typed := current.(type) {
+		case map[string]any:
+			value, ok := typed[part]
+			if !ok {
+				return nil, false
+			}
+			current = value
+		case []any:
+			if part == "" || (len(part) > 1 && part[0] == '0') {
+				return nil, false
+			}
+			index, err := strconv.Atoi(part)
+			if err != nil || index < 0 || index >= len(typed) {
+				return nil, false
+			}
+			current = typed[index]
+		default:
 			return nil, false
 		}
 	}

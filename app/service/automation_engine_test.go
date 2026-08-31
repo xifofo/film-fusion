@@ -99,6 +99,97 @@ func TestAutomationEngineRegexCaptureNumericIfAndBranch(t *testing.T) {
 	}
 }
 
+func TestAutomationEngineDeduplicateCommitsAndRoutesLaterRuns(t *testing.T) {
+	db := newAutomationTestDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	service := &AutomationService{
+		db: db, ctx: ctx, cancel: cancel,
+		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
+		workers: make(chan struct{}, 2),
+	}
+
+	definition := AutomationDefinition{
+		SchemaVersion: AutomationSchemaVersion,
+		Nodes: []AutomationNode{
+			{ID: "trigger", Type: AutomationNodeTrigger, Name: "收到条目"},
+			{ID: "dedupe", Type: AutomationNodeDeduplicate, Name: "条目去重", Config: map[string]any{
+				"key": "$item.guid", "scope": "workflow", "ttl_seconds": 60,
+			}},
+			{ID: "end_new", Type: AutomationNodeEnd, Name: "首次处理"},
+			{ID: "end_duplicate", Type: AutomationNodeEnd, Name: "忽略重复"},
+			{ID: "end_failure", Type: AutomationNodeEnd, Name: "去重异常"},
+		},
+		Edges: []AutomationEdge{
+			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "dedupe"},
+			{ID: "e2", Source: "dedupe", SourcePort: "new", Target: "end_new"},
+			{ID: "e3", Source: "dedupe", SourcePort: "duplicate", Target: "end_duplicate"},
+			{ID: "e4", Source: "dedupe", SourcePort: "failure", Target: "end_failure"},
+		},
+	}
+	if validation := ValidateAutomationDefinition(definition); !validation.Valid {
+		t.Fatalf("test definition invalid: %#v", validation.Errors)
+	}
+	definitionJSON, _ := MarshalAutomationDefinition(definition)
+	source := model.AutomationSource{
+		Name: "RSS", Enabled: true, TriggerType: model.AutomationTriggerRSS,
+		FeedURL: "https://example.com/feed.xml", IntervalMinutes: 5,
+	}
+	if err := db.Create(&source).Error; err != nil {
+		t.Fatal(err)
+	}
+	workflow := model.AutomationWorkflow{SourceID: source.ID, Name: "去重流程", Enabled: true, Version: 1, DefinitionJSON: definitionJSON}
+	if err := db.Create(&workflow).Error; err != nil {
+		t.Fatal(err)
+	}
+	createEntry := func(fingerprint string) model.AutomationEntry {
+		fieldsJSON, _ := json.Marshal(map[string]any{"guid": "same-guid", "title": fingerprint})
+		entry := model.AutomationEntry{
+			SourceID: source.ID, Fingerprint: fingerprint, EventKey: "rss:" + fingerprint,
+			ItemID: fingerprint, Title: fingerprint, FieldsJSON: string(fieldsJSON), DiscoveredAt: time.Now(),
+		}
+		if err := db.Create(&entry).Error; err != nil {
+			t.Fatal(err)
+		}
+		return entry
+	}
+
+	firstEntry := createEntry("first")
+	if created, err := service.createAutomationRuns(firstEntry); err != nil || created != 1 {
+		t.Fatalf("first createAutomationRuns() = %d, %v", created, err)
+	}
+	service.Start()
+	t.Cleanup(service.Stop)
+	firstRun := waitForAutomationRun(t, db, model.AutomationRunSucceeded)
+
+	var record model.AutomationDedupRecord
+	if err := db.First(&record).Error; err != nil {
+		t.Fatal(err)
+	}
+	if record.State != model.AutomationDedupCommitted || record.ExpiresAt == nil {
+		t.Fatalf("dedup record was not committed with run: %#v", record)
+	}
+
+	secondEntry := createEntry("second")
+	if created, err := service.createAutomationRuns(secondEntry); err != nil || created != 1 {
+		t.Fatalf("second createAutomationRuns() = %d, %v", created, err)
+	}
+	secondRun := waitForAutomationRun(t, db, model.AutomationRunSucceeded)
+	if secondRun.ID == firstRun.ID {
+		t.Fatalf("second run did not complete: %#v", secondRun)
+	}
+	var nodeRuns []model.AutomationNodeRun
+	if err := db.Where("run_id = ?", secondRun.ID).Find(&nodeRuns).Error; err != nil {
+		t.Fatal(err)
+	}
+	byNode := make(map[string]model.AutomationNodeRun, len(nodeRuns))
+	for _, nodeRun := range nodeRuns {
+		byNode[nodeRun.NodeID] = nodeRun
+	}
+	if byNode["end_duplicate"].Status != model.AutomationNodeSucceeded || byNode["end_new"].Status != model.AutomationNodeSkipped {
+		t.Fatalf("duplicate run routing = %#v", byNode)
+	}
+}
+
 func TestAutomationSharedEndReadinessUsesActiveConditionalBranch(t *testing.T) {
 	predecessor := &model.AutomationNodeRun{
 		NodeID:     "if_episode",
@@ -244,6 +335,7 @@ func newAutomationTestDB(t *testing.T) *gorm.DB {
 		&model.SystemConfig{},
 		&model.AutomationSource{}, &model.AutomationWorkflow{}, &model.AutomationTarget{},
 		&model.AutomationEntry{}, &model.AutomationRun{}, &model.AutomationNodeRun{},
+		&model.AutomationDedupRecord{}, &model.AutomationRateLimitBucket{}, &model.AutomationRateLimitClaim{},
 		&model.Automation115DirectoryCursor{}, &model.Automation115SeenItem{}, &model.Automation115Candidate{},
 		&model.CloudStorage{},
 	); err != nil {

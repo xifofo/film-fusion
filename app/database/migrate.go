@@ -74,6 +74,9 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+	if err := migrateAutomationGuardTables(); err != nil {
+		return fmt.Errorf("迁移自动化控制节点状态失败: %v", err)
+	}
 
 	if err := migrateMatch302CacheQuotaToGB(); err != nil {
 		return fmt.Errorf("迁移Match302缓存空间单位失败: %v", err)

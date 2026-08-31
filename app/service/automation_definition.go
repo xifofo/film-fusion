@@ -13,11 +13,23 @@ const AutomationSchemaVersion = 1
 
 const (
 	AutomationNodeTrigger             = "trigger"
+	AutomationNodeDelay               = "delay"
 	AutomationNodeRegex               = "regex"
 	AutomationNodeKeyword             = "keyword"
 	AutomationNodeKeywordReplace      = "keyword_replace"
 	AutomationNodeRegexReplace        = "regex_replace"
 	AutomationNodeConvert             = "convert"
+	AutomationNodeSetVariable         = "set_variable"
+	AutomationNodeTemplate            = "template"
+	AutomationNodeJSONExtract         = "json_extract"
+	AutomationNodeMath                = "math"
+	AutomationNodeDatetimeOperation   = "datetime_operation"
+	AutomationNodeListOperation       = "list_operation"
+	AutomationNodeSwitch              = "switch"
+	AutomationNodeCoalesce            = "coalesce"
+	AutomationNodeDeduplicate         = "deduplicate"
+	AutomationNodeRateLimit           = "rate_limit"
+	AutomationNodeForeach             = "foreach"
 	AutomationNodeIf                  = "if"
 	AutomationNodeParallel            = "parallel"
 	AutomationNodeJoin                = "join"
@@ -197,7 +209,7 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 		}
 	}
 	if len(triggerIDs) != 1 {
-		result.Errors = append(result.Errors, "流程必须且只能有一个 115 目录触发器")
+		result.Errors = append(result.Errors, "流程必须且只能有一个触发器")
 	}
 	if len(endIDs) == 0 {
 		result.Errors = append(result.Errors, "流程至少需要一个结束节点")
@@ -319,19 +331,18 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 			}
 		}
 		if inCount == 1 {
-			predecessor := nodes[incoming[id][0].Source]
-			sourcePort := strings.ToLower(strings.TrimSpace(incoming[id][0].SourcePort))
+			predecessor, sourcePort := effectiveAutomationPredecessor(id, incoming, nodes)
 			switch node.Type {
 			case AutomationNodeWaitQBittorrent:
 				if predecessor.Type != AutomationNodeQBittorrent {
-					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须直接连接在 qBittorrent 下载节点之后", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须连接在 qBittorrent 下载节点之后，中间仅可插入延迟节点", id))
 				}
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("等待 qBittorrent 节点 %s 必须连接 qBittorrent 节点的成功出口", id))
 				}
 			case AutomationNodeMoviePilotTransfer:
 				if predecessor.Type != AutomationNodeWaitQBittorrent {
-					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须直接连接在等待 qBittorrent 完成节点之后", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须连接在等待 qBittorrent 完成节点之后，中间仅可插入延迟节点", id))
 				}
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须连接等待 qBittorrent 节点的成功出口", id))
@@ -348,7 +359,7 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 				}
 			case AutomationNodeWait115:
 				if predecessor.Type != AutomationNodeOffline115 && predecessor.Type != AutomationNodeOffline115OpenAPI {
-					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须直接连接在 115 离线节点之后", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接在 115 离线节点之后，中间仅可插入延迟节点", id))
 				}
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接 115 离线节点的成功出口", id))
@@ -406,6 +417,18 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 				result.Errors = append(result.Errors, fmt.Sprintf("IF 节点 %s 缺少 false 分支", id))
 			}
 		}
+		if node.Type == AutomationNodeSwitch {
+			casePorts := automationSwitchCasePortSet(node.Config)
+			for _, edge := range outgoing[id] {
+				port := strings.ToLower(strings.TrimSpace(edge.SourcePort))
+				if !strings.HasPrefix(port, "case-") {
+					continue
+				}
+				if _, exists := casePorts[port]; !exists {
+					result.Errors = append(result.Errors, fmt.Sprintf("Switch 节点 %s 的出口 %q 没有对应 case", id, edge.SourcePort))
+				}
+			}
+		}
 		if node.Type == AutomationNodeKeyword {
 			ports := edgePortSet(outgoing[id])
 			if _, ok := ports["matched"]; !ok {
@@ -416,6 +439,7 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 			}
 		}
 	}
+	result.Errors = append(result.Errors, validateAutomationVariableProducerConflicts(nodes, outgoing)...)
 
 	if len(triggerIDs) == 1 {
 		if hasAutomationCycle(nodes, outgoing) {
@@ -449,7 +473,10 @@ func isAutomationNodeType(nodeType string) bool {
 
 func isAutomationNonRetryableNode(nodeType string) bool {
 	switch nodeType {
-	case AutomationNodeDeleteQBittorrent, AutomationNodeMoviePilotTransfer,
+	case AutomationNodeDelay, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
+		AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
+		AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
+		AutomationNodeDeleteQBittorrent, AutomationNodeMoviePilotTransfer,
 		AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeHTTPRequest:
 		return true
 	default:
@@ -462,7 +489,10 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 	if port == "always" {
 		switch nodeType {
 		case AutomationNodeRegex, AutomationNodeKeyword, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
-			AutomationNodeConvert, AutomationNodeJoin,
+			AutomationNodeConvert, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
+			AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
+			AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
+			AutomationNodeDelay, AutomationNodeJoin,
 			AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
 			AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
@@ -476,6 +506,16 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 		}
 	}
 	switch nodeType {
+	case AutomationNodeSwitch:
+		return port == "default" || port == "failure" || (strings.HasPrefix(port, "case-") && automationSwitchCaseIDPattern.MatchString(strings.TrimPrefix(port, "case-")))
+	case AutomationNodeListOperation:
+		return port == "success" || port == "empty" || port == "failure"
+	case AutomationNodeForeach:
+		return port == "success" || port == "partial" || port == "empty" || port == "failure"
+	case AutomationNodeDeduplicate:
+		return port == "new" || port == "duplicate" || port == "failure"
+	case AutomationNodeRateLimit:
+		return port == "allowed" || port == "throttled" || port == "failure"
 	case AutomationNodeIf:
 		return port == "true" || port == "false" || port == "failure"
 	case AutomationNodeKeyword:
@@ -489,7 +529,9 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 	case AutomationNodeParallel:
 		return strings.HasPrefix(port, "branch-") && len(port) > len("branch-")
 	case AutomationNodeRegex, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
-		AutomationNodeConvert, AutomationNodeJoin,
+		AutomationNodeConvert, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
+		AutomationNodeDatetimeOperation, AutomationNodeCoalesce,
+		AutomationNodeDelay, AutomationNodeJoin,
 		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeHDHiveUnlock,
@@ -509,6 +551,9 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		config = map[string]any{}
 	}
 	switch node.Type {
+	case AutomationNodeDelay:
+		_, err := automationDelayDuration(config)
+		return err
 	case AutomationNodeRegex:
 		pattern := automationConfigString(config, "pattern")
 		if pattern == "" {
@@ -519,6 +564,12 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		}
 		if automationConfigString(config, "input") == "" || automationConfigString(config, "variable") == "" {
 			return errors.New("必须配置输入字段和输出变量")
+		}
+		if valueType := automationConfigString(config, "value_type"); valueType != "" && !isAutomationScalarValueType(valueType) {
+			return errors.New("正则输出类型必须是 string/integer/number/boolean/datetime")
+		}
+		if err := validateAutomationVariableWriterConfig(config); err != nil {
+			return err
 		}
 	case AutomationNodeKeyword:
 		if automationConfigString(config, "input") == "" {
@@ -573,6 +624,9 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 				return errors.New("区分大小写配置必须是布尔值")
 			}
 		}
+		if err := validateAutomationVariableWriterConfig(config); err != nil {
+			return err
+		}
 	case AutomationNodeRegexReplace:
 		pattern := automationConfigString(config, "pattern")
 		if pattern == "" {
@@ -584,6 +638,9 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		if automationConfigString(config, "input") == "" || automationConfigString(config, "variable") == "" {
 			return errors.New("必须配置输入字段和输出变量")
 		}
+		if err := validateAutomationVariableWriterConfig(config); err != nil {
+			return err
+		}
 	case AutomationNodeConvert:
 		if automationConfigString(config, "input") == "" || automationConfigString(config, "variable") == "" {
 			return errors.New("必须配置输入字段和输出变量")
@@ -593,6 +650,31 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		default:
 			return errors.New("转换类型必须是 string/integer/number/boolean/datetime")
 		}
+		if err := validateAutomationVariableWriterConfig(config); err != nil {
+			return err
+		}
+	case AutomationNodeSetVariable:
+		return validateAutomationSetVariableConfig(config)
+	case AutomationNodeTemplate:
+		return validateAutomationTemplateConfig(config)
+	case AutomationNodeJSONExtract:
+		return validateAutomationJSONExtractConfig(config)
+	case AutomationNodeMath:
+		return validateAutomationMathConfig(config)
+	case AutomationNodeDatetimeOperation:
+		return validateAutomationDatetimeOperationConfig(config)
+	case AutomationNodeListOperation:
+		return validateAutomationListOperationConfig(config)
+	case AutomationNodeSwitch:
+		return validateAutomationSwitchConfig(config)
+	case AutomationNodeCoalesce:
+		return validateAutomationCoalesceConfig(config)
+	case AutomationNodeForeach:
+		return validateAutomationForeachConfig(config)
+	case AutomationNodeDeduplicate:
+		return validateAutomationDeduplicateConfig(config)
+	case AutomationNodeRateLimit:
+		return validateAutomationRateLimitConfig(config)
 	case AutomationNodeIf:
 		condition, ok := config["condition"]
 		if !ok {
@@ -840,6 +922,31 @@ func edgePortSet(edges []AutomationEdge) map[string]struct{} {
 		result[strings.ToLower(strings.TrimSpace(edge.SourcePort))] = struct{}{}
 	}
 	return result
+}
+
+// effectiveAutomationPredecessor treats one or more successful delay nodes as
+// transparent for adjacency rules. This keeps safeguards such as
+// qBittorrent -> wait and 115 download -> wait intact while allowing a delay
+// to be inserted between the guarded nodes.
+func effectiveAutomationPredecessor(nodeID string, incoming map[string][]AutomationEdge, nodes map[string]AutomationNode) (AutomationNode, string) {
+	edge := incoming[nodeID][0]
+	predecessor := nodes[edge.Source]
+	port := strings.ToLower(strings.TrimSpace(edge.SourcePort))
+	visited := map[string]struct{}{}
+	for predecessor.Type == AutomationNodeDelay && port == "success" {
+		if _, exists := visited[predecessor.ID]; exists {
+			break
+		}
+		visited[predecessor.ID] = struct{}{}
+		delayIncoming := incoming[predecessor.ID]
+		if len(delayIncoming) != 1 {
+			break
+		}
+		edge = delayIncoming[0]
+		predecessor = nodes[edge.Source]
+		port = strings.ToLower(strings.TrimSpace(edge.SourcePort))
+	}
+	return predecessor, port
 }
 
 func hasAutomationCycle(nodes map[string]AutomationNode, outgoing map[string][]AutomationEdge) bool {
