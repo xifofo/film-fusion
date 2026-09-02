@@ -44,6 +44,7 @@ type MediaRecognitionMetaInfo struct {
 	VideoEncode    string   `json:"video_encode,omitempty"`
 	VideoBit       string   `json:"video_bit,omitempty"`
 	AudioEncode    string   `json:"audio_encode,omitempty"`
+	WebSource      string   `json:"web_source,omitempty"`
 	ResourceEffect []string `json:"resource_effect,omitempty"`
 	ResourceTeam   string   `json:"resource_team,omitempty"`
 	AppliedWords   []string `json:"applied_words"`
@@ -597,6 +598,26 @@ var (
 	localSpaceRE          = regexp.MustCompile(`\s+`)
 )
 
+var localWebSourcePatterns = []struct {
+	pattern *regexp.Regexp
+	name    string
+}{
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:netflix|nf)(?:$|[ ._\-\]\)])`), "Netflix"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:amazon|amzn)(?:$|[ ._\-\]\)])`), "Amazon"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:disney\+?|dsnp)(?:$|[ ._\-\]\)])`), "Disney+"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:apple[ ._-]?tv\+?|atvp|itunes)(?:$|[ ._\-\]\)])`), "Apple TV+"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:hbo[ ._-]?max|hmax|max)(?:$|[ ._\-\]\)])`), "Max"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])hulu(?:$|[ ._\-\]\)])`), "Hulu"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:paramount\+?|pmtp)(?:$|[ ._\-\]\)])`), "Paramount+"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:peacock|pcok)(?:$|[ ._\-\]\)])`), "Peacock"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:bilibili|b-global)(?:$|[ ._\-\]\)])`), "Bilibili"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:iqiyi|iq)(?:$|[ ._\-\]\)])`), "iQIYI"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])youku(?:$|[ ._\-\]\)])`), "Youku"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])(?:wetv|tencent)(?:$|[ ._\-\]\)])`), "Tencent Video"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])viu(?:$|[ ._\-\]\)])`), "Viu"},
+	{regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])mubi(?:$|[ ._\-\]\)])`), "MUBI"},
+}
+
 func parseLocalMediaMeta(original string, words MediaRecognitionWordResult, mode string) (MediaRecognitionMetaInfo, error) {
 	processed := strings.TrimSpace(words.Processed)
 	normalizedPath := strings.ReplaceAll(processed, "\\", "/")
@@ -636,6 +657,7 @@ func parseLocalMediaMeta(original string, words MediaRecognitionWordResult, mode
 		meta.VideoBit = strings.ToLower(bit) + "bit"
 	}
 	meta.AudioEncode = normalizeLocalAudioCodec(firstLocalMatch(localAudioCodecRE, cleanSource))
+	meta.WebSource = localWebSource(cleanSource)
 	meta.ResourceEffect = collectLocalEffects(cleanSource)
 	if team := localReleaseTeamRE.FindStringSubmatch(cleanSource); len(team) > 1 {
 		meta.ResourceTeam = team[1]
@@ -669,6 +691,15 @@ func parseLocalMediaMeta(original string, words MediaRecognitionWordResult, mode
 	}
 	meta.SeasonEpisode = formatLocalSeasonEpisode(meta)
 	return meta, nil
+}
+
+func localWebSource(value string) string {
+	for _, source := range localWebSourcePatterns {
+		if source.pattern.MatchString(value) {
+			return source.name
+		}
+	}
+	return ""
 }
 
 func parseLocalMediaMarkers(input string) (tmdbID, mediaType string, season, episode *int) {
@@ -1092,7 +1123,7 @@ func buildLocalMediaRecognitionRaw(result MediaRecognitionResult) map[string]any
 		"year": meta.Year, "type": meta.MediaType, "tmdbid": meta.TMDBID,
 		"season_episode": meta.SeasonEpisode, "resource_type": meta.ResourceType,
 		"resource_pix": meta.ResourcePix, "video_encode": meta.VideoEncode,
-		"video_bit": meta.VideoBit, "audio_encode": meta.AudioEncode,
+		"video_bit": meta.VideoBit, "audio_encode": meta.AudioEncode, "web_source": meta.WebSource,
 		"resource_effect": meta.ResourceEffect, "resource_team": meta.ResourceTeam,
 		"apply_words": meta.AppliedWords,
 	}

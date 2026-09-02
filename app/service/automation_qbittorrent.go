@@ -15,17 +15,62 @@ import (
 )
 
 type automationQBTorrent struct {
-	Hash        string  `json:"hash"`
-	Name        string  `json:"name"`
-	Progress    float64 `json:"progress"`
-	State       string  `json:"state"`
-	SavePath    string  `json:"save_path"`
-	ContentPath string  `json:"content_path"`
-	Size        int64   `json:"size"`
-	Downloaded  int64   `json:"downloaded"`
-	AmountLeft  int64   `json:"amount_left"`
-	Ratio       float64 `json:"ratio"`
-	ETA         int64   `json:"eta"`
+	Hash         string  `json:"hash"`
+	Name         string  `json:"name"`
+	Progress     float64 `json:"progress"`
+	State        string  `json:"state"`
+	SavePath     string  `json:"save_path"`
+	ContentPath  string  `json:"content_path"`
+	Category     string  `json:"category"`
+	Tags         string  `json:"tags"`
+	Tracker      string  `json:"tracker"`
+	Size         int64   `json:"size"`
+	Downloaded   int64   `json:"downloaded"`
+	AmountLeft   int64   `json:"amount_left"`
+	Uploaded     int64   `json:"uploaded"`
+	DownloadRate int64   `json:"dlspeed"`
+	UploadRate   int64   `json:"upspeed"`
+	Ratio        float64 `json:"ratio"`
+	ETA          int64   `json:"eta"`
+	AddedOn      int64   `json:"added_on"`
+	CompletionOn int64   `json:"completion_on"`
+	LastActivity int64   `json:"last_activity"`
+	Seeders      int64   `json:"num_seeds"`
+	Leechers     int64   `json:"num_leechs"`
+}
+
+func automationQBOutputHashes(output map[string]any) []string {
+	result := make([]string, 0, 2)
+	seen := make(map[string]struct{})
+	appendHash := func(value any) {
+		if value == nil {
+			return
+		}
+		hash := strings.TrimSpace(fmt.Sprint(value))
+		if hash == "" {
+			return
+		}
+		key := strings.ToLower(hash)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, hash)
+	}
+	for _, key := range []string{"torrent_hashes", "added_torrent_ids"} {
+		switch values := output[key].(type) {
+		case []string:
+			for _, value := range values {
+				appendHash(value)
+			}
+		case []any:
+			for _, value := range values {
+				appendHash(value)
+			}
+		}
+	}
+	appendHash(output["hash"])
+	return result
 }
 
 func (s *AutomationService) executeAutomationWaitQBittorrent(
@@ -41,8 +86,9 @@ func (s *AutomationService) executeAutomationWaitQBittorrent(
 	}
 	targetID := automationAnyUint(sourceOutput["target_id"])
 	torrentTag := automationAnyString(sourceOutput["torrent_tag"])
-	if targetID == 0 || torrentTag == "" {
-		return nil, errors.New("上游 qBittorrent 节点没有返回下载器或任务跟踪标签")
+	torrentHashes := automationQBOutputHashes(sourceOutput)
+	if targetID == 0 || (torrentTag == "" && len(torrentHashes) == 0) {
+		return nil, errors.New("上游 qBittorrent 节点没有返回下载器或任务标识")
 	}
 	var target model.AutomationTarget
 	if err := s.db.First(&target, targetID).Error; err != nil {
@@ -68,9 +114,16 @@ func (s *AutomationService) executeAutomationWaitQBittorrent(
 	output["target_id"] = target.ID
 	output["target_name"] = target.Name
 	output["torrent_tag"] = torrentTag
+	output["torrent_hashes"] = torrentHashes
 	output["last_checked_at"] = time.Now().UTC().Format(time.RFC3339)
 
-	requestPath := "/api/v2/torrents/info?" + url.Values{"tag": {torrentTag}}.Encode()
+	query := url.Values{}
+	if len(torrentHashes) > 0 {
+		query.Set("hashes", strings.Join(torrentHashes, "|"))
+	} else {
+		query.Set("tag", torrentTag)
+	}
+	requestPath := "/api/v2/torrents/info?" + query.Encode()
 	req, err := client.newRequest(ctx, http.MethodGet, requestPath, nil)
 	if err != nil {
 		return output, err
@@ -91,17 +144,39 @@ func (s *AutomationService) executeAutomationWaitQBittorrent(
 
 	if len(torrents) > 0 {
 		torrent := torrents[0]
+		for _, wanted := range torrentHashes {
+			for _, candidate := range torrents {
+				if strings.EqualFold(candidate.Hash, wanted) {
+					torrent = candidate
+					break
+				}
+			}
+			if strings.EqualFold(torrent.Hash, wanted) {
+				break
+			}
+		}
 		output["hash"] = torrent.Hash
 		output["name"] = torrent.Name
 		output["progress"] = torrent.Progress * 100
 		output["state"] = torrent.State
 		output["save_path"] = torrent.SavePath
 		output["content_path"] = torrent.ContentPath
+		output["category"] = torrent.Category
+		output["tags"] = torrent.Tags
+		output["tracker"] = torrent.Tracker
 		output["size"] = torrent.Size
 		output["downloaded"] = torrent.Downloaded
 		output["amount_left"] = torrent.AmountLeft
+		output["uploaded"] = torrent.Uploaded
+		output["download_speed"] = torrent.DownloadRate
+		output["upload_speed"] = torrent.UploadRate
 		output["ratio"] = torrent.Ratio
 		output["eta"] = torrent.ETA
+		output["added_on"] = torrent.AddedOn
+		output["completion_on"] = torrent.CompletionOn
+		output["last_activity"] = torrent.LastActivity
+		output["seeders"] = torrent.Seeders
+		output["leechers"] = torrent.Leechers
 		switch strings.ToLower(strings.TrimSpace(torrent.State)) {
 		case "error", "missingfiles", "unknown":
 			output["waiting"] = false

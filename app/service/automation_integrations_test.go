@@ -306,6 +306,48 @@ func TestAutomationWaitQBittorrentUsesLocalMockAndCompletes(t *testing.T) {
 	}
 }
 
+func TestAutomationWaitQBittorrentPrefersModernAddedTorrentID(t *testing.T) {
+	var requestedHashes string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/torrents/info":
+			requestedHashes = r.URL.Query().Get("hashes")
+			if r.URL.Query().Get("tag") != "" {
+				http.Error(w, "tag fallback should not be used", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"hash":"MODERN","name":"Example","progress":1,"state":"uploading","save_path":"/downloads","content_path":"/downloads/Example","category":"tv","tags":"rss,automation","tracker":"https://tracker.example/announce","size":100,"downloaded":100,"amount_left":0,"uploaded":50,"dlspeed":0,"upspeed":1024,"ratio":0.5,"eta":0,"added_on":10,"completion_on":20,"last_activity":30,"num_seeds":4,"num_leechs":2}]`))
+		case "/api/v2/torrents/files":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"name":"Example/episode.mkv","size":100,"progress":1}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	db := newAutomationTestDB(t)
+	config, _ := json.Marshal(AutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testAutomationQBAPIKey})
+	target := model.AutomationTarget{Name: "现代 qB", Type: model.AutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(config)}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	definition := AutomationDefinition{Edges: []AutomationEdge{{Source: "qb", SourcePort: "success", Target: "wait"}}}
+	output, err := (&AutomationService{db: db}).executeAutomationWaitQBittorrent(context.Background(), model.AutomationNodeRun{}, AutomationNode{
+		ID: "wait", Type: AutomationNodeWaitQBittorrent,
+	}, definition, automationTestRunContext("qb", map[string]any{
+		"target_id": target.ID, "torrent_tag": "filmfusion-automation-modern",
+		"added_torrent_ids": []string{"MODERN"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestedHashes != "MODERN" || output["selected_port"] != "success" || output["hash"] != "MODERN" || output["category"] != "tv" || output["tags"] != "rss,automation" || output["uploaded"] != int64(50) || output["upload_speed"] != int64(1024) || output["seeders"] != int64(4) || output["content_type"] != "dir" {
+		t.Fatalf("unexpected modern qB wait output: %#v; hashes=%q", output, requestedHashes)
+	}
+}
+
 func TestAutomationMoviePilotTransferUsesCompletedQBOutput(t *testing.T) {
 	transfer := &stubAutomationMoviePilotTransfer{result: MoviePilotManualTransferResult{Message: "整理完成"}}
 	automation := &AutomationService{mpTransfer: transfer}
@@ -366,7 +408,7 @@ func TestAutomationDeleteQBittorrentRemovesCompletedTaskWithoutFiles(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if deleteHash != "ABC" || deleteFiles != "false" || output["deleted"] != true || output["delete_files"] != false {
+	if deleteHash != "ABC" || deleteFiles != "false" || output["deleted"] != true || output["delete_files"] != false || output["response_status"] != http.StatusOK {
 		t.Fatalf("unexpected qB delete: output=%#v hash=%q deleteFiles=%q", output, deleteHash, deleteFiles)
 	}
 }

@@ -42,6 +42,27 @@ func TestMediaRecognitionServiceParsesFileWithFolderContext(t *testing.T) {
 	}
 }
 
+func TestLocalWebSourceRecognizesCommonReleaseAliases(t *testing.T) {
+	tests := map[string]string{
+		"Movie.2026.NF.WEB-DL.2160p.mkv":     "Netflix",
+		"Movie.2026.AMZN.WEB-DL.2160p.mkv":   "Amazon",
+		"Movie.2026.DSNP.WEB-DL.2160p.mkv":   "Disney+",
+		"Movie.2026.iTunes.WEB-DL.2160p.mkv": "Apple TV+",
+		"Movie.2026.HMAX.WEB-DL.2160p.mkv":   "Max",
+	}
+	for input, want := range tests {
+		t.Run(want, func(t *testing.T) {
+			meta, err := parseLocalMediaMeta(input, MediaRecognitionWordResult{Processed: input}, MediaRecognitionModeFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if meta.WebSource != want {
+				t.Fatalf("web source=%q want=%q meta=%+v", meta.WebSource, want, meta)
+			}
+		})
+	}
+}
+
 func TestLocalMovieTransferNameMatchesObservedMP2Result(t *testing.T) {
 	service := NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil)
 	tests := []struct {

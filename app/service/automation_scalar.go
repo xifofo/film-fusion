@@ -78,7 +78,23 @@ func automationContentKey(rawURL string) string {
 // never calls an external provider.
 func previewAutomationActionNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {
 	switch node.Type {
-	case AutomationNodeQBittorrent, AutomationNodeOffline115, AutomationNodeOffline115OpenAPI:
+	case AutomationNodeQBittorrent:
+		downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
+		if err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		if err := validateAutomationDownloadURL(downloadURL); err != nil {
+			return map[string]any{"selected_port": "failure"}, err
+		}
+		contentKey := automationContentKey(downloadURL)
+		return map[string]any{
+			"selected_port": "success", "content_key": contentKey,
+			"torrent_tag": "filmfusion-automation-" + contentKey,
+			"submitted":   true, "accepted": true, "pending": false,
+			"success_count": 1, "pending_count": 0, "failure_count": 0,
+			"response_format": "preview", "preview": true,
+		}, nil
+	case AutomationNodeOffline115, AutomationNodeOffline115OpenAPI:
 		downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
 		if err != nil {
 			return map[string]any{"selected_port": "failure"}, err

@@ -198,6 +198,16 @@ type Organize115ShadowDifference struct {
 	Local      string `json:"local"`
 }
 
+// Organize115ShadowVariableComparison 展示同一整理输入在 MP2 主结果与
+// FilmFusion 本地影子下生成的完整重命名变量上下文。
+type Organize115ShadowVariableComparison struct {
+	Name       string `json:"name"`
+	Label      string `json:"label"`
+	MoviePilot string `json:"moviepilot"`
+	Local      string `json:"local"`
+	Matched    bool   `json:"matched"`
+}
+
 // Organize115ShadowComparison 将识别、命名和最终目标路径的影子结果汇总到
 // 同一条整理明细。MP2 仍是权威结果，本结构只用于预览和观测。
 type Organize115ShadowComparison struct {
@@ -208,6 +218,7 @@ type Organize115ShadowComparison struct {
 	MoviePilotTargetPath string                                    `json:"moviepilot_target_path,omitempty"`
 	LocalTargetPath      string                                    `json:"local_target_path,omitempty"`
 	LocalTargetError     string                                    `json:"local_target_error,omitempty"`
+	RenameVariables      []Organize115ShadowVariableComparison     `json:"rename_variables,omitempty"`
 	Differences          []Organize115ShadowDifference             `json:"differences"`
 }
 
@@ -2123,15 +2134,20 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			item.RenameTo = path.Base(item.TargetPath)
 			if item.ShadowComparison != nil {
 				h.completeOrganize115ShadowTargetComparison(item.ShadowComparison, organize115ShadowTargetInput{
-					DirectoryName:      dir.DirectoryName,
-					ClassifyByCategory: dir.ClassifyByCategory,
-					CategoryOverride:   categoryOverride,
-					CategoryConfig:     categoryCfg,
-					RecognizeName:      item.RecognizeName,
-					OriginalName:       file.Name,
-					PrimaryTargetPath:  item.TargetPath,
-					RecognitionRaw:     recognitionRaw,
-					TransferRaw:        transferRaw,
+					DirectoryName:       dir.DirectoryName,
+					ClassifyByCategory:  dir.ClassifyByCategory,
+					CategoryOverride:    categoryOverride,
+					CategoryConfig:      categoryCfg,
+					RecognizeName:       item.RecognizeName,
+					OriginalName:        file.Name,
+					PrimaryTargetPath:   item.TargetPath,
+					PrimaryInfo:         info,
+					PrimaryMediaType:    item.MediaType,
+					PrimaryCategory:     item.Category,
+					PrimaryTransferName: transferName,
+					LegacyOriginalName:  targetOriginalName,
+					RecognitionRaw:      recognitionRaw,
+					TransferRaw:         transferRaw,
 				})
 			}
 			item.SourceSeason, item.SourceEpisode = inferSourceSeasonEpisode(file.Name, recognizeName, recognizeInput, args.context, info)
@@ -2201,15 +2217,20 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 }
 
 type organize115ShadowTargetInput struct {
-	DirectoryName      string
-	ClassifyByCategory bool
-	CategoryOverride   string
-	CategoryConfig     service.MoviePilotCategoryConfig
-	RecognizeName      string
-	OriginalName       string
-	PrimaryTargetPath  string
-	RecognitionRaw     map[string]any
-	TransferRaw        map[string]any
+	DirectoryName       string
+	ClassifyByCategory  bool
+	CategoryOverride    string
+	CategoryConfig      service.MoviePilotCategoryConfig
+	RecognizeName       string
+	OriginalName        string
+	PrimaryTargetPath   string
+	PrimaryInfo         service.MoviePilotMediaInfo
+	PrimaryMediaType    string
+	PrimaryCategory     string
+	PrimaryTransferName string
+	LegacyOriginalName  string
+	RecognitionRaw      map[string]any
+	TransferRaw         map[string]any
 }
 
 func buildOrganize115ShadowComparison(recognitionRaw, transferRaw map[string]any) *Organize115ShadowComparison {
@@ -2322,12 +2343,30 @@ func (h *OrganizeHandler) completeOrganize115ShadowTargetComparison(
 		legacyOriginalName = stripDuplicateMovieTitleYearPrefix(legacyOriginalName)
 	}
 
-	localTargetPath, err := h.buildTargetPathWithDirectory(input.DirectoryName, categoryForPath, service.MediaRenameInput{
+	primaryRenameInput := service.MediaRenameInput{
+		Info: input.PrimaryInfo, MediaType: input.PrimaryMediaType, Category: input.PrimaryCategory,
+		RecognizeName: input.RecognizeName, TransferName: input.PrimaryTransferName, OriginalName: input.OriginalName,
+		LegacyOriginalName: input.LegacyOriginalName,
+		RecognitionRaw:     input.RecognitionRaw, TransferRaw: input.TransferRaw,
+	}
+	localRenameInput := service.MediaRenameInput{
 		Info: *localInfo, MediaType: localInfo.MediaType, Category: localCategory,
 		RecognizeName: input.RecognizeName, TransferName: localTransferName, OriginalName: input.OriginalName,
 		LegacyOriginalName: legacyOriginalName,
 		RecognitionRaw:     localRaw, TransferRaw: transfer.LocalRaw,
-	})
+	}
+	comparison.RenameVariables = buildOrganize115ShadowVariableComparison(primaryRenameInput, localRenameInput)
+	for _, variable := range comparison.RenameVariables {
+		if variable.Matched {
+			continue
+		}
+		comparison.Differences = append(comparison.Differences, Organize115ShadowDifference{
+			Stage: "variable", Field: variable.Name, Label: variable.Label,
+			MoviePilot: variable.MoviePilot, Local: variable.Local,
+		})
+	}
+
+	localTargetPath, err := h.buildTargetPathWithDirectory(input.DirectoryName, categoryForPath, localRenameInput)
 	if err != nil {
 		comparison.LocalTargetError = err.Error()
 		refreshOrganize115ShadowStatus(comparison)
@@ -2341,6 +2380,36 @@ func (h *OrganizeHandler) completeOrganize115ShadowTargetComparison(
 		})
 	}
 	refreshOrganize115ShadowStatus(comparison)
+}
+
+func buildOrganize115ShadowVariableComparison(primary, local service.MediaRenameInput) []Organize115ShadowVariableComparison {
+	primaryValues := service.BuildMediaRenameVariables(primary)
+	localValues := service.BuildMediaRenameVariables(local)
+	variables := append([]service.MediaRenameVariable{}, service.MediaRenameCommonVariables()...)
+	if organizeShadowIsTV(primary) || organizeShadowIsTV(local) {
+		variables = append(variables, service.MediaRenameTVVariables()...)
+	}
+	rows := make([]Organize115ShadowVariableComparison, 0, len(variables))
+	for _, variable := range variables {
+		moviePilotValue := strings.TrimSpace(fmt.Sprint(primaryValues[variable.Name]))
+		localValue := strings.TrimSpace(fmt.Sprint(localValues[variable.Name]))
+		rows = append(rows, Organize115ShadowVariableComparison{
+			Name: variable.Name, Label: variable.Label,
+			MoviePilot: moviePilotValue, Local: localValue,
+			Matched: moviePilotValue == localValue,
+		})
+	}
+	return rows
+}
+
+func organizeShadowIsTV(input service.MediaRenameInput) bool {
+	for _, value := range []string{input.MediaType, input.Info.MediaType} {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "tv", "series", "show", "tvshow", "电视剧", "剧集", "番剧", "动漫", "动画", "动画番剧":
+			return true
+		}
+	}
+	return false
 }
 
 func (h *OrganizeHandler) recognizeFileWithContext(fileName, recognizeName string, context Organize115FolderContext, recognitionSource string) (service.MoviePilotMediaInfo, string, map[string]any, error) {

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -293,6 +294,86 @@ func TestAutomationQBittorrentActionPrefersAPIKeyWithoutLogin(t *testing.T) {
 	if output["submitted"] != true || loginCount.Load() != 0 || addCount.Load() != 1 {
 		t.Fatalf("unexpected output or requests: output=%#v login=%d add=%d", output, loginCount.Load(), addCount.Load())
 	}
+}
+
+func TestAutomationQBittorrentActionSupportsWebAPI214AndAdvancedOptions(t *testing.T) {
+	const magnet = "magnet:?xt=urn:btih:MODERN123456&dn=episode"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/torrents/add" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer "+testAutomationQBAPIKey {
+			http.Error(w, "unexpected authorization: "+got, http.StatusUnauthorized)
+			return
+		}
+		if got := r.Header.Get("Origin"); got != serverURLOrigin(r) {
+			http.Error(w, "unexpected origin: "+got, http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		wantFields := map[string]string{
+			"urls": magnet, "rename": "示例剧.S01E01", "paused": "true",
+			"sequentialDownload": "true", "skip_checking": "true",
+			"firstLastPiecePrio": "true", "root_folder": "false", "autoTMM": "true",
+			"dlLimit": "2097152", "upLimit": "524288", "ratioLimit": "-1", "seedingTimeLimit": "-2",
+		}
+		for key, want := range wantFields {
+			if got := r.FormValue(key); got != want {
+				http.Error(w, fmt.Sprintf("%s=%q want %q", key, got, want), http.StatusBadRequest)
+				return
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"added_torrent_ids":["0123456789ABCDEF"],"failure_count":0,"pending_count":1,"success_count":0}`))
+	}))
+	defer server.Close()
+
+	db := newAutomationTestDB(t)
+	configJSON, _ := json.Marshal(AutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testAutomationQBAPIKey})
+	target := model.AutomationTarget{Name: "现代 qB", Type: model.AutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(configJSON)}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	node := AutomationNode{Type: AutomationNodeQBittorrent, Config: map[string]any{
+		"target_id": target.ID, "url": "$item.download_url", "rename": "{{item.title}}",
+		"paused": true, "sequential": true, "skip_checking": true, "first_last_piece_priority": true,
+		"root_folder": "false", "auto_tmm": "true", "download_limit_kib": 2048,
+		"upload_limit_kib": 512, "ratio_limit": -1, "seeding_time_limit": -2,
+	}}
+	output, err := (&AutomationService{db: db}).executeAutomationQBittorrent(context.Background(), node, map[string]any{
+		"item": map[string]any{"download_url": magnet, "title": "示例剧.S01E01"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if output["submitted"] != true || output["accepted"] != true || output["pending"] != true || output["pending_count"] != 1 || output["hash"] != "0123456789ABCDEF" || output["response_format"] != "webapi_2_14" {
+		t.Fatalf("unexpected modern qB output: %#v", output)
+	}
+}
+
+func TestAutomationQBAddResultRejectsModernAllFailure(t *testing.T) {
+	output, err := automationQBAddResult(http.StatusConflict, []byte(`{"added_torrent_ids":[],"failure_count":1,"pending_count":0,"success_count":0}`))
+	if err == nil || output["submitted"] != false || output["failure_count"] != 1 {
+		t.Fatalf("expected structured qB failure, output=%#v err=%v", output, err)
+	}
+}
+
+func TestValidateAutomationDownloadURLSupportsQBittorrentBCLinks(t *testing.T) {
+	if err := validateAutomationDownloadURL("bc://bt/QUJDREVGRw=="); err != nil {
+		t.Fatalf("expected qBittorrent BC link to be valid: %v", err)
+	}
+	if err := validateAutomationDownloadURL("bc://other/QUJDREVGRw=="); err == nil {
+		t.Fatal("expected malformed BC link to be rejected")
+	}
+}
+
+func serverURLOrigin(r *http.Request) string {
+	return "http://" + r.Host
 }
 
 func TestAutomationTestTargetValidatesAPIKeyAgainstVersionEndpoint(t *testing.T) {

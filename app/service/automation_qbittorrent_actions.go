@@ -190,6 +190,7 @@ func (s *AutomationService) executeAutomationDeleteQBittorrent(
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return output, fmt.Errorf("删除 qBittorrent 任务返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	output["response_status"] = resp.StatusCode
 	output["name"] = torrent.Name
 	output["content_path"] = torrent.ContentPath
 	output["deleted"] = true

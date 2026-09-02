@@ -45,6 +45,61 @@ func (s *AutomationService) TestTarget(ctx context.Context, targetID uint) error
 	}
 }
 
+type automationQBAddResponse struct {
+	SuccessCount    int      `json:"success_count"`
+	PendingCount    int      `json:"pending_count"`
+	FailureCount    int      `json:"failure_count"`
+	AddedTorrentIDs []string `json:"added_torrent_ids"`
+}
+
+func automationQBAddResult(status int, responseBody []byte) (map[string]any, error) {
+	trimmed := strings.TrimSpace(string(responseBody))
+	result := map[string]any{
+		"response_status": status,
+		"submitted":       false,
+		"accepted":        false,
+		"pending":         false,
+	}
+
+	var modern automationQBAddResponse
+	if trimmed != "" && json.Unmarshal(responseBody, &modern) == nil {
+		result["response_format"] = "webapi_2_14"
+		result["success_count"] = modern.SuccessCount
+		result["pending_count"] = modern.PendingCount
+		result["failure_count"] = modern.FailureCount
+		result["added_torrent_ids"] = modern.AddedTorrentIDs
+		result["torrent_hashes"] = modern.AddedTorrentIDs
+		if len(modern.AddedTorrentIDs) > 0 {
+			result["hash"] = modern.AddedTorrentIDs[0]
+		}
+		accepted := modern.SuccessCount+modern.PendingCount > 0
+		result["submitted"] = accepted
+		result["accepted"] = accepted
+		result["pending"] = modern.PendingCount > 0
+		if status < 200 || status >= 300 || !accepted {
+			return result, fmt.Errorf(
+				"qBittorrent 添加任务失败: HTTP %d (成功 %d，等待 %d，失败 %d)",
+				status, modern.SuccessCount, modern.PendingCount, modern.FailureCount,
+			)
+		}
+		return result, nil
+	}
+
+	if status < 200 || status >= 300 {
+		return result, fmt.Errorf("qBittorrent 返回 HTTP %d: %s", status, trimmed)
+	}
+	if trimmed != "" && !strings.EqualFold(trimmed, "Ok.") {
+		return result, fmt.Errorf("qBittorrent 返回了无法识别的添加结果: %s", trimmed)
+	}
+	result["response_format"] = "legacy"
+	result["success_count"] = 1
+	result["pending_count"] = 0
+	result["failure_count"] = 0
+	result["submitted"] = true
+	result["accepted"] = true
+	return result, nil
+}
+
 func (s *AutomationService) executeAutomationQBittorrent(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
 	targetID := automationConfigUint(node.Config, "target_id")
 	var target model.AutomationTarget
@@ -76,16 +131,49 @@ func (s *AutomationService) executeAutomationQBittorrent(ctx context.Context, no
 		allTags = configuredTags + "," + torrentTag
 	}
 	fields := map[string]string{
-		"urls":     downloadURL,
-		"savepath": renderAutomationTemplate(automationConfigString(node.Config, "save_path"), runContext),
-		"category": renderAutomationTemplate(automationConfigString(node.Config, "category"), runContext),
-		"tags":     allTags,
+		"urls":               downloadURL,
+		"savepath":           renderAutomationTemplate(automationConfigString(node.Config, "save_path"), runContext),
+		"category":           renderAutomationTemplate(automationConfigString(node.Config, "category"), runContext),
+		"tags":               allTags,
+		"rename":             renderAutomationTemplate(automationConfigString(node.Config, "rename"), runContext),
+		"paused":             strconv.FormatBool(automationConfigBool(node.Config, "paused")),
+		"sequentialDownload": strconv.FormatBool(automationConfigBool(node.Config, "sequential")),
+		"skip_checking":      strconv.FormatBool(automationConfigBool(node.Config, "skip_checking")),
+		"firstLastPiecePrio": strconv.FormatBool(automationConfigBool(node.Config, "first_last_piece_priority")),
 	}
-	if automationConfigBool(node.Config, "paused") {
-		fields["paused"] = "true"
+	for configKey, apiKey := range map[string]string{
+		"root_folder": "root_folder",
+		"auto_tmm":    "autoTMM",
+	} {
+		if value := strings.ToLower(automationConfigString(node.Config, configKey)); value == "true" || value == "false" {
+			fields[apiKey] = value
+		}
 	}
-	if automationConfigBool(node.Config, "sequential") {
-		fields["sequentialDownload"] = "true"
+	for configKey, apiKey := range map[string]string{
+		"download_limit_kib": "dlLimit",
+		"upload_limit_kib":   "upLimit",
+	} {
+		value, exists, valueErr := automationConfigOptionalInt(node.Config, configKey)
+		if valueErr != nil {
+			return nil, valueErr
+		}
+		if exists {
+			fields[apiKey] = strconv.FormatInt(int64(value)*1024, 10)
+		}
+	}
+	if value, exists := node.Config["ratio_limit"]; exists && value != nil {
+		number, ok := automationNumber(value)
+		if !ok {
+			return nil, errors.New("qBittorrent 分享率限制必须是数字")
+		}
+		fields["ratioLimit"] = strconv.FormatFloat(number, 'f', -1, 64)
+	}
+	value, exists, valueErr := automationConfigOptionalInt(node.Config, "seeding_time_limit")
+	if valueErr != nil {
+		return nil, valueErr
+	}
+	if exists {
+		fields["seedingTimeLimit"] = strconv.Itoa(value)
 	}
 	for key, value := range fields {
 		if strings.TrimSpace(value) != "" {
@@ -104,13 +192,18 @@ func (s *AutomationService) executeAutomationQBittorrent(ctx context.Context, no
 	}
 	defer resp.Body.Close()
 	responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.EqualFold(strings.TrimSpace(string(responseBody)), "Ok.") {
-		return nil, fmt.Errorf("qBittorrent 返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
-	}
-	return map[string]any{
+	output := map[string]any{
 		"target_id": target.ID, "target_name": target.Name,
-		"content_key": contentKey, "torrent_tag": torrentTag, "submitted": true,
-	}, nil
+		"content_key": contentKey, "torrent_tag": torrentTag,
+	}
+	addResult, err := automationQBAddResult(resp.StatusCode, responseBody)
+	for key, value := range addResult {
+		output[key] = value
+	}
+	if err != nil {
+		return output, err
+	}
+	return output, nil
 }
 
 type automationQBClient struct {
@@ -120,9 +213,15 @@ type automationQBClient struct {
 }
 
 func (client *automationQBClient) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(client.baseURL, "/")+path, body)
+	baseURL := strings.TrimRight(client.baseURL, "/")
+	req, err := http.NewRequestWithContext(ctx, method, baseURL+path, body)
 	if err != nil {
 		return nil, err
+	}
+	req.Header.Set("Accept", "application/json, text/plain;q=0.9, */*;q=0.8")
+	req.Header.Set("Referer", baseURL+"/")
+	if parsed, parseErr := url.Parse(baseURL); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
+		req.Header.Set("Origin", parsed.Scheme+"://"+parsed.Host)
 	}
 	if client.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+client.apiKey)
@@ -161,11 +260,12 @@ func (s *AutomationService) newAutomationQBClient(ctx context.Context, target mo
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Timeout: 20 * time.Second, Jar: jar}
 	apiKey := strings.TrimSpace(config.APIKey)
+	qbClient := &automationQBClient{baseURL: config.BaseURL, client: client, apiKey: apiKey}
 	if apiKey != "" {
-		return &automationQBClient{baseURL: config.BaseURL, client: client, apiKey: apiKey}, nil
+		return qbClient, nil
 	}
 	form := url.Values{"username": {config.Username}, "password": {config.Password}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(config.BaseURL, "/")+"/api/v2/auth/login", strings.NewReader(form.Encode()))
+	req, err := qbClient.newRequest(ctx, http.MethodPost, "/api/v2/auth/login", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +279,7 @@ func (s *AutomationService) newAutomationQBClient(ctx context.Context, target mo
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || !strings.EqualFold(strings.TrimSpace(string(body)), "Ok.") {
 		return nil, fmt.Errorf("qBittorrent 登录失败: HTTP %d %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	return &automationQBClient{baseURL: config.BaseURL, client: client}, nil
+	return qbClient, nil
 }
 
 func (s *AutomationService) executeAutomationOffline115(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
@@ -397,6 +497,10 @@ func validateAutomationDownloadURL(value string) error {
 	case "magnet":
 		if !strings.Contains(strings.ToLower(value), "xt=urn:btih:") {
 			return errors.New("磁力链接缺少 BTIH")
+		}
+	case "bc":
+		if !strings.EqualFold(parsed.Host, "bt") || strings.Trim(parsed.Path, "/") == "" {
+			return errors.New("BC 下载地址必须使用 bc://bt/ 格式")
 		}
 	case "http", "https":
 		if parsed.Host == "" {

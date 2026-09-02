@@ -313,6 +313,40 @@ func TestAutomationNodeMaxAttemptsKeepsSideEffectsSingleAttempt(t *testing.T) {
 	}
 }
 
+func TestValidateAutomationQBittorrentExtendedConfig(t *testing.T) {
+	base := map[string]any{"target_id": 1, "url": "$item.download_url"}
+	tests := []struct {
+		name      string
+		key       string
+		value     any
+		wantError string
+	}{
+		{name: "valid download limit", key: "download_limit_kib", value: 2048},
+		{name: "valid global ratio", key: "ratio_limit", value: -2},
+		{name: "invalid bool", key: "skip_checking", value: "true", wantError: "必须是布尔值"},
+		{name: "invalid tri state", key: "auto_tmm", value: "enabled", wantError: "default/true/false"},
+		{name: "negative speed", key: "upload_limit_kib", value: -1, wantError: "0 到 1048576"},
+		{name: "invalid ratio sentinel", key: "ratio_limit", value: -1.5, wantError: "分享率限制"},
+		{name: "invalid seeding sentinel", key: "seeding_time_limit", value: -3, wantError: "做种时间限制"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := make(map[string]any, len(base)+1)
+			for key, value := range base {
+				config[key] = value
+			}
+			config[tt.key] = tt.value
+			err := validateAutomationNodeConfig(AutomationNode{Type: AutomationNodeQBittorrent, Config: config})
+			if tt.wantError == "" && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.wantError != "" && (err == nil || !strings.Contains(err.Error(), tt.wantError)) {
+				t.Fatalf("error=%v want fragment %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateAutomationWait115RejectsTooFrequentPolling(t *testing.T) {
 	err := validateAutomationNodeConfig(AutomationNode{
 		Type: AutomationNodeWait115,

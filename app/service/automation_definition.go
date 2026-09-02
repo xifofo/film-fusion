@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -349,13 +350,13 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 				}
 			case AutomationNodeDeleteQBittorrent:
 				if predecessor.Type != AutomationNodeWaitQBittorrent && predecessor.Type != AutomationNodeMoviePilotTransfer {
-					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 必须连接在等待 qBittorrent 完成或 MP2 整理节点之后", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qBittorrent 任务节点 %s 必须连接在等待 qBittorrent 完成或 MP2 整理节点之后", id))
 				}
 				if sourcePort != "success" {
-					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 必须连接上游节点的成功出口", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qBittorrent 任务节点 %s 必须连接上游节点的成功出口", id))
 				}
 				if automationConfigBool(node.Config, "delete_files") && predecessor.Type != AutomationNodeMoviePilotTransfer {
-					result.Errors = append(result.Errors, fmt.Sprintf("删除 qB 做种任务节点 %s 只有在 MP2 整理成功后才能同时删除下载文件", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("删除 qBittorrent 任务节点 %s 只有在 MP2 整理成功后才能同时删除下载文件", id))
 				}
 			case AutomationNodeWait115:
 				if predecessor.Type != AutomationNodeOffline115 && predecessor.Type != AutomationNodeOffline115OpenAPI {
@@ -712,6 +713,43 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		}
 		if automationConfigString(config, "url") == "" {
 			return errors.New("必须配置下载地址变量")
+		}
+		if len([]rune(automationConfigString(config, "rename"))) > 255 {
+			return errors.New("qBittorrent 任务名称不能超过 255 个字符")
+		}
+		for _, key := range []string{"paused", "sequential", "skip_checking", "first_last_piece_priority"} {
+			if value, exists := config[key]; exists && value != nil {
+				if _, ok := value.(bool); !ok {
+					return fmt.Errorf("qBittorrent 配置 %s 必须是布尔值", key)
+				}
+			}
+		}
+		for _, key := range []string{"root_folder", "auto_tmm"} {
+			switch strings.ToLower(automationConfigString(config, key)) {
+			case "", "default", "true", "false":
+			default:
+				return fmt.Errorf("qBittorrent 配置 %s 必须是 default/true/false", key)
+			}
+		}
+		for _, key := range []string{"download_limit_kib", "upload_limit_kib"} {
+			value, exists, err := automationConfigOptionalInt(config, key)
+			if err != nil {
+				return err
+			}
+			if exists && (value < 0 || value > 1_048_576) {
+				return fmt.Errorf("qBittorrent 配置 %s 必须在 0 到 1048576 KiB/s 之间", key)
+			}
+		}
+		if value, exists := config["ratio_limit"]; exists && value != nil {
+			ratio, ok := automationNumber(value)
+			if !ok || math.IsNaN(ratio) || math.IsInf(ratio, 0) || (ratio < 0 && ratio != -1 && ratio != -2) || ratio > 1000 {
+				return errors.New("qBittorrent 分享率限制必须是 -2、-1 或 0 到 1000")
+			}
+		}
+		if value, exists, err := automationConfigOptionalInt(config, "seeding_time_limit"); err != nil {
+			return err
+		} else if exists && ((value < 0 && value != -1 && value != -2) || value > 5_256_000) {
+			return errors.New("qBittorrent 做种时间限制必须是 -2、-1 或 0 到 5256000 分钟")
 		}
 	case AutomationNodeWaitQBittorrent:
 		pollSeconds := automationConfigUint(config, "poll_interval_seconds")
