@@ -183,7 +183,6 @@ func automationHistoryActionTypes() []string {
 		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-		AutomationNodeHDHiveQuery, AutomationNodeHDHiveUnlock,
 		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
 		AutomationNodeStrmVerify, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 		AutomationNodeHTTPRequest, AutomationNodeNotification,

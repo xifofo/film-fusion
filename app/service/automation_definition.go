@@ -16,6 +16,7 @@ const (
 	AutomationNodeTrigger             = "trigger"
 	AutomationNodeDelay               = "delay"
 	AutomationNodeRegex               = "regex"
+	AutomationNodeExtractBetween      = "extract_between"
 	AutomationNodeKeyword             = "keyword"
 	AutomationNodeKeywordReplace      = "keyword_replace"
 	AutomationNodeRegexReplace        = "regex_replace"
@@ -45,8 +46,6 @@ const (
 	AutomationNodeFilmFusionRecognize = "filmfusion_recognize"
 	AutomationNodeMoviePilotTransfer  = "moviepilot_transfer"
 	AutomationNodeMediaExists         = "media_exists"
-	AutomationNodeHDHiveQuery         = "hdhive_query"
-	AutomationNodeHDHiveUnlock        = "hdhive_unlock"
 	AutomationNodeMoviePilotRecognize = "moviepilot_recognize"
 	AutomationNodeOrganizeStrm        = "organize_strm"
 	AutomationNodeStrmVerify          = "strm_verify"
@@ -395,10 +394,6 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 					(predecessor.Type != AutomationNodeTrigger && sourcePort != "success") {
 					result.Errors = append(result.Errors, fmt.Sprintf("整理生成 STRM 节点 %s 必须连接上游节点的成功出口", id))
 				}
-			case AutomationNodeHDHiveUnlock:
-				if predecessor.Type != AutomationNodeHDHiveQuery || sourcePort != "found" {
-					result.Errors = append(result.Errors, fmt.Sprintf("HDHive 解锁节点 %s 必须连接资源查询节点的“找到资源”出口", id))
-				}
 			case AutomationNodeStrmVerify:
 				if predecessor.Type != AutomationNodeOrganizeStrm || sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("STRM 校验节点 %s 必须连接整理生成 STRM 节点的成功出口", id))
@@ -474,7 +469,7 @@ func isAutomationNodeType(nodeType string) bool {
 
 func isAutomationNonRetryableNode(nodeType string) bool {
 	switch nodeType {
-	case AutomationNodeDelay, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
+	case AutomationNodeDelay, AutomationNodeExtractBetween, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 		AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
 		AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
 		AutomationNodeDeleteQBittorrent, AutomationNodeMoviePilotTransfer,
@@ -489,7 +484,7 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 	port = strings.TrimSpace(strings.ToLower(port))
 	if port == "always" {
 		switch nodeType {
-		case AutomationNodeRegex, AutomationNodeKeyword, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
+		case AutomationNodeRegex, AutomationNodeExtractBetween, AutomationNodeKeyword, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
 			AutomationNodeConvert, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 			AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
 			AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
@@ -497,7 +492,6 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 			AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
 			AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-			AutomationNodeHDHiveQuery, AutomationNodeHDHiveUnlock,
 			AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
 			AutomationNodeStrmVerify, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 			AutomationNodeHTTPRequest, AutomationNodeNotification:
@@ -523,19 +517,17 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 		return port == "matched" || port == "unmatched" || port == "failure"
 	case AutomationNodeMediaExists:
 		return port == "exists" || port == "missing" || port == "failure"
-	case AutomationNodeHDHiveQuery:
-		return port == "found" || port == "not_found" || port == "failure"
 	case AutomationNodeStrmVerify:
 		return port == "valid" || port == "invalid" || port == "failure"
 	case AutomationNodeParallel:
 		return strings.HasPrefix(port, "branch-") && len(port) > len("branch-")
-	case AutomationNodeRegex, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
+	case AutomationNodeRegex, AutomationNodeExtractBetween, AutomationNodeKeywordReplace, AutomationNodeRegexReplace,
 		AutomationNodeConvert, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 		AutomationNodeDatetimeOperation, AutomationNodeCoalesce,
 		AutomationNodeDelay, AutomationNodeJoin,
 		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
-		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeHDHiveUnlock,
+		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer,
 		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 		AutomationNodeHTTPRequest, AutomationNodeNotification:
 		return port == "success" || port == "failure"
@@ -568,6 +560,30 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		}
 		if valueType := automationConfigString(config, "value_type"); valueType != "" && !isAutomationScalarValueType(valueType) {
 			return errors.New("正则输出类型必须是 string/integer/number/boolean/datetime")
+		}
+		if err := validateAutomationVariableWriterConfig(config); err != nil {
+			return err
+		}
+	case AutomationNodeExtractBetween:
+		if automationConfigString(config, "input") == "" || automationConfigString(config, "variable") == "" {
+			return errors.New("必须配置输入字段和输出变量")
+		}
+		startMarker := automationConfigRawString(config, "start_marker")
+		endMarker := automationConfigRawString(config, "end_marker")
+		if strings.TrimSpace(startMarker) == "" || strings.TrimSpace(endMarker) == "" {
+			return errors.New("前定位词和后定位词不能为空")
+		}
+		if len([]rune(startMarker)) > 200 || len([]rune(endMarker)) > 200 {
+			return errors.New("前定位词和后定位词不能超过 200 个字符")
+		}
+		valueType := strings.ToLower(automationConfigString(config, "value_type"))
+		if valueType == "" {
+			valueType = "string"
+		}
+		switch valueType {
+		case "string", "integer", "number", "boolean", "json", "array":
+		default:
+			return errors.New("区间提取类型必须是 string/integer/number/boolean/json/array")
 		}
 		if err := validateAutomationVariableWriterConfig(config); err != nil {
 			return err
@@ -865,17 +881,6 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		}
 		if automationConfigString(config, "tmdb_id") == "" {
 			return errors.New("必须配置 TMDB ID")
-		}
-	case AutomationNodeHDHiveQuery:
-		if automationConfigString(config, "tmdb_id") == "" {
-			return errors.New("必须配置 HDHive 查询使用的 TMDB ID")
-		}
-		if automationConfigString(config, "media_type") == "" {
-			return errors.New("必须配置 HDHive 查询使用的媒体类型")
-		}
-	case AutomationNodeHDHiveUnlock:
-		if automationConfigString(config, "slug") == "" {
-			return errors.New("必须配置待解锁资源 slug")
 		}
 	case AutomationNodeOrganizeStrm:
 		if automationConfigUint(config, "cloud_directory_id") == 0 {

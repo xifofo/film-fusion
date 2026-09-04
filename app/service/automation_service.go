@@ -123,7 +123,6 @@ type AutomationService struct {
 	monitor115  automation115MonitorLister
 	organizer   AutomationOrganizer
 	mediaStatus AutomationMediaStatusChecker
-	hdhive      AutomationHDHiveGateway
 	emby        AutomationEmbyClient
 
 	ctx           context.Context
@@ -140,6 +139,7 @@ type AutomationService struct {
 	executionCursorID uint
 	scanMu            sync.Mutex
 	scanning          map[uint]struct{}
+	manualRunMu       sync.Mutex
 }
 
 func NewAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService) *AutomationService {
@@ -695,6 +695,15 @@ func (s *AutomationService) createAutomationRuns(entry model.AutomationEntry) (i
 }
 
 func (s *AutomationService) createAutomationRun(workflow model.AutomationWorkflow, entry model.AutomationEntry, blockEarlierVersions bool) (model.AutomationRun, bool, error) {
+	return s.createAutomationRunWithTrigger(workflow, entry, blockEarlierVersions, model.AutomationRunTriggerEvent)
+}
+
+func (s *AutomationService) createAutomationRunWithTrigger(
+	workflow model.AutomationWorkflow,
+	entry model.AutomationEntry,
+	blockEarlierVersions bool,
+	triggerMode string,
+) (model.AutomationRun, bool, error) {
 	definition, err := ParseAutomationDefinition(workflow.DefinitionJSON)
 	if err != nil {
 		return model.AutomationRun{}, false, err
@@ -716,7 +725,8 @@ func (s *AutomationService) createAutomationRun(workflow model.AutomationWorkflo
 	now := time.Now()
 	run := model.AutomationRun{
 		WorkflowID: workflow.ID, WorkflowName: workflow.Name, WorkflowVersion: workflow.Version,
-		EntryID: entry.ID, DefinitionJSON: workflow.DefinitionJSON, ContextJSON: string(contextJSON),
+		EntryID: entry.ID, ExecutionNo: 1, TriggerMode: triggerMode,
+		DefinitionJSON: workflow.DefinitionJSON, ContextJSON: string(contextJSON),
 		Status: model.AutomationRunPending, StartedAt: &now,
 	}
 	created := false
@@ -1086,7 +1096,7 @@ func isAutomationActionNode(nodeType string) bool {
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle,
 		AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-		AutomationNodeHDHiveQuery, AutomationNodeHDHiveUnlock, AutomationNodeMoviePilotRecognize,
+		AutomationNodeMoviePilotRecognize,
 		AutomationNodeOrganizeStrm, AutomationNodeStrmVerify, AutomationNodeStrmRegenerate,
 		AutomationNodeEmbyRefreshWait, AutomationNodeHTTPRequest, AutomationNodeNotification:
 		return true

@@ -22,7 +22,6 @@ type Server struct {
 	gin                     *gin.Engine
 	http                    *http.Server
 	tokenRefreshService     *service.TokenRefreshService
-	hdhiveRefreshService    *service.HDHiveTokenRefreshService
 	web115KeepAliveService  *service.Web115KeepAliveService
 	download115Service      *service.Download115Service
 	moviePilotService       *service.MoviePilotService
@@ -93,7 +92,6 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		Config:                  cfg,
 		Logger:                  log,
 		tokenRefreshService:     service.NewTokenRefreshService(log),
-		hdhiveRefreshService:    service.NewHDHiveTokenRefreshService(cfg, log),
 		web115KeepAliveService:  service.NewWeb115KeepAliveService(cfg, log, notificationService),
 		download115Service:      download115Service,
 		moviePilotService:       moviePilotService,
@@ -145,9 +143,6 @@ func (s *Server) Start() error {
 	// 启动令牌刷新服务
 	s.tokenRefreshService.Start()
 
-	// 启动 HDHive Token 自动刷新服务
-	s.hdhiveRefreshService.Start()
-
 	// 启动 115 cookie 保活服务
 	s.web115KeepAliveService.Start()
 
@@ -196,9 +191,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	// 停止令牌刷新服务
 	s.tokenRefreshService.Stop()
-
-	// 停止 HDHive Token 自动刷新服务
-	s.hdhiveRefreshService.Stop()
 
 	// 停止 115 cookie 保活服务
 	s.web115KeepAliveService.Stop()
@@ -307,8 +299,6 @@ func (s *Server) setupRoutes() {
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
-	hdhiveHandler := handler.NewHDHiveHandler(s.Config, s.Logger, s.hdhiveRefreshService)
-	s.automationService.SetHDHiveGateway(hdhiveHandler)
 	organizeLogHandler := handler.NewOrganizeLogHandler()
 	logHandler := handler.NewLogHandler()
 	systemInfoHandler := handler.NewSystemInfoHandler(service.NewSystemInfoCollector())
@@ -385,9 +375,11 @@ func (s *Server) setupRoutes() {
 			automation.DELETE("/targets/:id", automationHandler.DeleteTarget)
 			automation.POST("/targets/:id/test", automationHandler.TestTarget)
 			automation.GET("/entries", automationHandler.ListEntries)
+			automation.POST("/entries/:id/run", automationHandler.RunEntry)
 			automation.GET("/runs", automationHandler.ListRuns)
 			automation.GET("/runs/:id", automationHandler.GetRun)
 			automation.POST("/runs/:id/retry", automationHandler.RetryRun)
+			automation.POST("/runs/:id/repeat", automationHandler.RepeatRun)
 			automation.POST("/runs/:id/cancel", automationHandler.CancelRun)
 		}
 
@@ -559,20 +551,6 @@ func (s *Server) setupRoutes() {
 		{
 			logs.GET("", logHandler.GetLogs)
 			logs.GET("/files", logHandler.ListFiles)
-		}
-
-		// HDHive OpenAPI 代理。凭证来自 config.yaml，避免在前端暴露应用 Secret。
-		hdhive := protected.Group("/hdhive")
-		{
-			hdhive.GET("/oauth/authorize-url", hdhiveHandler.AuthorizeURL)
-			hdhive.POST("/oauth/exchange", hdhiveHandler.ExchangeToken)
-			hdhive.POST("/oauth/refresh", hdhiveHandler.RefreshToken)
-			hdhive.GET("/ping", hdhiveHandler.Ping)
-			hdhive.GET("/quota", hdhiveHandler.Quota)
-			hdhive.GET("/usage/today", hdhiveHandler.UsageToday)
-			hdhive.GET("/me", hdhiveHandler.Me)
-			hdhive.GET("/resources/:type/:tmdb_id", hdhiveHandler.QueryResources)
-			hdhive.POST("/resources/unlock", hdhiveHandler.UnlockResources)
 		}
 
 		// Pickcode 缓存相关路由

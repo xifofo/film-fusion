@@ -512,42 +512,7 @@ func TestValidateAutomationDefinitionRejectsInvalidFilmFusionRecognitionConfig(t
 	}
 }
 
-func TestValidateAutomationDefinitionAcceptsSuggestedQBitMediaChain(t *testing.T) {
-	definition := AutomationDefinition{
-		SchemaVersion: AutomationSchemaVersion,
-		Nodes: []AutomationNode{
-			{ID: "trigger", Type: AutomationNodeTrigger},
-			{ID: "mp_title", Type: AutomationNodeMoviePilotTitle, Config: map[string]any{"input": "$item.title"}},
-			{ID: "dedupe", Type: AutomationNodeMediaExists, Config: map[string]any{
-				"cloud_directory_id": 1, "tmdb_id": "{{nodes.mp_title.output.tmdb_id}}",
-			}},
-			{ID: "query", Type: AutomationNodeHDHiveQuery, Config: map[string]any{
-				"tmdb_id": "{{nodes.mp_title.output.tmdb_id}}", "media_type": "{{nodes.mp_title.output.media_type}}",
-			}},
-			{ID: "unlock", Type: AutomationNodeHDHiveUnlock, Config: map[string]any{"slug": "{{nodes.query.output.selected_slug}}"}},
-			{ID: "qb", Type: AutomationNodeQBittorrent, Config: map[string]any{
-				"target_id": 1, "url": "{{nodes.unlock.output.download_url}}",
-			}},
-			{ID: "wait_qb", Type: AutomationNodeWaitQBittorrent, Config: map[string]any{"poll_interval_seconds": 30}},
-			{ID: "mp_transfer", Type: AutomationNodeMoviePilotTransfer, Config: map[string]any{"file_type": "auto", "media_type": "auto"}},
-			{ID: "delete_qb", Type: AutomationNodeDeleteQBittorrent, Config: map[string]any{"delete_files": false}},
-			{ID: "end", Type: AutomationNodeEnd},
-		},
-		Edges: []AutomationEdge{
-			{ID: "e1", Source: "trigger", SourcePort: "next", Target: "mp_title"},
-			{ID: "e2", Source: "mp_title", SourcePort: "success", Target: "dedupe"},
-			{ID: "e3", Source: "dedupe", SourcePort: "missing", Target: "query"},
-			{ID: "e4", Source: "query", SourcePort: "found", Target: "unlock"},
-			{ID: "e5", Source: "unlock", SourcePort: "success", Target: "qb"},
-			{ID: "e6", Source: "qb", SourcePort: "success", Target: "wait_qb"},
-			{ID: "e7", Source: "wait_qb", SourcePort: "success", Target: "mp_transfer"},
-			{ID: "e8", Source: "mp_transfer", SourcePort: "success", Target: "delete_qb"},
-			{ID: "e9", Source: "delete_qb", SourcePort: "success", Target: "end"},
-		},
-	}
-	if result := ValidateAutomationDefinition(definition); !result.Valid {
-		t.Fatalf("suggested qB media chain invalid: %#v", result.Errors)
-	}
+func TestValidateAutomationDefinitionRejectsUnsafeQBitFileDeletion(t *testing.T) {
 	unsafeDelete := AutomationDefinition{
 		SchemaVersion: AutomationSchemaVersion,
 		Nodes: []AutomationNode{

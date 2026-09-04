@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"reflect"
@@ -26,7 +27,7 @@ func TestAutomationVariableNameValidation(t *testing.T) {
 
 func TestAutomationVariableNodesAreNonRetryableAndExposeStandardPorts(t *testing.T) {
 	for _, nodeType := range []string{
-		AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
+		AutomationNodeExtractBetween, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 	} {
 		if !isAutomationNonRetryableNode(nodeType) || automationNodeMaxAttempts(AutomationNode{Type: nodeType}) != 1 {
 			t.Errorf("%s should be non-retryable", nodeType)
@@ -35,6 +36,95 @@ func TestAutomationVariableNodesAreNonRetryableAndExposeStandardPorts(t *testing
 			if !isAutomationSourcePortValid(nodeType, port) {
 				t.Errorf("%s missing %s port", nodeType, port)
 			}
+		}
+	}
+}
+
+func TestExecuteAutomationExtractBetweenConvertsAndWritesValues(t *testing.T) {
+	runContext := map[string]any{
+		"item": map[string]any{"title": "动画[ 42 ]集"},
+		"vars": map[string]any{},
+	}
+	node := AutomationNode{Type: AutomationNodeExtractBetween, Config: map[string]any{
+		"input": "$item.title", "start_marker": "[", "end_marker": "]",
+		"value_type": "integer", "variable": "episode", "overwrite": "overwrite",
+	}}
+	output, err := (&AutomationService{}).executeAutomationNode(
+		context.Background(), model.AutomationRun{}, model.AutomationNodeRun{}, node, AutomationDefinition{}, runContext,
+	)
+	if err != nil || output["selected_port"] != "success" || output["found"] != true {
+		t.Fatalf("extract between output = %#v, err = %v", output, err)
+	}
+	if output["raw_result"] != " 42 " || output["result"] != int64(42) {
+		t.Fatalf("extract between values = %#v", output)
+	}
+	if output["variables"].(map[string]any)["episode"] != int64(42) {
+		t.Fatalf("extract between variable = %#v", output["variables"])
+	}
+
+	node.Config = map[string]any{
+		"input": `before[ ["first", 2] ]after`, "start_marker": "[ ", "end_marker": " ]",
+		"value_type": "array", "variable": "items", "overwrite": "overwrite",
+	}
+	arrayOutput, _ := executeAutomationExtractBetweenNode(node, runContext)
+	if arrayOutput["selected_port"] != "success" || !reflect.DeepEqual(
+		arrayOutput["result"], []any{"first", json.Number("2")},
+	) {
+		t.Fatalf("extract between array output = %#v", arrayOutput)
+	}
+
+	node.Config = map[string]any{
+		"input": `before<{"enabled":true}>after`, "start_marker": "<", "end_marker": ">",
+		"value_type": "json", "variable": "metadata", "overwrite": "overwrite",
+	}
+	jsonOutput, _ := executeAutomationExtractBetweenNode(node, runContext)
+	metadata, ok := jsonOutput["result"].(map[string]any)
+	if jsonOutput["selected_port"] != "success" || !ok || metadata["enabled"] != true {
+		t.Fatalf("extract between JSON output = %#v", jsonOutput)
+	}
+}
+
+func TestExecuteAutomationExtractBetweenReportsLocatorAndConversionFailures(t *testing.T) {
+	runContext := map[string]any{"vars": map[string]any{}}
+	node := AutomationNode{Type: AutomationNodeExtractBetween, Config: map[string]any{
+		"input": "prefix[value", "start_marker": "[", "end_marker": "]",
+		"value_type": "string", "variable": "result",
+	}}
+	missingEnd, _ := executeAutomationExtractBetweenNode(node, runContext)
+	if missingEnd["selected_port"] != "failure" || missingEnd["found"] != false ||
+		!strings.Contains(missingEnd["reason"].(string), "后定位词") {
+		t.Fatalf("missing end output = %#v", missingEnd)
+	}
+
+	node.Config["input"] = "prefix[not-a-number]suffix"
+	node.Config["value_type"] = "integer"
+	invalidType, _ := executeAutomationExtractBetweenNode(node, runContext)
+	if invalidType["selected_port"] != "failure" || invalidType["found"] != true ||
+		invalidType["raw_result"] != "not-a-number" || len(invalidType["variables"].(map[string]any)) != 0 {
+		t.Fatalf("invalid conversion output = %#v", invalidType)
+	}
+}
+
+func TestValidateAutomationExtractBetweenConfig(t *testing.T) {
+	valid := AutomationNode{Type: AutomationNodeExtractBetween, Config: map[string]any{
+		"input": "$item.title", "start_marker": "[", "end_marker": "]",
+		"value_type": "array", "variable": "items", "overwrite": "overwrite",
+	}}
+	if err := validateAutomationNodeConfig(valid); err != nil {
+		t.Fatalf("valid extract between config rejected: %v", err)
+	}
+	for _, port := range []string{"success", "failure", "always"} {
+		if !isAutomationSourcePortValid(AutomationNodeExtractBetween, port) {
+			t.Errorf("extract between missing %s port", port)
+		}
+	}
+
+	for _, config := range []map[string]any{
+		{"input": "$item.title", "start_marker": "", "end_marker": "]", "value_type": "string", "variable": "result"},
+		{"input": "$item.title", "start_marker": "[", "end_marker": "]", "value_type": "object", "variable": "result"},
+	} {
+		if err := validateAutomationNodeConfig(AutomationNode{Type: AutomationNodeExtractBetween, Config: config}); err == nil {
+			t.Errorf("invalid extract between config accepted: %#v", config)
 		}
 	}
 }

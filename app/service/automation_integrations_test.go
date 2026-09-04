@@ -25,25 +25,6 @@ func (s *stubAutomationMediaStatusChecker) CheckAutomationMediaStatus(_ context.
 	return s.status, nil
 }
 
-type stubAutomationHDHiveGateway struct {
-	queryMediaType string
-	queryTMDBID    string
-	unlockSlug     string
-	resources      []AutomationHDHiveResource
-	unlock         AutomationHDHiveUnlockResult
-}
-
-func (s *stubAutomationHDHiveGateway) QueryAutomationHDHive(_ context.Context, mediaType, tmdbID string) ([]AutomationHDHiveResource, error) {
-	s.queryMediaType = mediaType
-	s.queryTMDBID = tmdbID
-	return s.resources, nil
-}
-
-func (s *stubAutomationHDHiveGateway) UnlockAutomationHDHive(_ context.Context, slug string) (AutomationHDHiveUnlockResult, error) {
-	s.unlockSlug = slug
-	return s.unlock, nil
-}
-
 type stubAutomationEmbyClient struct {
 	refreshCalls int
 	findCalls    int
@@ -106,44 +87,6 @@ func TestAutomationMediaExistsAcceptsTemplatesAndRoutesExisting(t *testing.T) {
 	}
 	if checker.request.UserID != 7 || checker.request.TmdbID != "1396" || checker.request.MediaType != "tv" {
 		t.Fatalf("unexpected media status request: %#v", checker.request)
-	}
-}
-
-func TestAutomationHDHiveQueryFiltersAndUnlocksSelectedResource(t *testing.T) {
-	gateway := &stubAutomationHDHiveGateway{
-		resources: []AutomationHDHiveResource{
-			{Slug: "locked", Title: "4K locked", PanType: "115", VideoResolution: []string{"2160p"}},
-			{Slug: "owned", Title: "4K owned", PanType: "115", VideoResolution: []string{"2160P HDR"}, IsUnlocked: true},
-			{Slug: "other", Title: "other pan", PanType: "aliyun", VideoResolution: []string{"2160p"}},
-		},
-		unlock: AutomationHDHiveUnlockResult{URL: "https://115.com/s/demo", AccessCode: "abcd", FullURL: "https://115.com/s/demo?password=abcd", AlreadyOwned: true},
-	}
-	automation := &AutomationService{hdhive: gateway}
-	output, err := automation.executeAutomationHDHiveQuery(context.Background(), AutomationNode{
-		Type: AutomationNodeHDHiveQuery,
-		Config: map[string]any{
-			"tmdb_id": "1396", "media_type": "tv", "resolution": "2160p", "pan_type": "115",
-		},
-	}, map[string]any{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gateway.queryMediaType != "tv" || gateway.queryTMDBID != "1396" {
-		t.Fatalf("query arguments = %q, %q", gateway.queryMediaType, gateway.queryTMDBID)
-	}
-	if output["selected_port"] != "found" || output["resource_count"] != 2 || output["selected_slug"] != "owned" {
-		t.Fatalf("unexpected query output: %#v", output)
-	}
-
-	unlockOutput, err := automation.executeAutomationHDHiveUnlock(context.Background(), AutomationNode{
-		Type:   AutomationNodeHDHiveUnlock,
-		Config: map[string]any{"slug": "{{nodes.query.output.selected_slug}}"},
-	}, automationTestRunContext("query", output))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gateway.unlockSlug != "owned" || unlockOutput["download_url"] != gateway.unlock.FullURL || unlockOutput["selected_port"] != "success" {
-		t.Fatalf("unexpected unlock output: %#v", unlockOutput)
 	}
 }
 

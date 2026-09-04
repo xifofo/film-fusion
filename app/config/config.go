@@ -24,7 +24,6 @@ type Config struct {
 	Telegram   TelegramConfig   `mapstructure:"telegram" json:"telegram"`
 	MoviePilot MoviePilotConfig `mapstructure:"moviepilot" json:"moviepilot"`
 	TMDB       TMDBConfig       `mapstructure:"tmdb" json:"tmdb"`
-	HDHive     HDHiveConfig     `mapstructure:"hdhive" json:"hdhive"`
 }
 
 const (
@@ -294,23 +293,6 @@ type TMDBConfig struct {
 	CacheMinutes   int    `mapstructure:"cache_minutes" json:"cache_minutes"`     // 元数据缓存时间（分钟）
 }
 
-type HDHiveConfig struct {
-	Enabled               bool   `mapstructure:"enabled" json:"enabled"`                                   // 是否启用 HDHive OpenAPI
-	BaseURL               string `mapstructure:"base_url" json:"base_url"`                                 // HDHive 服务地址
-	ClientID              string `mapstructure:"client_id" json:"client_id"`                               // OpenAPI 应用公开 ID
-	RedirectURI           string `mapstructure:"redirect_uri" json:"redirect_uri"`                         // OAuth 回调地址
-	Scope                 string `mapstructure:"scope" json:"scope"`                                       // OAuth 授权 scope
-	APIKey                string `mapstructure:"api_key" json:"api_key"`                                   // 应用 Secret，用于 X-API-Key
-	AccessToken           string `mapstructure:"access_token" json:"access_token"`                         // 用户 Access Token
-	RefreshToken          string `mapstructure:"refresh_token" json:"refresh_token"`                       // 用户 Refresh Token
-	AccessTokenExpiresAt  string `mapstructure:"access_token_expires_at" json:"access_token_expires_at"`   // Access Token 过期时间（RFC3339）
-	RefreshTokenExpiresAt string `mapstructure:"refresh_token_expires_at" json:"refresh_token_expires_at"` // Refresh Token 过期时间（RFC3339）
-	AutoRefresh           bool   `mapstructure:"auto_refresh" json:"auto_refresh"`                         // 是否自动刷新 Access Token
-	RefreshBeforeMinutes  int    `mapstructure:"refresh_before_minutes" json:"refresh_before_minutes"`     // 过期前多少分钟刷新
-	RefreshCheckMinutes   int    `mapstructure:"refresh_check_minutes" json:"refresh_check_minutes"`       // 自动刷新检查间隔
-	TimeoutSeconds        int    `mapstructure:"timeout_seconds" json:"timeout_seconds"`                   // 请求超时时间（秒）
-}
-
 func Load() *Config {
 	setDefaults()
 
@@ -457,21 +439,6 @@ func Save(c *Config) error {
 	viper.Set("tmdb.timeout_seconds", c.TMDB.TimeoutSeconds)
 	viper.Set("tmdb.cache_minutes", c.TMDB.CacheMinutes)
 
-	viper.Set("hdhive.enabled", c.HDHive.Enabled)
-	viper.Set("hdhive.base_url", c.HDHive.BaseURL)
-	viper.Set("hdhive.client_id", c.HDHive.ClientID)
-	viper.Set("hdhive.redirect_uri", c.HDHive.RedirectURI)
-	viper.Set("hdhive.scope", c.HDHive.Scope)
-	viper.Set("hdhive.api_key", c.HDHive.APIKey)
-	viper.Set("hdhive.access_token", c.HDHive.AccessToken)
-	viper.Set("hdhive.refresh_token", c.HDHive.RefreshToken)
-	viper.Set("hdhive.access_token_expires_at", c.HDHive.AccessTokenExpiresAt)
-	viper.Set("hdhive.refresh_token_expires_at", c.HDHive.RefreshTokenExpiresAt)
-	viper.Set("hdhive.auto_refresh", c.HDHive.AutoRefresh)
-	viper.Set("hdhive.refresh_before_minutes", c.HDHive.RefreshBeforeMinutes)
-	viper.Set("hdhive.refresh_check_minutes", c.HDHive.RefreshCheckMinutes)
-	viper.Set("hdhive.timeout_seconds", c.HDHive.TimeoutSeconds)
-
 	if err := viper.WriteConfig(); err != nil {
 		// 配置文件不存在时回退到显式路径写入
 		path := viper.ConfigFileUsed()
@@ -551,22 +518,6 @@ func setDefaults() {
 	viper.SetDefault("tmdb.access_token", "")
 	viper.SetDefault("tmdb.timeout_seconds", 10)
 	viper.SetDefault("tmdb.cache_minutes", 60)
-
-	// HDHive 默认配置
-	viper.SetDefault("hdhive.enabled", false)
-	viper.SetDefault("hdhive.base_url", "https://hdhive.com")
-	viper.SetDefault("hdhive.client_id", "")
-	viper.SetDefault("hdhive.redirect_uri", "")
-	viper.SetDefault("hdhive.scope", "query unlock")
-	viper.SetDefault("hdhive.api_key", "")
-	viper.SetDefault("hdhive.access_token", "")
-	viper.SetDefault("hdhive.refresh_token", "")
-	viper.SetDefault("hdhive.access_token_expires_at", "")
-	viper.SetDefault("hdhive.refresh_token_expires_at", "")
-	viper.SetDefault("hdhive.auto_refresh", true)
-	viper.SetDefault("hdhive.refresh_before_minutes", 15)
-	viper.SetDefault("hdhive.refresh_check_minutes", 10)
-	viper.SetDefault("hdhive.timeout_seconds", 30)
 
 	// 日志默认配置
 	viper.SetDefault("log.level", "info")

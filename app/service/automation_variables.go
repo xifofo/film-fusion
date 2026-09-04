@@ -259,7 +259,7 @@ func automationConfigOptionalInt(config map[string]any, key string) (int, bool, 
 
 func automationVariableProducerName(node AutomationNode) (string, bool) {
 	switch node.Type {
-	case AutomationNodeRegex, AutomationNodeKeywordReplace, AutomationNodeRegexReplace, AutomationNodeConvert,
+	case AutomationNodeRegex, AutomationNodeExtractBetween, AutomationNodeKeywordReplace, AutomationNodeRegexReplace, AutomationNodeConvert,
 		AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 		AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeCoalesce, AutomationNodeForeach:
 		name, err := automationVariableName(node.Config)
@@ -731,6 +731,57 @@ func executeAutomationSetVariableNode(node AutomationNode, runContext map[string
 		return automationVariableFailure(output, err), nil
 	}
 	return automationVariableWrite(output, runContext, node.Config, value), nil
+}
+
+func convertAutomationExtractBetweenValue(value, valueType string) (any, error) {
+	valueType = strings.ToLower(strings.TrimSpace(valueType))
+	if valueType == "" {
+		valueType = "string"
+	}
+	if valueType != "array" {
+		return convertAutomationVariableValue(value, valueType)
+	}
+	converted, err := convertAutomationVariableValue(value, "json")
+	if err != nil {
+		return nil, err
+	}
+	items, ok := converted.([]any)
+	if !ok {
+		return nil, errors.New("截取结果不是 JSON 数组")
+	}
+	return items, nil
+}
+
+func executeAutomationExtractBetweenNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {
+	inputValue, _, _, err := resolveAutomationVariableValue(runContext, node.Config["input"])
+	output := map[string]any{"found": false}
+	if err != nil {
+		return automationVariableFailure(output, err), nil
+	}
+	input := automationVariableString(inputValue)
+	startMarker := automationConfigRawString(node.Config, "start_marker")
+	endMarker := automationConfigRawString(node.Config, "end_marker")
+	if strings.TrimSpace(startMarker) == "" || strings.TrimSpace(endMarker) == "" {
+		return automationVariableFailure(output, errors.New("前定位词和后定位词不能为空")), nil
+	}
+	startIndex := strings.Index(input, startMarker)
+	if startIndex < 0 {
+		return automationVariableFailure(output, fmt.Errorf("没有找到前定位词 %q", startMarker)), nil
+	}
+	contentStart := startIndex + len(startMarker)
+	endOffset := strings.Index(input[contentStart:], endMarker)
+	if endOffset < 0 {
+		return automationVariableFailure(output, fmt.Errorf("前定位词之后没有找到后定位词 %q", endMarker)), nil
+	}
+	rawResult := input[contentStart : contentStart+endOffset]
+	output["found"] = true
+	output["raw_result"] = rawResult
+	result, err := convertAutomationExtractBetweenValue(rawResult, automationConfigString(node.Config, "value_type"))
+	if err != nil {
+		return automationVariableFailure(output, err), nil
+	}
+	output["result"] = result
+	return automationVariableWrite(output, runContext, node.Config, result), nil
 }
 
 func executeAutomationTemplateNode(node AutomationNode, runContext map[string]any) (map[string]any, error) {

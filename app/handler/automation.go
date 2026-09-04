@@ -294,6 +294,18 @@ func (h *AutomationHandler) ListEntries(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("获取自动化事件成功", result))
 }
 
+func (h *AutomationHandler) RunEntry(c *gin.Context) {
+	id, ok := automationID(c, "自动化条目")
+	if !ok {
+		return
+	}
+	run, err := h.service.RunEntry(id)
+	if respondAutomationError(c, err, "手动执行存量基线失败") {
+		return
+	}
+	c.JSON(http.StatusCreated, NewSuccessResponse("已创建手动运行", run))
+}
+
 func (h *AutomationHandler) GetRun(c *gin.Context) {
 	id, ok := automationID(c, "运行记录")
 	if !ok {
@@ -316,6 +328,18 @@ func (h *AutomationHandler) RetryRun(c *gin.Context) {
 	}
 	h.service.Wake()
 	c.JSON(http.StatusOK, NewSuccessResponse("流程已进入重试队列", gin.H{}))
+}
+
+func (h *AutomationHandler) RepeatRun(c *gin.Context) {
+	id, ok := automationID(c, "运行记录")
+	if !ok {
+		return
+	}
+	repeated, err := h.service.RepeatRun(id)
+	if respondAutomationError(c, err, "重新运行流程失败") {
+		return
+	}
+	c.JSON(http.StatusCreated, NewSuccessResponse("已创建新的运行记录", repeated))
 }
 
 func (h *AutomationHandler) CancelRun(c *gin.Context) {

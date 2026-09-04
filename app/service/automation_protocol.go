@@ -75,6 +75,17 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("captured", "string", "捕获内容", "指定捕获组的原始文本。", "12"),
 		automationVariable("variables", "object", "生成变量", "写入 $vars.* 的变量对象。", map[string]any{"episode": 12}),
 	}},
+	{Type: AutomationNodeExtractBetween, Label: "文本区间提取", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("input", "string", "输入文本", "从事件字段或上游变量中读取的原始文本。", "$item.title", true),
+		automationVariable("start_marker", "string", "前定位词", "从首次出现的前定位词之后开始截取。", "["),
+		automationVariable("end_marker", "string", "后定位词", "截取到前定位词之后首次出现的后定位词之前。", "]"),
+		automationVariable("value_type", "string", "输出类型", "string、integer、number、boolean、json 或 array。", "string"),
+		automationVariable("variable", "string", "输出变量", "截取并转换后写入的 $vars.* 变量名。", "extracted_value"),
+	}, Outputs: append([]AutomationVariableProtocol{
+		automationVariable("found", "boolean", "定位成功", "是否同时找到前定位词及其后的后定位词。", true),
+		automationVariable("raw_result", "string", "原始截取值", "两个定位词之间未经类型转换的文本。", "42"),
+		automationVariable("result", "any", "转换结果", "按输出类型转换后的最终值。", 42),
+	}, automationVariableWriterProtocolOutputs("变量值", "最终写入流程变量的区间提取结果。", 42)...)},
 	{Type: AutomationNodeRegexReplace, Label: "正则替换", Inputs: []AutomationVariableProtocol{
 		automationTemplateVariable("input", "string", "输入字段", "要执行正则全局替换的 事件字段或上游变量。", "$item.title", true),
 	}, Outputs: []AutomationVariableProtocol{
@@ -346,28 +357,6 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("emby_item_id", "string", "Emby 项目 ID", "匹配到的 Emby Item ID。", "12345"),
 		automationVariable("emby_url", "string", "Emby 页面", "匹配项目的 Emby Web 地址。", "https://emby.example/web/index.html#!/item?id=12345"),
 		automationVariable("existing_seasons", "array", "已有季", "本地已存在的季度目录。", []string{"Season 01"}),
-	}},
-	{Type: AutomationNodeHDHiveQuery, Label: "HDHive 资源查询", Inputs: []AutomationVariableProtocol{
-		automationTemplateVariable("tmdb_id", "string", "TMDB ID", "查询 HDHive 资源使用的 TMDB ID。", "{{nodes.mp_title.output.tmdb_id}}", true),
-		automationTemplateVariable("media_type", "string", "媒体类型", "查询类型 movie 或 tv。", "{{nodes.mp_title.output.media_type}}", true),
-		automationTemplateVariable("resolution", "string", "分辨率筛选", "可选的分辨率关键词。", "2160p", false),
-		automationTemplateVariable("pan_type", "string", "网盘类型筛选", "可选的网盘类型。", "115", false),
-	}, Outputs: []AutomationVariableProtocol{
-		automationVariable("resource_count", "integer", "资源数量", "筛选后可用的资源数量。", 3),
-		automationVariable("selected_slug", "string", "首选资源 slug", "自动选择的首个资源标识。", "example-resource"),
-		automationVariable("selected_title", "string", "首选资源标题", "自动选择的资源标题。", "Example 2160p"),
-		automationVariable("selected_size", "string", "首选资源大小", "HDHive 返回的资源大小文本。", "12.5 GB"),
-		automationVariable("selected_resolution", "array", "首选分辨率", "首选资源包含的分辨率标签。", []string{"2160p"}),
-		automationVariable("is_unlocked", "boolean", "是否已解锁", "首选资源是否已经解锁。", false),
-		automationVariable("resources", "array", "资源列表", "筛选后的 HDHive 资源详情。", []any{}),
-	}},
-	{Type: AutomationNodeHDHiveUnlock, Label: "HDHive 资源解锁", Inputs: []AutomationVariableProtocol{
-		automationTemplateVariable("slug", "string", "资源 slug", "需要解锁的 HDHive 资源标识。", "{{nodes.hdhive_query.output.selected_slug}}", true),
-	}, Outputs: []AutomationVariableProtocol{
-		automationVariable("download_url", "string", "下载地址", "可直接交给下载节点的完整资源地址。", "https://115.com/s/example?password=abcd"),
-		automationVariable("url", "string", "资源地址", "HDHive 返回的原始地址。", "https://115.com/s/example"),
-		automationVariable("access_code", "string", "访问码", "资源访问码。", "abcd"),
-		automationVariable("already_owned", "boolean", "已拥有", "此前是否已经解锁过该资源。", true),
 	}},
 	{Type: AutomationNodeMoviePilotRecognize, Label: "MP2 / 影子识别", Inputs: automationRecognitionInputs(""), Outputs: append(automationRecognitionOutputs(),
 		automationVariable("requested_tmdb_id", "string", "辅助 TMDB ID", "本次识别实际使用的辅助 TMDB ID；留空自动识别时为空。", "1396"),

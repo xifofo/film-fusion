@@ -110,9 +110,6 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 		"notifications.telegram.bot_token": h.cfg.Notifications.Telegram.BotToken != "",
 		"notifications.webhook.token":      h.cfg.Notifications.Webhook.Token != "",
 		"telegram.bot_token":               h.cfg.Notifications.Telegram.BotToken != "",
-		"hdhive.api_key":                   h.cfg.HDHive.APIKey != "",
-		"hdhive.access_token":              h.cfg.HDHive.AccessToken != "",
-		"hdhive.refresh_token":             h.cfg.HDHive.RefreshToken != "",
 	}
 	v.Server.Password = ""
 	v.Webhook.CloudDrive2.Token = ""
@@ -123,9 +120,6 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 	v.Notifications.Telegram.BotToken = ""
 	v.Notifications.Webhook.Token = ""
 	v.Telegram.BotToken = ""
-	v.HDHive.APIKey = ""
-	v.HDHive.AccessToken = ""
-	v.HDHive.RefreshToken = ""
 
 	h.success(c, gin.H{"config": v, "secrets": secrets}, "获取配置成功")
 }
@@ -244,33 +238,6 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 	}
 	config.NormalizeNotificationConfig(&in.Notifications)
 	in.Telegram = config.LegacyTelegramFromNotifications(in.Notifications)
-	if strings.TrimSpace(in.HDHive.APIKey) == "" {
-		in.HDHive.APIKey = h.cfg.HDHive.APIKey
-	}
-	if strings.TrimSpace(in.HDHive.AccessToken) == "" {
-		in.HDHive.AccessToken = h.cfg.HDHive.AccessToken
-	}
-	if strings.TrimSpace(in.HDHive.RefreshToken) == "" {
-		in.HDHive.RefreshToken = h.cfg.HDHive.RefreshToken
-	}
-	if strings.TrimSpace(in.HDHive.AccessTokenExpiresAt) == "" {
-		in.HDHive.AccessTokenExpiresAt = h.cfg.HDHive.AccessTokenExpiresAt
-	}
-	if strings.TrimSpace(in.HDHive.RefreshTokenExpiresAt) == "" {
-		in.HDHive.RefreshTokenExpiresAt = h.cfg.HDHive.RefreshTokenExpiresAt
-	}
-	if in.HDHive.RefreshBeforeMinutes <= 0 {
-		in.HDHive.RefreshBeforeMinutes = h.cfg.HDHive.RefreshBeforeMinutes
-		if in.HDHive.RefreshBeforeMinutes <= 0 {
-			in.HDHive.RefreshBeforeMinutes = 15
-		}
-	}
-	if in.HDHive.RefreshCheckMinutes <= 0 {
-		in.HDHive.RefreshCheckMinutes = h.cfg.HDHive.RefreshCheckMinutes
-		if in.HDHive.RefreshCheckMinutes <= 0 {
-			in.HDHive.RefreshCheckMinutes = 10
-		}
-	}
 	// 基本校验
 	if strings.TrimSpace(in.Server.Port) == "" {
 		h.error(c, http.StatusBadRequest, 400, "服务器端口不能为空")

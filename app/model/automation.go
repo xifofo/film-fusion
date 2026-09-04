@@ -7,12 +7,14 @@ const (
 	AutomationTriggerRSS          = "rss"
 	AutomationTargetQBittorrent   = "qbittorrent"
 
-	AutomationRunPending   = "pending"
-	AutomationRunRunning   = "running"
-	AutomationRunSucceeded = "succeeded"
-	AutomationRunPartial   = "partial"
-	AutomationRunFailed    = "failed"
-	AutomationRunCancelled = "cancelled"
+	AutomationRunPending       = "pending"
+	AutomationRunRunning       = "running"
+	AutomationRunSucceeded     = "succeeded"
+	AutomationRunPartial       = "partial"
+	AutomationRunFailed        = "failed"
+	AutomationRunCancelled     = "cancelled"
+	AutomationRunTriggerEvent  = "event"
+	AutomationRunTriggerManual = "manual"
 
 	AutomationNodePending   = "pending"
 	AutomationNodeRunning   = "running"
@@ -177,19 +179,22 @@ func (Automation115Candidate) TableName() string { return "automation_115_candid
 // AutomationRun snapshots the workflow definition so later edits cannot alter
 // an in-flight event.
 type AutomationRun struct {
-	ID              uint       `gorm:"primarykey" json:"id"`
-	WorkflowID      uint       `gorm:"not null;index;uniqueIndex:idx_automation_run_identity,priority:1" json:"workflow_id"`
-	WorkflowName    string     `gorm:"size:120;not null" json:"workflow_name"`
-	WorkflowVersion int        `gorm:"not null;uniqueIndex:idx_automation_run_identity,priority:2" json:"workflow_version"`
-	EntryID         uint       `gorm:"not null;index;uniqueIndex:idx_automation_run_identity,priority:3" json:"entry_id"`
-	DefinitionJSON  string     `gorm:"type:text;not null" json:"definition_json"`
-	ContextJSON     string     `gorm:"type:text;not null" json:"context_json"`
-	Status          string     `gorm:"size:24;not null;index" json:"status"`
-	ErrorMessage    string     `gorm:"type:text" json:"error_message,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                uint       `gorm:"primarykey" json:"id"`
+	WorkflowID        uint       `gorm:"not null;index;uniqueIndex:idx_automation_run_execution,priority:1" json:"workflow_id"`
+	WorkflowName      string     `gorm:"size:120;not null" json:"workflow_name"`
+	WorkflowVersion   int        `gorm:"not null;uniqueIndex:idx_automation_run_execution,priority:2" json:"workflow_version"`
+	EntryID           uint       `gorm:"not null;index;uniqueIndex:idx_automation_run_execution,priority:3" json:"entry_id"`
+	ExecutionNo       int        `gorm:"not null;default:1;uniqueIndex:idx_automation_run_execution,priority:4" json:"execution_no"`
+	TriggerMode       string     `gorm:"size:16;not null;default:event;index" json:"trigger_mode"`
+	RepeatedFromRunID *uint      `gorm:"index" json:"repeated_from_run_id,omitempty"`
+	DefinitionJSON    string     `gorm:"type:text;not null" json:"definition_json"`
+	ContextJSON       string     `gorm:"type:text;not null" json:"context_json"`
+	Status            string     `gorm:"size:24;not null;index" json:"status"`
+	ErrorMessage      string     `gorm:"type:text" json:"error_message,omitempty"`
+	StartedAt         *time.Time `json:"started_at,omitempty"`
+	CompletedAt       *time.Time `json:"completed_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 func (AutomationRun) TableName() string { return "automation_runs" }

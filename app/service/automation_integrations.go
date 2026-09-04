@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -45,31 +44,6 @@ type AutomationMediaStatusChecker interface {
 	CheckAutomationMediaStatus(context.Context, AutomationMediaStatusRequest) (AutomationMediaStatus, error)
 }
 
-type AutomationHDHiveResource struct {
-	Slug             string   `json:"slug"`
-	Title            string   `json:"title,omitempty"`
-	PanType          string   `json:"pan_type,omitempty"`
-	MediaURL         string   `json:"media_url,omitempty"`
-	ShareSize        string   `json:"share_size,omitempty"`
-	VideoResolution  []string `json:"video_resolution,omitempty"`
-	Source           []string `json:"source,omitempty"`
-	SubtitleLanguage []string `json:"subtitle_language,omitempty"`
-	UnlockPoints     int      `json:"unlock_points,omitempty"`
-	IsUnlocked       bool     `json:"is_unlocked"`
-}
-
-type AutomationHDHiveUnlockResult struct {
-	URL          string `json:"url"`
-	AccessCode   string `json:"access_code,omitempty"`
-	FullURL      string `json:"full_url,omitempty"`
-	AlreadyOwned bool   `json:"already_owned"`
-}
-
-type AutomationHDHiveGateway interface {
-	QueryAutomationHDHive(context.Context, string, string) ([]AutomationHDHiveResource, error)
-	UnlockAutomationHDHive(context.Context, string) (AutomationHDHiveUnlockResult, error)
-}
-
 type AutomationEmbyClient interface {
 	RefreshLibrary() (int, string, error)
 	FindItemByTmdbID(string, string) (*embyhelper.EmbyLookupItem, error)
@@ -84,12 +58,6 @@ type automationStrmArtifact struct {
 func (s *AutomationService) SetMediaStatusChecker(checker AutomationMediaStatusChecker) {
 	if s != nil {
 		s.mediaStatus = checker
-	}
-}
-
-func (s *AutomationService) SetHDHiveGateway(gateway AutomationHDHiveGateway) {
-	if s != nil {
-		s.hdhive = gateway
 	}
 }
 
@@ -160,100 +128,6 @@ func (s *AutomationService) executeAutomationMediaExists(ctx context.Context, no
 		output["selected_port"] = "missing"
 	}
 	return output, nil
-}
-
-func (s *AutomationService) executeAutomationHDHiveQuery(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
-	if s.hdhive == nil {
-		return nil, errors.New("HDHive 自动化服务未初始化")
-	}
-	resolve := func(key string, required bool) (string, error) {
-		configured := automationConfigString(node.Config, key)
-		if configured == "" && !required {
-			return "", nil
-		}
-		return resolveAutomationString(runContext, configured)
-	}
-	tmdbID, err := resolve("tmdb_id", true)
-	if err != nil {
-		return nil, err
-	}
-	if !automationTMDBIDPattern.MatchString(strings.TrimSpace(tmdbID)) {
-		return nil, errors.New("HDHive 查询需要有效的 TMDB ID")
-	}
-	mediaType, err := resolve("media_type", true)
-	if err != nil {
-		return nil, err
-	}
-	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
-	if mediaType != "movie" && mediaType != "tv" {
-		return nil, errors.New("HDHive 媒体类型必须是 movie 或 tv")
-	}
-	resolution, err := resolve("resolution", false)
-	if err != nil {
-		return nil, err
-	}
-	panType, err := resolve("pan_type", false)
-	if err != nil {
-		return nil, err
-	}
-	resources, err := s.hdhive.QueryAutomationHDHive(ctx, mediaType, strings.TrimSpace(tmdbID))
-	if err != nil {
-		return nil, err
-	}
-	filtered := make([]AutomationHDHiveResource, 0, len(resources))
-	for _, resource := range resources {
-		if strings.TrimSpace(resolution) != "" && !automationStringsContain(resource.VideoResolution, resolution) {
-			continue
-		}
-		if strings.TrimSpace(panType) != "" && !strings.EqualFold(strings.TrimSpace(resource.PanType), strings.TrimSpace(panType)) {
-			continue
-		}
-		filtered = append(filtered, resource)
-	}
-	// Prefer already-owned resources while retaining the provider's ranking.
-	sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].IsUnlocked && !filtered[j].IsUnlocked })
-	output := map[string]any{
-		"tmdb_id": strings.TrimSpace(tmdbID), "media_type": strings.TrimSpace(mediaType),
-		"resource_count": len(filtered), "resources": filtered,
-	}
-	if len(filtered) == 0 {
-		output["selected_port"] = "not_found"
-		return output, nil
-	}
-	selected := filtered[0]
-	output["selected_slug"] = selected.Slug
-	output["selected_title"] = selected.Title
-	output["selected_size"] = selected.ShareSize
-	output["selected_resolution"] = selected.VideoResolution
-	output["selected_source"] = selected.Source
-	output["selected_media_url"] = selected.MediaURL
-	output["unlock_points"] = selected.UnlockPoints
-	output["is_unlocked"] = selected.IsUnlocked
-	output["selected_port"] = "found"
-	return output, nil
-}
-
-func (s *AutomationService) executeAutomationHDHiveUnlock(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
-	if s.hdhive == nil {
-		return nil, errors.New("HDHive 自动化服务未初始化")
-	}
-	slug, err := resolveAutomationString(runContext, automationConfigString(node.Config, "slug"))
-	if err != nil {
-		return nil, err
-	}
-	result, err := s.hdhive.UnlockAutomationHDHive(ctx, strings.TrimSpace(slug))
-	if err != nil {
-		return nil, err
-	}
-	downloadURL := strings.TrimSpace(result.FullURL)
-	if downloadURL == "" {
-		downloadURL = strings.TrimSpace(result.URL)
-	}
-	return map[string]any{
-		"slug": strings.TrimSpace(slug), "url": result.URL, "access_code": result.AccessCode,
-		"full_url": result.FullURL, "download_url": downloadURL, "already_owned": result.AlreadyOwned,
-		"selected_port": "success",
-	}, nil
 }
 
 func (s *AutomationService) executeAutomationStrmVerify(ctx context.Context, node AutomationNode, definition AutomationDefinition, runContext map[string]any) (map[string]any, error) {

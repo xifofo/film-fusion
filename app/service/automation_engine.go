@@ -8,6 +8,7 @@ import (
 	"math"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -307,6 +308,8 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 		return executeAutomationDelay(nodeRun, node, time.Now())
 	case AutomationNodeRegex:
 		return executeAutomationRegexNode(node, runContext)
+	case AutomationNodeExtractBetween:
+		return executeAutomationExtractBetweenNode(node, runContext)
 	case AutomationNodeKeyword:
 		return executeAutomationKeywordNode(node, runContext)
 	case AutomationNodeKeywordReplace:
@@ -379,10 +382,6 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 		return s.executeAutomationFilmFusionRecognize(ctx, node, definition, runContext)
 	case AutomationNodeMediaExists:
 		return s.executeAutomationMediaExists(ctx, node, runContext)
-	case AutomationNodeHDHiveQuery:
-		return s.executeAutomationHDHiveQuery(ctx, node, runContext)
-	case AutomationNodeHDHiveUnlock:
-		return s.executeAutomationHDHiveUnlock(ctx, node, runContext)
 	case AutomationNodeMoviePilotRecognize:
 		return s.executeAutomationMoviePilotRecognize(ctx, node, definition, runContext)
 	case AutomationNodeOrganizeStrm:
@@ -1065,6 +1064,44 @@ func (s *AutomationService) GetRun(runID uint) (AutomationRunDetail, error) {
 	return detail, nil
 }
 
+// RunEntry manually creates the first run for a saved baseline entry using the
+// current workflow snapshot. Once an entry has run, RepeatRun is the explicit
+// path for further executions so every replay has a traceable source run.
+func (s *AutomationService) RunEntry(entryID uint) (model.AutomationRun, error) {
+	s.manualRunMu.Lock()
+	defer s.manualRunMu.Unlock()
+
+	var entry model.AutomationEntry
+	if err := s.db.First(&entry, entryID).Error; err != nil {
+		return model.AutomationRun{}, err
+	}
+	if !entry.Baseline {
+		return model.AutomationRun{}, errors.New("只有存量基线条目可以手动执行")
+	}
+	var workflow model.AutomationWorkflow
+	if err := s.db.Where("source_id = ?", entry.SourceID).First(&workflow).Error; err != nil {
+		return model.AutomationRun{}, err
+	}
+	var existing int64
+	if err := s.db.Model(&model.AutomationRun{}).
+		Where("workflow_id = ? AND entry_id = ?", workflow.ID, entry.ID).
+		Count(&existing).Error; err != nil {
+		return model.AutomationRun{}, err
+	}
+	if existing > 0 {
+		return model.AutomationRun{}, errors.New("这条基线已有运行记录，请在运行记录中使用重新运行")
+	}
+	run, created, err := s.createAutomationRunWithTrigger(workflow, entry, false, model.AutomationRunTriggerManual)
+	if err != nil {
+		return model.AutomationRun{}, err
+	}
+	if !created {
+		return model.AutomationRun{}, errors.New("这条基线已有运行记录，请刷新后在运行记录中重新运行")
+	}
+	s.wakeExecution()
+	return run, nil
+}
+
 func (s *AutomationService) RetryRun(runID uint) error {
 	var run model.AutomationRun
 	if err := s.db.First(&run, runID).Error; err != nil {
@@ -1114,6 +1151,84 @@ func (s *AutomationService) RetryRun(runID uint) error {
 		}
 		return nil
 	})
+}
+
+// RepeatRun creates an independent run from a terminal historical snapshot.
+// Unlike RetryRun it starts every node again and preserves the original run.
+func (s *AutomationService) RepeatRun(runID uint) (model.AutomationRun, error) {
+	s.manualRunMu.Lock()
+	defer s.manualRunMu.Unlock()
+
+	var original model.AutomationRun
+	if err := s.db.First(&original, runID).Error; err != nil {
+		return model.AutomationRun{}, err
+	}
+	terminalStatuses := []string{
+		model.AutomationRunSucceeded,
+		model.AutomationRunPartial,
+		model.AutomationRunFailed,
+		model.AutomationRunCancelled,
+	}
+	if !slices.Contains(terminalStatuses, original.Status) {
+		return model.AutomationRun{}, errors.New("只有已经结束的运行可以重新运行")
+	}
+	definition, err := ParseAutomationDefinition(original.DefinitionJSON)
+	if err != nil {
+		return model.AutomationRun{}, err
+	}
+	validation := ValidateAutomationDefinition(definition)
+	if !validation.Valid {
+		return model.AutomationRun{}, fmt.Errorf("历史流程无效: %s", strings.Join(validation.Errors, "; "))
+	}
+
+	var repeated model.AutomationRun
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var active int64
+		if err := tx.Model(&model.AutomationRun{}).
+			Where("workflow_id = ? AND entry_id = ? AND status IN ?", original.WorkflowID, original.EntryID, []string{model.AutomationRunPending, model.AutomationRunRunning}).
+			Count(&active).Error; err != nil {
+			return err
+		}
+		if active > 0 {
+			return errors.New("这条事件已有运行正在排队或执行，请等待完成后再重新运行")
+		}
+
+		var maxExecutionNo int
+		if err := tx.Model(&model.AutomationRun{}).
+			Where("workflow_id = ? AND workflow_version = ? AND entry_id = ?", original.WorkflowID, original.WorkflowVersion, original.EntryID).
+			Select("COALESCE(MAX(execution_no), 0)").
+			Scan(&maxExecutionNo).Error; err != nil {
+			return err
+		}
+		now := time.Now()
+		repeatedFromRunID := original.ID
+		repeated = model.AutomationRun{
+			WorkflowID: original.WorkflowID, WorkflowName: original.WorkflowName,
+			WorkflowVersion: original.WorkflowVersion, EntryID: original.EntryID,
+			ExecutionNo: maxExecutionNo + 1, TriggerMode: model.AutomationRunTriggerManual,
+			RepeatedFromRunID: &repeatedFromRunID,
+			DefinitionJSON:    original.DefinitionJSON, ContextJSON: original.ContextJSON,
+			Status: model.AutomationRunPending, StartedAt: &now,
+		}
+		if err := tx.Create(&repeated).Error; err != nil {
+			return err
+		}
+		for _, node := range definition.Nodes {
+			nodeRun := model.AutomationNodeRun{
+				RunID: repeated.ID, NodeID: node.ID, NodeType: node.Type, NodeName: node.Name,
+				Status: model.AutomationNodePending, MaxAttempts: automationNodeMaxAttempts(node),
+			}
+			if err := tx.Create(&nodeRun).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return model.AutomationRun{}, err
+	}
+	s.wakeExecution()
+	return repeated, nil
 }
 
 func automationRetryNodeSet(definition AutomationDefinition, nodeRuns []model.AutomationNodeRun) map[string]struct{} {

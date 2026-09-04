@@ -74,6 +74,9 @@ func AutoMigrate() error {
 	); err != nil {
 		return err
 	}
+	if err := migrateAutomationRunExecutionIndex(); err != nil {
+		return fmt.Errorf("迁移自动化重复运行索引失败: %v", err)
+	}
 	if err := migrateAutomationGuardTables(); err != nil {
 		return fmt.Errorf("迁移自动化控制节点状态失败: %v", err)
 	}
