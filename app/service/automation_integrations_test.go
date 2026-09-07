@@ -355,3 +355,99 @@ func TestAutomationDeleteQBittorrentRemovesCompletedTaskWithoutFiles(t *testing.
 		t.Fatalf("unexpected qB delete: output=%#v hash=%q deleteFiles=%q", output, deleteHash, deleteFiles)
 	}
 }
+
+func TestAutomationStopQBittorrentSupportsCurrentAndLegacyAPIs(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		legacy     bool
+		wantAction string
+	}{
+		{name: "qBittorrent 5 stop", wantAction: "stop"},
+		{name: "qBittorrent 4 pause fallback", legacy: true, wantAction: "pause"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var actions []string
+			var stoppedHash string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v2/torrents/info":
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`[{"hash":"ABC","name":"Example","progress":1,"state":"uploading","content_path":"/downloads/Example","size":100,"amount_left":0}]`))
+				case "/api/v2/torrents/stop", "/api/v2/torrents/pause":
+					action := strings.TrimPrefix(r.URL.Path, "/api/v2/torrents/")
+					actions = append(actions, action)
+					if test.legacy && action == "stop" {
+						http.NotFound(w, r)
+						return
+					}
+					if err := r.ParseForm(); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					stoppedHash = r.Form.Get("hashes")
+					w.WriteHeader(http.StatusOK)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			db := newAutomationTestDB(t)
+			config, _ := json.Marshal(AutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testAutomationQBAPIKey})
+			target := model.AutomationTarget{Name: "mock qB", Type: model.AutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(config)}
+			if err := db.Create(&target).Error; err != nil {
+				t.Fatal(err)
+			}
+			definition := AutomationDefinition{Edges: []AutomationEdge{{Source: "wait", SourcePort: "success", Target: "stop"}}}
+			output, err := (&AutomationService{db: db}).executeAutomationStopQBittorrent(context.Background(), AutomationNode{
+				ID: "stop", Type: AutomationNodeStopQBittorrent,
+			}, definition, automationTestRunContext("wait", map[string]any{
+				"completed": true, "target_id": target.ID, "hash": "ABC",
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stoppedHash != "ABC" || output["stopped"] != true || output["already_stopped"] != false || output["files_retained"] != true || output["api_action"] != test.wantAction || output["response_status"] != http.StatusOK {
+				t.Fatalf("unexpected qB stop: output=%#v hash=%q actions=%#v", output, stoppedHash, actions)
+			}
+			if test.legacy {
+				if strings.Join(actions, ",") != "stop,pause" {
+					t.Fatalf("legacy actions = %#v", actions)
+				}
+			} else if strings.Join(actions, ",") != "stop" {
+				t.Fatalf("current actions = %#v", actions)
+			}
+		})
+	}
+}
+
+func TestAutomationStopQBittorrentDoesNotStopIncompleteTask(t *testing.T) {
+	stopCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v2/torrents/info":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"hash":"ABC","name":"Example","progress":0.5,"state":"downloading","content_path":"/downloads/Example","size":100,"amount_left":50}]`))
+		case "/api/v2/torrents/stop", "/api/v2/torrents/pause":
+			stopCalled = true
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	db := newAutomationTestDB(t)
+	config, _ := json.Marshal(AutomationQBittorrentConfig{BaseURL: server.URL, APIKey: testAutomationQBAPIKey})
+	target := model.AutomationTarget{Name: "mock qB", Type: model.AutomationTargetQBittorrent, Enabled: true, ConfigJSON: string(config)}
+	if err := db.Create(&target).Error; err != nil {
+		t.Fatal(err)
+	}
+	definition := AutomationDefinition{Edges: []AutomationEdge{{Source: "wait", SourcePort: "success", Target: "stop"}}}
+	_, err := (&AutomationService{db: db}).executeAutomationStopQBittorrent(context.Background(), AutomationNode{
+		ID: "stop", Type: AutomationNodeStopQBittorrent,
+	}, definition, automationTestRunContext("wait", map[string]any{"target_id": target.ID, "hash": "ABC"}))
+	if err == nil || !strings.Contains(err.Error(), "仍未完成") || stopCalled {
+		t.Fatalf("incomplete qB stop err=%v stopCalled=%t", err, stopCalled)
+	}
+}

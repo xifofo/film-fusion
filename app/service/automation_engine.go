@@ -362,6 +362,9 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 	case AutomationNodeMoviePilotTransfer:
 		output, err := s.executeAutomationMoviePilotTransfer(ctx, node, definition, runContext)
 		return withAutomationSelectedPort(output, err), err
+	case AutomationNodeStopQBittorrent:
+		output, err := s.executeAutomationStopQBittorrent(ctx, node, definition, runContext)
+		return withAutomationSelectedPort(output, err), err
 	case AutomationNodeDeleteQBittorrent:
 		output, err := s.executeAutomationDeleteQBittorrent(ctx, node, definition, runContext)
 		return withAutomationSelectedPort(output, err), err

@@ -301,6 +301,7 @@ func TestAutomationNodeMaxAttemptsKeepsSideEffectsSingleAttempt(t *testing.T) {
 		{name: "http request", node: AutomationNode{Type: AutomationNodeHTTPRequest}, want: 1},
 		{name: "MP2 transfer", node: AutomationNode{Type: AutomationNodeMoviePilotTransfer}, want: 1},
 		{name: "qBittorrent delete", node: AutomationNode{Type: AutomationNodeDeleteQBittorrent}, want: 1},
+		{name: "qBittorrent stop", node: AutomationNode{Type: AutomationNodeStopQBittorrent}, want: 3},
 		{name: "qBittorrent", node: AutomationNode{Type: AutomationNodeQBittorrent}, want: 3},
 		{name: "explicit", node: AutomationNode{Type: AutomationNodeQBittorrent, MaxAttempts: 2}, want: 2},
 	}
@@ -531,6 +532,33 @@ func TestValidateAutomationDefinitionRejectsUnsafeQBitFileDeletion(t *testing.T)
 	}
 	if result := ValidateAutomationDefinition(unsafeDelete); result.Valid || !containsAutomationValidationError(result.Errors, "MP2 整理成功后") {
 		t.Fatalf("qB file deletion safeguard missing: %#v", result.Errors)
+	}
+}
+
+func TestValidateAutomationDefinitionRequiresCompletedQBitBeforeStop(t *testing.T) {
+	definition := AutomationDefinition{
+		SchemaVersion: AutomationSchemaVersion,
+		Nodes: []AutomationNode{
+			{ID: "trigger", Type: AutomationNodeTrigger},
+			{ID: "qb", Type: AutomationNodeQBittorrent, Config: map[string]any{"target_id": 1, "url": "$item.download_url"}},
+			{ID: "wait", Type: AutomationNodeWaitQBittorrent},
+			{ID: "stop", Type: AutomationNodeStopQBittorrent},
+			{ID: "end", Type: AutomationNodeEnd},
+		},
+		Edges: []AutomationEdge{
+			{ID: "s1", Source: "trigger", SourcePort: "next", Target: "qb"},
+			{ID: "s2", Source: "qb", SourcePort: "success", Target: "wait"},
+			{ID: "s3", Source: "wait", SourcePort: "success", Target: "stop"},
+			{ID: "s4", Source: "stop", SourcePort: "success", Target: "end"},
+		},
+	}
+	if result := ValidateAutomationDefinition(definition); !result.Valid {
+		t.Fatalf("completed qB stop chain invalid: %#v", result.Errors)
+	}
+
+	definition.Edges[2].Source = "qb"
+	if result := ValidateAutomationDefinition(definition); result.Valid || !containsAutomationValidationError(result.Errors, "等待 qBittorrent 完成或 MP2 整理节点之后") {
+		t.Fatalf("qB stop accepted before completion: %#v", result.Errors)
 	}
 }
 

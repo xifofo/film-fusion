@@ -33,6 +33,7 @@ func TestAutomationNodeProtocolsCoverEverySupportedNode(t *testing.T) {
 		AutomationNodeQBittorrent,
 		AutomationNodeWaitQBittorrent,
 		AutomationNodeMoviePilotTransfer,
+		AutomationNodeStopQBittorrent,
 		AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115,
 		AutomationNodeOffline115OpenAPI,

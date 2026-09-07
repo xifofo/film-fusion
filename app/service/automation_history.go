@@ -180,7 +180,7 @@ func applyAutomationLegacyHistory(item *AutomationEntryHistoryItem, raw string) 
 
 func automationHistoryActionTypes() []string {
 	return []string{
-		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
+		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
 		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,

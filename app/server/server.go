@@ -31,6 +31,7 @@ type Server struct {
 	embySortNameService     *service.EmbySortNameService
 	embyStatsService        *service.EmbyStatsService
 	embyMissingService      *service.EmbyMissingService
+	embyAccountService      *service.EmbyAccountService
 	versionCheckHandler     *handler.EmbyVersionCheckHandler
 	balanceCleanupSvc       *service.BalanceCleanupService
 	embyClient              *embyhelper.EmbyClient
@@ -101,6 +102,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		embySortNameService:     embySortNameService,
 		embyStatsService:        embyStatsService,
 		embyMissingService:      embyMissingService,
+		embyAccountService:      service.NewEmbyAccountService(database.GetDB(), cfg, log),
 		versionCheckHandler:     embyVersionCheckHandler,
 		balanceCleanupSvc:       service.NewBalanceCleanupService(log),
 		embyClient:              embyClient,
@@ -168,6 +170,7 @@ func (s *Server) Start() error {
 
 	// 启动 Emby 缺集定时扫描调度
 	s.embyMissingService.Start()
+	s.embyAccountService.Start()
 
 	// 启动 Emby 本地多版本定时检查调度
 	s.versionCheckHandler.Start()
@@ -186,6 +189,8 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.embyAccountService.Stop()
+
 	// 停止115Open下载服务
 	s.download115Service.StopWorkers()
 
@@ -296,6 +301,7 @@ func (s *Server) setupRoutes() {
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler(s.embyLoginProtection)
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
+	embyAccountHandler := handler.NewEmbyAccountHandler(s.embyAccountService)
 	embyMissingHandler := handler.NewEmbyMissingHandler(s.Logger, s.embyMissingService)
 	embyImageOptimizationHandler := handler.NewEmbyImageOptimizationHandler(s.Logger, s.Config, s.embyClient)
 	embyWatchHandler := handler.NewEmbyWatchHandler(s.Logger, embyWatchService)
@@ -615,6 +621,13 @@ func (s *Server) setupRoutes() {
 			embyBindings.GET("/emby-users", embyBindingHandler.ListEmbyUsers)
 			embyBindings.PUT("/:id", embyBindingHandler.UpdateBinding)
 			embyBindings.DELETE("/:id", embyBindingHandler.DeleteBinding)
+		}
+
+		// Emby 账户管理与持久化到期禁用（仅 FilmFusion 管理员可访问）。
+		embyAccounts := protected.Group("/emby-accounts")
+		{
+			embyAccounts.GET("", embyAccountHandler.List)
+			embyAccounts.PUT("/:user_id/expiry", embyAccountHandler.SetExpiry)
 		}
 
 		// Emby 缺集扫描（含定时扫描与黑名单）

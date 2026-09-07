@@ -49,6 +49,7 @@ func AutoMigrate() error {
 		&model.Match302BalanceMember{},
 		&model.Match302BalanceAssignment{},
 		&model.EmbyAccountBinding{},
+		&model.EmbyAccountExpiry{},
 		&model.Web115AppVersionCache{},
 		&model.MediaTask{},
 		&model.EmbyCoverLibrary{},

@@ -119,6 +119,98 @@ func (s *AutomationService) executeAutomationMoviePilotTransfer(
 	return output, nil
 }
 
+func (s *AutomationService) executeAutomationStopQBittorrent(
+	ctx context.Context,
+	node AutomationNode,
+	definition AutomationDefinition,
+	runContext map[string]any,
+) (map[string]any, error) {
+	_, sourceOutput, err := automationPredecessorOutput(node.ID, definition, runContext)
+	if err != nil {
+		return nil, err
+	}
+	targetID := automationAnyUint(sourceOutput["target_id"])
+	hash := automationAnyString(sourceOutput["hash"])
+	if targetID == 0 || hash == "" {
+		return nil, errors.New("上游节点没有返回 qBittorrent 下载器或任务 Hash")
+	}
+
+	var target model.AutomationTarget
+	if err := s.db.First(&target, targetID).Error; err != nil {
+		return nil, fmt.Errorf("qBittorrent 下载器不存在: %w", err)
+	}
+	if !target.Enabled {
+		return nil, errors.New("qBittorrent 下载器已停用")
+	}
+	client, err := s.newAutomationQBClient(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	torrents, err := queryAutomationQBTorrents(ctx, client, url.Values{"hashes": {hash}})
+	if err != nil {
+		return nil, err
+	}
+	output := map[string]any{
+		"target_id":      target.ID,
+		"target_name":    target.Name,
+		"hash":           hash,
+		"files_retained": true,
+	}
+	if len(torrents) == 0 {
+		output["stopped"] = true
+		output["already_stopped"] = false
+		output["already_missing"] = true
+		return output, nil
+	}
+
+	torrent := torrents[0]
+	output["name"] = torrent.Name
+	output["content_path"] = torrent.ContentPath
+	output["previous_state"] = torrent.State
+	output["already_missing"] = false
+	if torrent.Progress < 0.999999 && !(torrent.Size > 0 && torrent.AmountLeft == 0) {
+		return output, fmt.Errorf("拒绝停止仍未完成的 qBittorrent 任务，当前进度 %.0f%%", torrent.Progress*100)
+	}
+	if automationQBTorrentStopped(torrent.State) {
+		output["stopped"] = true
+		output["already_stopped"] = true
+		return output, nil
+	}
+
+	form := url.Values{"hashes": {hash}}
+	for index, action := range []string{"stop", "pause"} {
+		req, requestErr := client.newRequest(ctx, http.MethodPost, "/api/v2/torrents/"+action, strings.NewReader(form.Encode()))
+		if requestErr != nil {
+			return output, requestErr
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		resp, requestErr := client.client.Do(req)
+		if requestErr != nil {
+			return output, fmt.Errorf("停止 qBittorrent 做种失败: %w", requestErr)
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		if index == 0 && resp.StatusCode == http.StatusNotFound {
+			continue
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return output, fmt.Errorf("停止 qBittorrent 做种返回 HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		}
+		output["response_status"] = resp.StatusCode
+		output["api_action"] = action
+		output["stopped"] = true
+		output["already_stopped"] = false
+		output["stopped_at"] = time.Now().UTC().Format(time.RFC3339)
+		return output, nil
+	}
+	return output, errors.New("qBittorrent 不支持 stop 或 pause 停止接口")
+}
+
+func automationQBTorrentStopped(state string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(state))
+	return strings.HasPrefix(normalized, "stopped") || strings.HasPrefix(normalized, "paused")
+}
+
 func (s *AutomationService) executeAutomationDeleteQBittorrent(
 	ctx context.Context,
 	node AutomationNode,

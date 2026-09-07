@@ -37,6 +37,7 @@ const (
 	AutomationNodeJoin                = "join"
 	AutomationNodeQBittorrent         = "qbittorrent"
 	AutomationNodeWaitQBittorrent     = "wait_qbittorrent"
+	AutomationNodeStopQBittorrent     = "stop_qbittorrent"
 	AutomationNodeDeleteQBittorrent   = "delete_qbittorrent"
 	AutomationNodeOffline115          = "offline115"
 	AutomationNodeOffline115OpenAPI   = "offline115_openapi"
@@ -347,6 +348,13 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 				if sourcePort != "success" {
 					result.Errors = append(result.Errors, fmt.Sprintf("MP2 整理节点 %s 必须连接等待 qBittorrent 节点的成功出口", id))
 				}
+			case AutomationNodeStopQBittorrent:
+				if predecessor.Type != AutomationNodeWaitQBittorrent && predecessor.Type != AutomationNodeMoviePilotTransfer {
+					result.Errors = append(result.Errors, fmt.Sprintf("停止 qBittorrent 做种节点 %s 必须连接在等待 qBittorrent 完成或 MP2 整理节点之后", id))
+				}
+				if sourcePort != "success" {
+					result.Errors = append(result.Errors, fmt.Sprintf("停止 qBittorrent 做种节点 %s 必须连接上游节点的成功出口", id))
+				}
 			case AutomationNodeDeleteQBittorrent:
 				if predecessor.Type != AutomationNodeWaitQBittorrent && predecessor.Type != AutomationNodeMoviePilotTransfer {
 					result.Errors = append(result.Errors, fmt.Sprintf("删除 qBittorrent 任务节点 %s 必须连接在等待 qBittorrent 完成或 MP2 整理节点之后", id))
@@ -489,7 +497,7 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 			AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
 			AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
 			AutomationNodeDelay, AutomationNodeJoin,
-			AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
+			AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 			AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
 			AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
@@ -525,7 +533,7 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 		AutomationNodeConvert, AutomationNodeSetVariable, AutomationNodeTemplate, AutomationNodeJSONExtract, AutomationNodeMath,
 		AutomationNodeDatetimeOperation, AutomationNodeCoalesce,
 		AutomationNodeDelay, AutomationNodeJoin,
-		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeDeleteQBittorrent,
+		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer,
 		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
