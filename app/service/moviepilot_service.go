@@ -990,14 +990,10 @@ func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transf
 }
 
 func SelectMoviePilotCategory(mediaType string, info MoviePilotMediaInfo, cfg MoviePilotCategoryConfig) string {
-	normalizedType := strings.ToLower(strings.TrimSpace(mediaType))
-	if normalizedType == "" {
-		normalizedType = "movie"
-	}
-
 	var categories map[string]*MoviePilotCategoryRule
 	var order []string
-	if normalizedType == "tv" {
+	// MP2 may return the Chinese type "电视剧" rather than the local engine's "tv".
+	if isTVMediaType(mediaType) {
 		categories = cfg.TV
 		order = cfg.TVOrder
 	} else {

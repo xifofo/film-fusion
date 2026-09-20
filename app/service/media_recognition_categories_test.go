@@ -34,6 +34,37 @@ tv:
 	}
 }
 
+func TestMoviePilotCategoryAcceptsTVMediaTypeAliases(t *testing.T) {
+	config, err := mediaRecognitionCategoryConfigFromYAML(`
+电影:
+  日韩电影:
+    original_language: 'ja,ko'
+电视剧:
+  日韩剧集:
+    origin_country: 'JP,KR'
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := MoviePilotMediaInfo{
+		OriginalLanguages: []string{"ko"}, OriginCountries: []string{"KR"},
+	}
+	for _, mediaType := range []string{"tv", "电视剧", " TV ", "series", "tvshow", "show"} {
+		t.Run(mediaType, func(t *testing.T) {
+			if got := SelectMoviePilotCategory(mediaType, info, config); got != "日韩剧集" {
+				t.Fatalf("category=%q want=日韩剧集", got)
+			}
+		})
+	}
+	for _, mediaType := range []string{"movie", "电影", "", "unknown"} {
+		t.Run("movie_"+mediaType, func(t *testing.T) {
+			if got := SelectMoviePilotCategory(mediaType, info, config); got != "日韩电影" {
+				t.Fatalf("category=%q want=日韩电影", got)
+			}
+		})
+	}
+}
+
 func TestMediaRecognitionCategoryUsesMP2ChineseRootsAndMigratesLegacyRoots(t *testing.T) {
 	parsed, _, err := ParseMediaRecognitionCategoryYAML(`
 movie:

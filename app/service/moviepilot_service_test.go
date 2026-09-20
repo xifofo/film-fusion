@@ -529,6 +529,84 @@ tv:
 	}
 }
 
+func TestMoviePilotKoreanEpisodeCategoryMatchesLocalShadow(t *testing.T) {
+	const filename = "杀手妈咪.2026.EP14.HD1080P.X264.AAC.Korean.CHS.XLYS.mp4"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/login/access-token":
+			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
+		case "/api/v1/media/recognize_file":
+			if got := r.URL.Query().Get("path"); got != filename {
+				t.Errorf("recognition input=%q want=%q", got, filename)
+			}
+			_, _ = w.Write([]byte(`{
+				"success":true,
+				"data":{
+					"media_info":{
+						"type":"电视剧","title":"杀手妈咪","year":"2026","tmdb_id":123,
+						"category":"日韩剧集","original_language":"ko","origin_country":["KR"],"genre_ids":[18]
+					},
+					"meta_info":{"season_episode":"S01E14","begin_season":1}
+				}
+			}`))
+		case "/3/search/tv":
+			_, _ = w.Write([]byte(`{"results":[{
+				"id":123,"name":"杀手妈咪","first_air_date":"2026-01-01",
+				"original_language":"ko","origin_country":["KR"],"genre_ids":[18]
+			}]}`))
+		case "/3/tv/123":
+			_, _ = w.Write([]byte(`{
+				"id":123,"name":"杀手妈咪","first_air_date":"2026-01-01",
+				"original_language":"ko","origin_country":["KR"],"genre_ids":[18]
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tmdb := NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
+		Enabled: true, BaseURL: server.URL, APIKey: "test-key", TimeoutSeconds: 2,
+	}}, nil)
+	local := NewMediaRecognitionService(newMediaRecognitionTestDB(t), tmdb, nil)
+	if _, err := local.SaveCategoryConfig(`
+电影:
+  日韩电影:
+    original_language: 'ja,ko'
+  其他电影:
+电视剧:
+  日韩剧集:
+    origin_country: 'JP,KP,KR,TH,IN,SG'
+  其他剧集:
+`); err != nil {
+		t.Fatal(err)
+	}
+	svc := newTestMoviePilotService(server.URL)
+	svc.SetLocalMediaRecognition(local)
+	info, raw, err := svc.RecognizeFileWithSource(filename, MediaRecognitionSourceShadow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.MediaType != "电视剧" || info.Category != "日韩剧集" || info.SeasonEpisode != "S01E14" {
+		t.Fatalf("unexpected primary recognition: %+v", info)
+	}
+	comparison, _, _, ok := MediaRecognitionShadowFromRaw(raw)
+	if !ok || comparison.MoviePilot == nil || comparison.Local == nil {
+		t.Fatalf("missing recognition snapshots: %+v", comparison)
+	}
+	for _, snapshot := range []*MediaRecognitionShadowSnapshot{comparison.MoviePilot, comparison.Local} {
+		if snapshot.MediaType != "tv" || snapshot.Category != "电视剧/日韩剧集" || snapshot.SeasonEpisode != "S01E14" {
+			t.Fatalf("unexpected %s snapshot: %+v", snapshot.Engine, snapshot)
+		}
+	}
+	for _, difference := range comparison.Differences {
+		if difference.Field == "category" {
+			t.Fatalf("category should match: %+v", difference)
+		}
+	}
+}
+
 func TestShadowModeDoesNotReplaceMoviePilotFailureWithLocalResult(t *testing.T) {
 	recognitionRequests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
