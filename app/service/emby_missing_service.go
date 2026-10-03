@@ -671,6 +671,27 @@ func (s *EmbyMissingService) RescanSeries(ctx context.Context, seriesID string, 
 	}, nil
 }
 
+// DeleteSeries 删除指定剧的缺集快照和增量检查记录，下次扫描可重新发现。
+func (s *EmbyMissingService) DeleteSeries(ctx context.Context, seriesID string) error {
+	seriesID = strings.TrimSpace(seriesID)
+	if seriesID == "" {
+		return fmt.Errorf("series_id 不能为空")
+	}
+
+	// 与全量/单剧扫描互斥，避免删除后被正在执行的扫描写回。
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if s.scanning {
+		return ErrEmbyMissingScanInProgress
+	}
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingEpisode{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("series_id = ?", seriesID).Delete(&model.EmbyMissingSeriesScan{}).Error
+	})
+}
+
 // IsScanning 当前是否在扫描
 func (s *EmbyMissingService) IsScanning() bool {
 	s.scanMu.Lock()

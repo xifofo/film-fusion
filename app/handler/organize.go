@@ -704,11 +704,64 @@ func (h *OrganizeHandler) Organize115Cookie(c *gin.Context) {
 
 	result, err := h.buildOrganize115CookieResult(userID, req)
 	if err != nil {
+		h.logOrganize115CookieFailure(userID, req, 0, "", err.Error())
 		h.error(c, http.StatusBadRequest, 400, err.Error())
 		return
 	}
 
-	h.success(c, result, "整理完成")
+	failedGroups := 0
+	for _, group := range result.Groups {
+		if strings.TrimSpace(group.Error) == "" {
+			continue
+		}
+		failedGroups++
+		h.logOrganize115CookieFailure(userID, req, result.CloudStorageID, group.FolderID, group.Error)
+	}
+	message := "整理完成"
+	if req.DryRun {
+		message = "整理预览已生成"
+	}
+	if failedGroups > 0 {
+		if req.DryRun {
+			message = fmt.Sprintf("预览结束，%d 个目录失败", failedGroups)
+		} else {
+			message = fmt.Sprintf("整理结束，%d 个目录失败", failedGroups)
+		}
+	}
+	h.success(c, result, message)
+}
+
+func (h *OrganizeHandler) logOrganize115CookieFailure(userID uint, req Organize115CookieRequest, storageID uint, folderID, message string) {
+	if h.logger != nil {
+		h.logger.Errorf("[organize] 整理失败 user_id=%d cloud_directory_id=%d cloud_storage_id=%d folder_id=%s dry_run=%t err=%s",
+			userID, req.CloudDirectoryID, storageID, folderID, req.DryRun, message)
+	}
+	if req.DryRun || database.DB == nil {
+		return
+	}
+	source := folderID
+	for _, folderContext := range req.FolderContexts {
+		if folderContext.FolderID == folderID {
+			if strings.TrimSpace(folderContext.FolderPath) != "" {
+				source = folderContext.FolderPath
+			} else if strings.TrimSpace(folderContext.FolderName) != "" {
+				source = folderContext.FolderName
+			}
+			break
+		}
+	}
+	if source == "" {
+		source = strings.Join(normalizeFolderIDs(req.FolderIDs, req.FolderID), ",")
+	}
+	service.WriteOrganizeLog(h.logger, service.OrganizeLogEntry{
+		Action:         model.OrganizeActionMediaOrganize,
+		Status:         model.OrganizeStatusFailed,
+		Trigger:        model.OrganizeTriggerManual,
+		CloudStorageID: storageID,
+		Source:         source,
+		Message:        fmt.Sprintf("确认整理失败（目录配置 #%d，115 目录 %s）", req.CloudDirectoryID, folderID),
+		Error:          message,
+	})
 }
 
 func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
@@ -4132,7 +4185,7 @@ func (h *OrganizeHandler) enqueueSubtitleDownloads(dir model.CloudDirectory, sto
 	if items == nil || len(*items) == 0 {
 		return nil
 	}
-	if h.download115Svc == nil {
+	if !dryRun && h.download115Svc == nil {
 		return fmt.Errorf("下载服务未初始化")
 	}
 	if storage == nil {

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,95 @@ func newEmbyMissingTestService(t *testing.T) *EmbyMissingService {
 		t.Fatalf("migrate test database: %v", err)
 	}
 	return &EmbyMissingService{db: db}
+}
+
+func TestDeleteMissingSeriesOnlyRemovesTargetRecords(t *testing.T) {
+	svc := newEmbyMissingTestService(t)
+	for _, id := range []string{"target", "other"} {
+		for _, row := range []any{
+			&model.EmbyMissingEpisode{SeriesID: id, SeasonNumber: 1, EpisodeNumber: 1},
+			&model.EmbyMissingEpisode{SeriesID: id, SeasonNumber: 2, EpisodeNumber: 2},
+			&model.EmbyMissingSeriesScan{SeriesID: id},
+			&model.EmbyMissingBlacklist{SeriesID: id},
+		} {
+			if err := svc.db.Create(row).Error; err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for range 2 { // 重复删除保持幂等。
+		if err := svc.DeleteSeries(t.Context(), " target "); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, check := range []struct {
+		model any
+		id    string
+		want  int64
+	}{
+		{&model.EmbyMissingEpisode{}, "target", 0},
+		{&model.EmbyMissingSeriesScan{}, "target", 0},
+		{&model.EmbyMissingBlacklist{}, "target", 1},
+		{&model.EmbyMissingEpisode{}, "other", 2},
+		{&model.EmbyMissingSeriesScan{}, "other", 1},
+		{&model.EmbyMissingBlacklist{}, "other", 1},
+	} {
+		var count int64
+		if err := svc.db.Model(check.model).Where("series_id = ?", check.id).Count(&count).Error; err != nil {
+			t.Fatal(err)
+		}
+		if count != check.want {
+			t.Fatalf("%T %s count = %d; want %d", check.model, check.id, count, check.want)
+		}
+	}
+	result, err := svc.ListMissing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Groups) != 1 || result.Setting.LastSeriesCount != 1 || result.Setting.LastMissingCount != 2 {
+		t.Fatalf("unexpected list after deletion: %#v", result)
+	}
+}
+
+func TestDeleteMissingSeriesRejectsEmptyIDAndActiveScan(t *testing.T) {
+	svc := newEmbyMissingTestService(t)
+	if err := svc.db.Create(&model.EmbyMissingEpisode{SeriesID: "target"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteSeries(t.Context(), "  "); err == nil {
+		t.Fatal("empty ID should fail")
+	}
+	svc.scanning = true
+	if err := svc.DeleteSeries(t.Context(), "target"); !errors.Is(err, ErrEmbyMissingScanInProgress) {
+		t.Fatalf("active scan error = %v", err)
+	}
+	var count int64
+	if err := svc.db.Model(&model.EmbyMissingEpisode{}).Count(&count).Error; err != nil || count != 1 {
+		t.Fatalf("snapshot changed: count=%d error=%v", count, err)
+	}
+}
+
+func TestDeleteMissingSeriesRollsBackOnFailure(t *testing.T) {
+	svc := newEmbyMissingTestService(t)
+	if err := svc.db.Create(&model.EmbyMissingEpisode{SeriesID: "target"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.Create(&model.EmbyMissingSeriesScan{SeriesID: "target"}).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.Exec(`CREATE TRIGGER reject_scan_delete BEFORE DELETE ON emby_missing_series_scans
+		BEGIN SELECT RAISE(ABORT, 'simulated delete failure'); END`).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteSeries(t.Context(), "target"); err == nil {
+		t.Fatal("delete should fail")
+	}
+	for _, row := range []any{&model.EmbyMissingEpisode{}, &model.EmbyMissingSeriesScan{}} {
+		var count int64
+		if err := svc.db.Model(row).Count(&count).Error; err != nil || count != 1 {
+			t.Fatalf("%T not rolled back: count=%d error=%v", row, count, err)
+		}
+	}
 }
 
 func TestFetchSeriesMissingIgnoresSeasonZero(t *testing.T) {

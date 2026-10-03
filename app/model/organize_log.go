@@ -4,12 +4,13 @@ import "time"
 
 // 整理动作类型
 const (
-	OrganizeActionStrmCreate   = "strm_create"      // 创建 STRM 文件
-	OrganizeActionStrmDelete   = "strm_delete"      // 删除 STRM 文件 / 目录
-	OrganizeActionStrmRename   = "strm_rename"      // 重命名 STRM 文件
-	OrganizeActionFileDownload = "file_download"    // 通过 115 Open 下载非视频文件（如字幕）
-	OrganizeActionWalkDir      = "walk_dir"         // 目录递归遍历入口
-	OrganizeActionWebhookRecv  = "webhook_received" // 接收到外部 webhook
+	OrganizeActionMediaOrganize = "media_organize"   // 手动媒体整理
+	OrganizeActionStrmCreate    = "strm_create"      // 创建 STRM 文件
+	OrganizeActionStrmDelete    = "strm_delete"      // 删除 STRM 文件 / 目录
+	OrganizeActionStrmRename    = "strm_rename"      // 重命名 STRM 文件
+	OrganizeActionFileDownload  = "file_download"    // 通过 115 Open 下载非视频文件（如字幕）
+	OrganizeActionWalkDir       = "walk_dir"         // 目录递归遍历入口
+	OrganizeActionWebhookRecv   = "webhook_received" // 接收到外部 webhook
 )
 
 // 整理状态

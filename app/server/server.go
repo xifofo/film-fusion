@@ -276,6 +276,8 @@ func (s *Server) setupRoutes() {
 	systemConfigHandler := handler.NewSystemConfigHandler()
 	appConfigHandler := handler.NewAppConfigHandler(s.Logger, s.Config, s.embyClient, s.embyCoverService, s.tmdbService)
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
+	apiTokenService := service.NewAPITokenService(database.GetDB())
+	apiTokenHandler := handler.NewAPITokenHandler(apiTokenService)
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	automationHandler := handler.NewAutomationHandler(s.automationService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
@@ -342,10 +344,16 @@ func (s *Server) setupRoutes() {
 		webhook.POST("/emby", webhookHandler.HandleEmbyWebhook)
 	}
 
-	// 需要JWT验证的路由
+	// 管理 API 接受登录 JWT 或具有对应模块授权的 API Token。
 	protected := api.Group("/")
-	protected.Use(middleware.JWTAuth(s.Config), middleware.RequireAdmin())
+	protected.Use(middleware.APIAuth(s.Config, apiTokenService), middleware.RequireAdmin())
 	{
+		// Token 管理不属于任何可授权模块，只允许后台登录 JWT。
+		protected.GET("/api-tokens", apiTokenHandler.List)
+		protected.GET("/api-tokens/scopes", apiTokenHandler.Scopes)
+		protected.POST("/api-tokens", apiTokenHandler.Create)
+		protected.POST("/api-tokens/:id/revoke", apiTokenHandler.Revoke)
+
 		// 用户相关
 		protected.GET("/me", authHandler.Me)
 		protected.PUT("/me", authHandler.UpdateMe)
@@ -636,6 +644,7 @@ func (s *Server) setupRoutes() {
 			embyMissing.GET("", embyMissingHandler.List)
 			embyMissing.POST("/scan", embyMissingHandler.Scan)
 			embyMissing.POST("/series/:series_id/scan", embyMissingHandler.RescanSeries)
+			embyMissing.DELETE("/series/:series_id", embyMissingHandler.DeleteSeries)
 			embyMissing.POST("/resolve-cloud-path", embyMissingHandler.ResolveCloudPath)
 			embyMissing.GET("/external-links", embyMissingHandler.ExternalLinks)
 			embyMissing.GET("/libraries", embyMissingHandler.ListLibraries)

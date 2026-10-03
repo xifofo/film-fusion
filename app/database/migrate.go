@@ -39,6 +39,7 @@ func AutoMigrate() error {
 	if err := DB.AutoMigrate(
 		&model.SystemConfig{},
 		&model.User{},
+		&model.APIToken{},
 		&model.CloudStorage{},
 		&model.CloudPath{},
 		&model.CloudDirectory{},

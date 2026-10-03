@@ -114,6 +114,24 @@ func (h *EmbyMissingHandler) RescanSeries(c *gin.Context) {
 	h.success(c, result, "单剧扫描完成")
 }
 
+// DeleteSeries DELETE /api/emby-missing/series/:series_id
+func (h *EmbyMissingHandler) DeleteSeries(c *gin.Context) {
+	seriesID := strings.TrimSpace(c.Param("series_id"))
+	if seriesID == "" {
+		h.error(c, http.StatusBadRequest, 400, "series_id 不能为空")
+		return
+	}
+	if err := h.svc.DeleteSeries(c.Request.Context(), seriesID); err != nil {
+		if errors.Is(err, service.ErrEmbyMissingScanInProgress) {
+			h.error(c, http.StatusConflict, 409, "扫描正在进行中，请完成后再删除记录")
+			return
+		}
+		h.error(c, http.StatusInternalServerError, 500, "删除缺集记录失败: "+err.Error())
+		return
+	}
+	h.success(c, nil, "缺集记录已删除")
+}
+
 type resolveCloudPathPayload struct {
 	SeriesID string `json:"series_id"`
 }
