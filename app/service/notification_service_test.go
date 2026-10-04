@@ -98,3 +98,21 @@ func TestNotificationServiceTestsNamedChannel(t *testing.T) {
 		t.Fatalf("unexpected test event: %+v", channel.tests)
 	}
 }
+
+func TestNotificationServiceHonorsAutomationChannelSelection(t *testing.T) {
+	telegram := &recordingNotificationChannel{id: config.NotificationChannelTelegram, ready: true}
+	webhook := &recordingNotificationChannel{id: config.NotificationChannelWebhook, ready: true}
+	cfg := &config.Config{Notifications: config.NotificationConfig{
+		Routes: config.NotificationRoutesConfig{AutomationTriggered: []string{config.NotificationChannelTelegram}},
+	}}
+	notifications := NewNotificationService(cfg, nil, telegram, webhook)
+	event := NotificationEvent{Type: NotificationEventAutomationTriggered, Message: "selected delivery", Channels: []string{config.NotificationChannelWebhook}}
+	report := notifications.Publish(context.Background(), event)
+	if !report.AnySuccess() || len(telegram.events) != 0 || len(webhook.events) != 1 {
+		t.Fatalf("explicit channel was not respected: %+v", report)
+	}
+	webhook.ready = false
+	if report = notifications.Publish(context.Background(), event); !report.HasFailures() || len(telegram.events) != 0 || len(webhook.events) != 1 {
+		t.Fatalf("unready explicit channel should fail without fallback: %+v", report)
+	}
+}

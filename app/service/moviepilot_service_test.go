@@ -256,7 +256,10 @@ func TestMoviePilotRecognitionKeepsPrimaryResultAndAttachesLocalShadowDiff(t *te
 	defer server.Close()
 
 	svc := newTestMoviePilotService(server.URL)
-	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	local, _ := medianameFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		writeMedianameJSON(w, medianameDetails(456, "Local Show", "tv"))
+	})
+	svc.SetLocalMediaRecognition(local)
 	info, raw, err := svc.RecognizeFile("Local.Show.2026.S01E02.{tmdb-456}.mkv")
 	if err != nil {
 		t.Fatal(err)
@@ -354,11 +357,11 @@ func TestCompareRecognitionUsesSameDraftRulesForMP2AndLocal(t *testing.T) {
 	if result.Local == nil || result.Local.MetaInfo.SeasonEpisode != "S02E04" {
 		t.Fatalf("local result=%+v", result.Local)
 	}
-	if result.Comparison.Status != MediaRecognitionShadowMatched || !result.Comparison.Matched {
-		t.Fatalf("comparison=%+v", result.Comparison)
+	if result.Comparison.Status != MediaRecognitionShadowLocalError || result.Comparison.Local != nil {
+		t.Fatalf("offline parsing must not auto adopt an identity: %+v", result.Comparison)
 	}
-	if result.Comparison.MoviePilot.Category != "电视剧/临时剧集" || result.Comparison.Local.Category != "电视剧/临时剧集" {
-		t.Fatalf("categories were not compared with the same draft: %+v", result.Comparison)
+	if result.Comparison.MoviePilot.Category != "电视剧/临时剧集" || result.Local.MediaInfo.TMDBID != "" || result.Local.TMDBStatus != "not_identified" {
+		t.Fatalf("MP2 draft or unverified ID isolation broken: %+v", result)
 	}
 }
 
@@ -367,6 +370,7 @@ func TestNormalizeMediaRecognitionSource(t *testing.T) {
 		"":           MediaRecognitionSourceShadow,
 		"MP":         MediaRecognitionSourceMoviePilot,
 		"moviepilot": MediaRecognitionSourceMoviePilot,
+		"medianame":  MediaRecognitionSourceMedianame,
 		"local":      MediaRecognitionSourceLocal,
 		"FilmFusion": MediaRecognitionSourceLocal,
 		"影子模式":       MediaRecognitionSourceShadow,
@@ -419,7 +423,7 @@ func TestMediaRecognitionShadowTreatsEquivalentProviderValuesAsEqual(t *testing.
 	}
 }
 
-func TestTransferNameShadowRunsLocalComparisonButKeepsMP2Result(t *testing.T) {
+func TestTransferNameShadowRunsMedianameComparisonButKeepsMP2Result(t *testing.T) {
 	const input = "[乌云背后的幸福线].Silver.Linings.Playbook.(2012).FIN.BluRay.1080p.x264.DDP.5.1.2Audios-CMCT.{tmdb-82693}.mkv"
 	const mp2Name = "Silver Linings Playbook.2012.BluRay.1080p.x264.DDP 5.1 2Audios-CMCT.mkv"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -429,6 +433,8 @@ func TestTransferNameShadowRunsLocalComparisonButKeepsMP2Result(t *testing.T) {
 			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
 		case "/api/v1/transfer/name":
 			_, _ = w.Write([]byte(`{"success":true,"data":{"name":"` + mp2Name + `"}}`))
+		case "/3/movie/82693":
+			_, _ = w.Write([]byte(`{"id":82693,"title":"Silver Linings Playbook","original_title":"Silver Linings Playbook","release_date":"2012-01-01"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -436,17 +442,18 @@ func TestTransferNameShadowRunsLocalComparisonButKeepsMP2Result(t *testing.T) {
 	defer server.Close()
 
 	svc := newTestMoviePilotService(server.URL)
-	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	cfg := &config.Config{TMDB: config.TMDBConfig{Enabled: true, BaseURL: server.URL, APIKey: "test"}}
+	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), NewTMDBService(cfg, nil), nil))
 	name, raw, err := svc.TransferNameWithSource(input, "mkv", MediaRecognitionSourceShadow)
 	if err != nil || name != mp2Name {
 		t.Fatalf("name=%q err=%v raw=%#v", name, err, raw)
 	}
 	comparison, ok := raw[mediaTransferShadowRawKey].(MediaTransferShadowComparison)
-	if !ok || !comparison.Matched || comparison.Status != MediaRecognitionShadowMatched || comparison.Local != mp2Name {
+	if !ok || comparison.Matched || comparison.Status != MediaRecognitionShadowDifferent || comparison.Local == "" || comparison.LocalRaw["medianame"] == nil {
 		t.Fatalf("comparison=%+v raw=%#v", comparison, raw)
 	}
 	extracted, ok := MediaTransferShadowFromRaw(raw)
-	if !ok || !extracted.Matched || extracted.Local != mp2Name {
+	if !ok || extracted.Local != comparison.Local {
 		t.Fatalf("transfer shadow extraction failed: %+v", extracted)
 	}
 }
@@ -623,7 +630,15 @@ func TestShadowModeDoesNotReplaceMoviePilotFailureWithLocalResult(t *testing.T) 
 	defer server.Close()
 
 	svc := newTestMoviePilotService(server.URL)
-	svc.SetLocalMediaRecognition(NewMediaRecognitionService(newMediaRecognitionTestDB(t), nil, nil))
+	local, _ := medianameFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		details := medianameDetails(123, "Show", "tv")
+		if strings.Contains(r.URL.Path, "/search/") {
+			writeMedianameJSON(w, map[string]any{"page": 1, "total_pages": 1, "total_results": 1, "results": []any{details}})
+		} else {
+			writeMedianameJSON(w, details)
+		}
+	})
+	svc.SetLocalMediaRecognition(local)
 	for _, input := range []string{"Show.S01E01.mkv", "Show.S01E02.mkv"} {
 		info, raw, err := svc.RecognizeFile(input)
 		if err == nil || info.Title != "" {

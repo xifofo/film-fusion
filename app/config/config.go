@@ -46,6 +46,7 @@ const (
 	NotificationEventWeb115Invalid       = "storage.115_cookie_invalid"
 	MediaRecognitionSourceMoviePilot     = "moviepilot"
 	MediaRecognitionSourceLocal          = "local"
+	MediaRecognitionSourceMedianame      = "medianame"
 	MediaRecognitionSourceShadow         = "shadow"
 	DefaultMediaRecognitionSource        = MediaRecognitionSourceShadow
 )
@@ -66,6 +67,8 @@ func NormalizeMediaRecognitionSource(value string) (string, error) {
 		return MediaRecognitionSourceMoviePilot, nil
 	case "local", "filmfusion", "film-fusion":
 		return MediaRecognitionSourceLocal, nil
+	case "medianame":
+		return MediaRecognitionSourceMedianame, nil
 	default:
 		return "", fmt.Errorf("识别方式无效")
 	}

@@ -67,6 +67,7 @@ type MediaRecognitionShadowDifference struct {
 // also returned by the comparison workbench API. MoviePilot remains the
 // authoritative result whenever it succeeds; local errors never replace it.
 type MediaRecognitionShadowComparison struct {
+	Medianame       *MedianameRecognition              `json:"medianame,omitempty"`
 	Status          string                             `json:"status"`
 	Matched         bool                               `json:"matched"`
 	MoviePilot      *MediaRecognitionShadowSnapshot    `json:"moviepilot,omitempty"`
@@ -173,7 +174,10 @@ func (s *MoviePilotService) runLocalRecognitionShadow(
 	}
 
 	options.Mode = mode
-	localResult, localErr := s.local.Recognize(ctx, input, options)
+	recognized := s.local.RecognizeMedianame(ctx, input, options)
+	localResult := adaptMedianameRecognition(recognized)
+	localErr := medianameCompatible(recognized)
+	run.localResult = &localResult
 	if localErr == nil && strings.TrimSpace(localResult.MediaInfo.Title) == "" {
 		localErr = errors.New("本地识别未得到媒体标题")
 	}
@@ -187,6 +191,7 @@ func (s *MoviePilotService) runLocalRecognitionShadow(
 		localInfoPtr = &run.localInfo
 	}
 	run.comparison = buildMediaRecognitionShadowComparison(moviePilotInfo, moviePilotErr, localInfoPtr, localErr, false)
+	run.comparison.Medianame = &recognized
 	if localInfoPtr != nil {
 		localInfoCopy := *localInfoPtr
 		run.comparison.localInfo = &localInfoCopy
@@ -271,7 +276,7 @@ func buildMediaRecognitionShadowComparison(
 		comparison.MoviePilot = mediaRecognitionShadowSnapshot("moviepilot", *moviePilotInfo)
 	}
 	if localInfo != nil {
-		comparison.Local = mediaRecognitionShadowSnapshot("local", *localInfo)
+		comparison.Local = mediaRecognitionShadowSnapshot("medianame", *localInfo)
 	}
 	if moviePilotErr != nil {
 		comparison.Status = MediaRecognitionShadowMoviePilotError
@@ -452,7 +457,7 @@ func (s *MoviePilotService) finishTransferNameWithShadow(
 		}
 		comparison.LocalError = "FilmFusion 本地识别未初始化"
 	} else {
-		localName, localRaw, localErr := s.local.BuildTransferName(input)
+		localName, localRaw, localErr := s.TransferNameWithSource(input, "", MediaRecognitionSourceMedianame)
 		comparison.Local = strings.TrimSpace(localName)
 		comparison.LocalRaw = localRaw
 		if localErr != nil {

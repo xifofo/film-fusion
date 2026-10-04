@@ -51,6 +51,7 @@ func TestCreateAutomationSupportsRSSAsIndependentTriggerType(t *testing.T) {
 }
 
 func TestRSSAutomationCheckBaselinesThenQueuesOnlyNewItems(t *testing.T) {
+	now := time.Now()
 	feed := `<rss><channel><title>新番</title><item><guid>one</guid><title>第一集</title><enclosure url="magnet:?xt=urn:btih:one" /></item></channel></rss>`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/rss+xml")
@@ -60,7 +61,7 @@ func TestRSSAutomationCheckBaselinesThenQueuesOnlyNewItems(t *testing.T) {
 
 	db := newAutomationTestDB(t)
 	automation := &AutomationService{
-		db: db, httpClient: &http.Client{Timeout: time.Second},
+		db: db, httpClient: &http.Client{Timeout: time.Second}, rssClock: func() time.Time { return now },
 		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
 		scanning: make(map[uint]struct{}),
 	}
@@ -87,6 +88,7 @@ func TestRSSAutomationCheckBaselinesThenQueuesOnlyNewItems(t *testing.T) {
 	}
 
 	feed = strings.Replace(feed, "</channel>", `<item><guid>two</guid><title>第二集</title><enclosure url="magnet:?xt=urn:btih:two" /></item></channel>`, 1)
+	now = now.Add(181 * time.Second)
 	increment, err := automation.Scan(context.Background(), created.Source.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -104,6 +106,7 @@ func TestRSSAutomationCheckBaselinesThenQueuesOnlyNewItems(t *testing.T) {
 }
 
 func TestRSSAutomationCheckRollsBackEntryWhenRunCreationFails(t *testing.T) {
+	now := time.Now()
 	feed := `<rss><channel><title>新番</title><item><guid>one</guid><title>第一集</title><enclosure url="magnet:?xt=urn:btih:one" /></item></channel></rss>`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/rss+xml")
@@ -113,7 +116,7 @@ func TestRSSAutomationCheckRollsBackEntryWhenRunCreationFails(t *testing.T) {
 
 	db := newAutomationTestDB(t)
 	automation := &AutomationService{
-		db: db, httpClient: &http.Client{Timeout: time.Second},
+		db: db, httpClient: &http.Client{Timeout: time.Second}, rssClock: func() time.Time { return now },
 		sourceWake: make(chan struct{}, 1), executionWake: make(chan struct{}, 1),
 		scanning: make(map[uint]struct{}),
 	}
@@ -139,6 +142,7 @@ func TestRSSAutomationCheckRollsBackEntryWhenRunCreationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	feed = strings.Replace(feed, "</channel>", `<item><guid>two</guid><title>第二集</title><enclosure url="magnet:?xt=urn:btih:two" /></item></channel>`, 1)
+	now = now.Add(181 * time.Second)
 	if _, err := automation.Scan(context.Background(), created.Source.ID); err == nil {
 		t.Fatal("expected invalid workflow to fail run creation")
 	}

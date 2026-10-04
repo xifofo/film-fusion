@@ -48,6 +48,8 @@ func (m *Match302BalanceMember) NormalizeDefaults(matchID uint) {
 }
 
 type Match302BalanceAssignment struct {
+	Retired           bool       `gorm:"default:false;index" json:"retired,omitempty"`
+	RetiredSourcePath string     `json:"retired_source_path,omitempty"`
 	ID                uint       `gorm:"primarykey" json:"id"`
 	Match302ID        uint       `gorm:"not null;uniqueIndex:uk_match302_balance_assignment,priority:1;index" json:"match302_id"`
 	EmbyItemID        string     `gorm:"size:120;index" json:"emby_item_id"`

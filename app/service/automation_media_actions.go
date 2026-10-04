@@ -9,6 +9,7 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,13 +47,14 @@ type automationMoviePilotRecognizer interface {
 }
 
 type automation115Task struct {
-	InfoHash    string  `json:"info_hash"`
-	Name        string  `json:"name,omitempty"`
-	FileID      string  `json:"file_id,omitempty"`
-	DirectoryID string  `json:"directory_id,omitempty"`
-	Status      int     `json:"status"`
-	Percent     float64 `json:"percent"`
-	Size        int64   `json:"size,omitempty"`
+	Response    map[string]any `json:"response,omitempty"`
+	InfoHash    string         `json:"info_hash"`
+	Name        string         `json:"name,omitempty"`
+	FileID      string         `json:"file_id,omitempty"`
+	DirectoryID string         `json:"directory_id,omitempty"`
+	Status      int            `json:"status"`
+	Percent     float64        `json:"percent"`
+	Size        int64          `json:"size,omitempty"`
 }
 
 type automation115MediaFile struct {
@@ -79,28 +81,41 @@ func (g *defaultAutomation115Gateway) ListOfflineTasks(ctx context.Context, stor
 		if accessToken == "" {
 			return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
 		}
-		client := sdk115.New(sdk115.WithAccessToken(accessToken))
-		if g.httpClient != nil {
-			client.SetHttpClient(g.httpClient)
-		}
 		tasks := make([]automation115Task, 0)
-		for pageNumber := int64(1); pageNumber <= maxAutomation115TaskPages; pageNumber++ {
-			page, err := client.OfflineTaskList(ctx, pageNumber)
+		for pageNumber := 1; pageNumber <= maxAutomation115TaskPages; pageNumber++ {
+			response, err := automation115OpenAPIRequest(ctx, g.httpClient, accessToken, http.MethodGet, "offline/get_task_list", map[string]string{"page": strconv.Itoa(pageNumber)})
 			if err != nil {
 				return nil, fmt.Errorf("查询 115 OpenAPI 云下载任务失败: %w", err)
 			}
-			for _, task := range page.Tasks {
-				tasks = append(tasks, automation115Task{
-					InfoHash: strings.TrimSpace(task.InfoHash), Name: strings.TrimSpace(task.Name),
-					FileID: strings.TrimSpace(task.FileID), DirectoryID: strings.TrimSpace(task.WpPathID),
-					Status: task.Status, Percent: float64(task.PercentDone), Size: task.Size,
-				})
+			data, _ := response["data"].(map[string]any)
+			listed, ok := data["tasks"].([]any)
+			if !ok {
+				return nil, errors.New("115 任务列表缺少 tasks 数组")
 			}
-			if page.PageCount <= 0 || int(pageNumber) >= page.PageCount {
-				break
+			for _, value := range listed {
+				raw, ok := value.(map[string]any)
+				if !ok {
+					return nil, errors.New("115 任务数据无效")
+				}
+				encoded, _ := json.Marshal(raw)
+				var task automation115Task
+				if err := json.Unmarshal(encoded, &task); err != nil {
+					return nil, err
+				}
+				task.DirectoryID = automationAnyString(raw["wp_path_id"])
+				task.Percent, _ = strconv.ParseFloat(automationAnyString(raw["percentDone"]), 64)
+				task.Response = raw
+				tasks = append(tasks, task)
+			}
+			pageCount, err := automation115Integer(data["page_count"], 0, 1000000)
+			if err != nil {
+				return nil, err
+			}
+			if pageNumber >= pageCount {
+				return tasks, nil
 			}
 		}
-		return tasks, nil
+		return nil, errors.New("115 任务查询达到 200 页上限")
 	case "cookie":
 		if g.web115 == nil {
 			return nil, errors.New("115 Cookie 服务未初始化")
@@ -336,6 +351,11 @@ func (s *AutomationService) executeAutomationWait115(ctx context.Context, nodeRu
 	output["access_method"] = accessMethod
 	output["directory_id"] = automationAnyString(sourceOutput["directory_id"])
 	output["hashes"] = hashes
+	delete(output, "file_id")
+	delete(output, "file_name")
+	if len(hashes) == 1 {
+		output["info_hash"] = hashes[0]
+	}
 
 	listedTasks, listErr := gateway.ListOfflineTasks(ctx, storage, accessMethod)
 	if listErr != nil {
@@ -372,7 +392,7 @@ func (s *AutomationService) executeAutomationWait115(ctx context.Context, nodeRu
 					failedName = task.InfoHash
 				}
 				failedNames = append(failedNames, failedName)
-			case task.Status == 2 && strings.TrimSpace(task.FileID) != "":
+			case task.Status == 2 && strings.TrimSpace(task.FileID) != "" && task.FileID != "0":
 				fileIDs = append(fileIDs, task.FileID)
 				fileNames = append(fileNames, task.Name)
 			default:
@@ -385,7 +405,7 @@ func (s *AutomationService) executeAutomationWait115(ctx context.Context, nodeRu
 	output["pending_hashes"] = pendingHashes
 	output["file_ids"] = fileIDs
 	output["file_names"] = fileNames
-	if len(fileIDs) == 1 {
+	if len(hashes) == 1 && len(fileIDs) == 1 {
 		output["file_id"] = fileIDs[0]
 		output["file_name"] = fileNames[0]
 	}
@@ -519,9 +539,11 @@ func (s *AutomationService) executeAutomationMoviePilotRecognize(ctx context.Con
 	items := make([]map[string]any, 0, len(files))
 	failed := make([]map[string]any, 0)
 	technicalErrors := make([]error, 0)
-	recognizer := automationRecognitionSourceAdapter{
-		base: s.moviePilot, source: automationConfigString(node.Config, "recognition_source"),
+	recognizer, err := freezeAutomationRecognizer(s.moviePilot, automationConfigString(node.Config, "recognition_source"))
+	if err != nil {
+		return nil, err
 	}
+	output["recognition_source"] = recognizer.source
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return output, err
@@ -540,11 +562,13 @@ func (s *AutomationService) executeAutomationMoviePilotRecognize(ctx context.Con
 			}
 			failed = append(failed, map[string]any{
 				"file_id": file.FileID, "file_name": file.Name, "file_path": file.Path,
-				"recognize_input": recognizeInput, "error": reason,
+				"recognize_input": recognizeInput, "error": reason, "recognition_raw": *recognizer.raw,
 			})
 			continue
 		}
-		items = append(items, automationMoviePilotOutput(file, recognizeInput, info))
+		item := automationMoviePilotOutput(file, recognizeInput, info)
+		item["recognition_raw"] = *recognizer.raw
+		items = append(items, item)
 	}
 	output["items"] = items
 	output["failed_items"] = failed
@@ -734,6 +758,17 @@ func resolveAutomationOptionalTMDBID(runContext map[string]any, configured strin
 
 func recognizeAutomationMediaFile(recognizer automationMoviePilotRecognizer, file automation115MediaFile, tmdbID string) (MoviePilotMediaInfo, string, bool, error) {
 	candidates := automationRecognitionCandidates(file, tmdbID)
+	if medianameAutomationRecognizer(recognizer) {
+		input := file.Path
+		if input == "" {
+			input = file.Name
+		}
+		if tmdbID != "" {
+			ext := path.Ext(input)
+			input = strings.TrimSuffix(input, ext) + " [tmdb=" + tmdbID + "]" + ext
+		}
+		candidates = []string{input}
+	}
 	lastInput := ""
 	responded := false
 	requestErrors := make([]error, 0)

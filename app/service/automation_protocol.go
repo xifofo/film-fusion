@@ -34,6 +34,7 @@ func automationTemplateVariable(name, valueType, label, description string, exam
 }
 
 var automationNodeProtocols = []AutomationNodeProtocol{
+	automationTorrentMagnetProtocol(),
 	{Type: AutomationNodeTrigger, Label: "触发事件", Inputs: []AutomationVariableProtocol{}, Outputs: []AutomationVariableProtocol{
 		automationVariable("selected_port", "string", "流程出口", "固定为 next。触发事件字段均可通过 $item.* 引用。", "next"),
 		automationVariable("title", "string", "事件名称", "RSS 条目标题，或 115 新增文件和目录名称。", "Example.Show.S01"),
@@ -325,24 +326,72 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 	{Type: AutomationNodeOffline115, Label: "115 云下载（Cookie）", Inputs: []AutomationVariableProtocol{
 		automationTemplateVariable("url", "string", "下载地址", "提交到 115 的下载地址。", "$item.download_url", true),
 	}, Outputs: automation115SubmitOutputs()},
-	{Type: AutomationNodeOffline115OpenAPI, Label: "115 云下载（OpenAPI）", Inputs: []AutomationVariableProtocol{
-		automationTemplateVariable("url", "string", "下载地址", "提交到 115 OpenAPI 的下载地址。", "$item.download_url", true),
-	}, Outputs: automation115SubmitOutputs()},
+	{Type: AutomationNodeOffline115OpenAPI, Label: "115 添加链接任务", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("url", "string", "下载链接", "支持磁力、HTTP(S)、FTP、电驴；多个链接换行分隔，每批最多 115 个。", "$item.download_url", true),
+	}, Outputs: automation115LinkOutputs()},
+	{Type: AutomationNodeTorrent115OpenAPI, Label: "115 解析 BT 种子", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("torrent_sha1", "string", "种子文件 SHA1", "已上传到当前账号的种子文件 SHA1，不是 BT info_hash。", "$vars.torrent_sha1", true),
+		automationTemplateVariable("pick_code", "string", "种子提取码", "当前账号内种子文件的 pick_code。", "$vars.pick_code", true),
+	}, Outputs: automation115CloudOutputs("object",
+		automationVariable("info_hash", "string", "BT 任务 Hash", "种子解析出的 info_hash，用于添加 BT 任务。", "abcdef"),
+		automationVariable("torrent_name", "string", "种子任务名称", "解析得到的任务名称，可作为 BT 保存路径。", "Example.Show"),
+		automationVariable("file_size", "integer", "任务大小", "种子内文件总大小（字节）。", 1024),
+		automationVariable("file_count", "integer", "文件数量", "种子包含的文件数量。", 1),
+		automationVariable("torrent_filelist", "array", "种子文件列表", "保留 size、path、wanted；数组索引用于添加任务时选择下载文件。", []any{}),
+		automationVariable("wanted", "string", "默认选中文件索引", "将 wanted=1 的文件索引以逗号拼接；未默认选中时为空，需自行选择。", "0,1"),
+		automationVariable("torrent_sha1", "string", "种子文件 SHA1", "本次解析输入的种子文件 SHA1。", "abc123"),
+		automationVariable("pick_code", "string", "种子提取码", "本次解析输入的种子提取码。", "pick123"),
+	)},
+	{Type: AutomationNodeOffline115BTOpenAPI, Label: "115 添加 BT 任务", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("info_hash", "string", "BT 任务 Hash", "引用种子解析节点的 info_hash。", "{{nodes.torrent.output.info_hash}}", true),
+		automationTemplateVariable("wanted", "string", "下载文件索引", "以逗号分隔的文件索引；0 是有效值，不可为空。", "0,1", true),
+		automationTemplateVariable("save_path", "string", "相对保存路径", "相对于保存目录的路径，例如 A/B。", "Example.Show", true),
+		automationTemplateVariable("torrent_sha1", "string", "种子文件 SHA1", "当前账号内种子文件的 SHA1。", "{{nodes.torrent.output.torrent_sha1}}", true),
+		automationTemplateVariable("pick_code", "string", "种子提取码", "当前账号内种子文件的提取码。", "{{nodes.torrent.output.pick_code}}", true),
+	}, Outputs: append(append(automation115SubmitOutputs(), automation115ResponseOutputs("array")...),
+		automationVariable("info_hash", "string", "提交任务 Hash", "提交成功后透传输入 Hash；115 此接口原始 data 为空数组。", "abcdef"),
+		automationVariable("save_path", "string", "相对保存路径", "本次提交的 BT 保存路径。", "Example.Show"),
+	)},
+	{Type: AutomationNodeList115TasksOpenAPI, Label: "115 云下载任务列表", Inputs: []AutomationVariableProtocol{
+		automationVariable("page", "integer", "查询页码", "未指定 Hash 时查询这一页，默认 1。", 1),
+		automationTemplateVariable("info_hash", "string", "查找任务 Hash", "可选。指定后从第一页逐页精确匹配，最多 200 页；找到后可连接等待节点。", "{{nodes.download.output.info_hash}}", false),
+	}, Outputs: automation115TaskListOutputs()},
+	{Type: AutomationNodeQuota115OpenAPI, Label: "115 云下载配额", Inputs: []AutomationVariableProtocol{}, Outputs: automation115CloudOutputs("object",
+		automationVariable("count", "integer", "总配额", "用户总云下载配额。", 100),
+		automationVariable("surplus", "integer", "剩余配额", "用户总剩余云下载配额。", 80),
+		automationVariable("used", "integer", "已用配额", "用户总已用云下载配额。", 20),
+		automationVariable("package", "array", "配额明细", "保留各类型的 surplus、used、count、name 和 expire_info 过期明细。", []any{}),
+	)},
+	{Type: AutomationNodeDelete115TaskOpenAPI, Label: "115 删除云下载任务", Inputs: []AutomationVariableProtocol{
+		automationTemplateVariable("info_hash", "string", "删除任务 Hash", "要删除的单个任务 info_hash。", "{{nodes.download.output.info_hash}}", true),
+		automationVariable("delete_files", "boolean", "同时删除源文件", "默认 false，仅删除任务；true 同时删除对应源文件。", false),
+	}, Outputs: automation115CloudOutputs("array",
+		automationVariable("deleted", "boolean", "任务已删除", "115 确认删除成功。", true),
+		automationVariable("info_hash", "string", "删除任务 Hash", "本次删除目标的 Hash。", "abcdef"),
+		automationVariable("delete_files", "boolean", "同时删除源文件", "本次是否要求删除源文件。", false),
+	)},
+	{Type: AutomationNodeClear115TasksOpenAPI, Label: "115 清空云下载任务", Inputs: []AutomationVariableProtocol{
+		automationVariable("flag", "integer", "清理范围", "0 完成、1 全部、2 失败、3 进行中、4 完成并删源文件、5 全部并删源文件。", 0),
+	}, Outputs: automation115CloudOutputs("array",
+		automationVariable("cleared", "boolean", "任务已清空", "115 确认清空成功。", true),
+		automationVariable("flag", "integer", "清理范围", "本次提交的清理类型。", 0),
+	)},
 	{Type: AutomationNodeWait115, Label: "等待 115 下载完成", Inputs: []AutomationVariableProtocol{}, Outputs: []AutomationVariableProtocol{
+		automationVariable("info_hash", "string", "单任务 Hash", "仅等待单个任务时返回其 Hash。", "abcdef"),
 		automationVariable("completed", "boolean", "是否下载完成", "所有 115 云下载任务是否完成。", true),
 		automationVariable("percent", "number", "下载进度", "所有任务的平均下载进度。", 100),
-		automationVariable("file_id", "string", "首个完成文件 ID", "单任务完成时返回的文件或文件夹 ID。", "123456"),
+		automationVariable("file_id", "string", "已完成对象 ID", "仅单任务完成时返回的文件或文件夹 ID，多任务请使用 file_ids。", "123456"),
 		automationVariable("file_name", "string", "首个完成文件名", "单任务完成时返回的文件或文件夹名称。", "Example.Movie.2026"),
 		automationVariable("file_ids", "array", "完成文件 ID", "全部完成任务的文件或文件夹 ID。", []string{"123456"}),
 		automationVariable("file_names", "array", "完成文件名", "全部完成任务的文件或文件夹名称。", []string{"Example.Movie.2026"}),
 		automationVariable("directory_id", "string", "下载目录 ID", "115 离线任务保存目录 ID。", "0"),
 		automationVariable("cloud_storage_id", "integer", "115 账号 ID", "执行下载的云存储账号 ID。", 1),
-		automationVariable("tasks", "array", "完成任务", "115 云下载任务详情。", []any{}),
+		automationVariable("tasks", "array", "完成任务", "115 任务详情；OpenAPI 任务的 response 保留该任务所有原始字段。", []any{}),
 	}},
 	{Type: AutomationNodeRename115OpenAPI, Label: "115 API 重命名", Inputs: []AutomationVariableProtocol{
 		automationTemplateVariable("file_id", "string", "文件或文件夹 ID", "要通过 115 OpenAPI 重命名的对象 ID，通常引用等待节点的 file_id。", "{{nodes.wait115.output.file_id}}", true),
 		automationTemplateVariable("new_name", "string", "新名称", "完整的新文件名或文件夹名；重命名文件时请按需保留扩展名。", "{{item.title}}.mkv", true),
-	}, Outputs: []AutomationVariableProtocol{
+	}, Outputs: append([]AutomationVariableProtocol{
 		automationVariable("renamed", "boolean", "重命名成功", "115 OpenAPI 是否已成功完成重命名。", true),
 		automationVariable("file_id", "string", "文件或文件夹 ID", "已重命名对象的 115 ID。", "123456"),
 		automationVariable("file_name", "string", "实际名称", "115 OpenAPI 返回的实际文件名或文件夹名。", "示例剧.S01E01.mkv"),
@@ -350,7 +399,7 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("cloud_storage_id", "integer", "115 账号 ID", "执行重命名的云存储账号 ID。", 1),
 		automationVariable("storage_name", "string", "115 账号名称", "执行重命名的账号名称。", "115 主账号"),
 		automationVariable("access_method", "string", "访问方式", "固定为 openapi。", "openapi"),
-	}},
+	}, automation115ResponseOutputs("object")...)},
 	{Type: AutomationNodeMoviePilotTitle, Label: "MP 标题识别", Inputs: automationRecognitionInputs("$item.title"), Outputs: automationRecognitionOutputs()},
 	{Type: AutomationNodeFilmFusionRecognize, Label: "FilmFusion 本地识别", Inputs: []AutomationVariableProtocol{
 		automationVariable("recognition_mode", "string", "识别模式", "title 识别发布标题；file 递归识别等待节点返回的 115 下载文件。", "title"),
@@ -382,7 +431,14 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("failed_items", "array", "识别失败明细", "未能识别的媒体文件及原因。", []any{}),
 		automationVariable("partial", "boolean", "部分识别", "是否只有部分文件识别成功。", false),
 	)},
-	{Type: AutomationNodeOrganizeStrm, Label: "整理生成 STRM", Inputs: []AutomationVariableProtocol{}, Outputs: []AutomationVariableProtocol{
+	{Type: AutomationNodeOrganizeStrm, Label: "整理生成 STRM", Inputs: []AutomationVariableProtocol{
+		automationVariable("recognition_source", "string", "整理引擎", "moviepilot、medianame、shadow；留空跟随目录或系统设置。", "shadow"),
+		automationVariable("dry_run", "boolean", "只生成预览", "生成完整计划，不移动文件或写 STRM。", false),
+	}, Outputs: []AutomationVariableProtocol{
+		automationVariable("recognition_source", "string", "固定引擎", "本任务识别和整理使用同一模式。", "shadow"),
+		automationVariable("dry_run", "boolean", "仅预览", "为 true 时仅生成计划，没有文件操作。", false),
+		automationVariable("planned_count", "integer", "预览文件数", "只预览时有效计划中的媒体数量。", 1),
+		automationVariable("plans", "array", "计划快照", "各批次 plan_id、包版本和配置快照；items 内包含完整路径与影子诊断。", []any{}),
 		automationVariable("organized_count", "integer", "整理文件数", "成功整理的媒体文件数量。", 1),
 		automationVariable("strm_count", "integer", "STRM 数量", "成功生成的 STRM 文件数量。", 1),
 		automationVariable("failed_count", "integer", "失败数量", "整理失败的项目数量。", 0),
@@ -476,7 +532,7 @@ func automationRecognitionInputs(defaultInput string) []AutomationVariableProtoc
 	if defaultInput != "" {
 		fields = append(fields, automationTemplateVariable("input", "string", "待识别标题", "MoviePilot 标题识别输入。", defaultInput, true))
 	}
-	fields = append(fields, automationVariable("recognition_source", "string", "识别方式", "moviepilot、local 或 shadow；留空跟随系统设置。", "shadow"))
+	fields = append(fields, automationVariable("recognition_source", "string", "识别方式", "moviepilot、medianame、local 或 shadow；留空跟随系统设置。", "shadow"))
 	fields = append(fields, automationTemplateVariable("tmdb_id", "string", "辅助 TMDB ID", "留空自动识别，或提供 TMDB ID 辅助识别。", "1396", false))
 	return fields
 }

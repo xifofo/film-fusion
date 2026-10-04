@@ -92,6 +92,9 @@ func (s *AutomationService) nextAutomationRunBatch() ([]model.AutomationRun, err
 
 func (s *AutomationService) advanceAutomationRun(run model.AutomationRun) error {
 	definition, err := ParseAutomationDefinition(run.DefinitionJSON)
+	if err == nil {
+		definition, err = resolveAutomationParameters(definition)
+	}
 	if err != nil {
 		return s.failAutomationRun(run.ID, err)
 	}
@@ -368,11 +371,18 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 	case AutomationNodeDeleteQBittorrent:
 		output, err := s.executeAutomationDeleteQBittorrent(ctx, node, definition, runContext)
 		return withAutomationSelectedPort(output, err), err
+	case AutomationNodeTorrentToMagnet:
+		output, err := executeAutomationTorrentToMagnet(ctx, node, runContext)
+		return withAutomationSelectedPort(output, err), err
 	case AutomationNodeOffline115:
 		output, err := s.executeAutomationOffline115(ctx, node, runContext)
 		return withAutomationSelectedPort(output, err), err
 	case AutomationNodeOffline115OpenAPI:
 		output, err := s.executeAutomationOffline115OpenAPI(ctx, node, runContext)
+		return withAutomationSelectedPort(output, err), err
+	case AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
+		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI:
+		output, err := s.executeAutomation115OpenAPI(ctx, node, runContext)
 		return withAutomationSelectedPort(output, err), err
 	case AutomationNodeWait115:
 		return s.executeAutomationWait115(ctx, nodeRun, node, definition, runContext)
@@ -641,7 +651,7 @@ func (s *AutomationService) completeAutomationNode(nodeRun model.AutomationNodeR
 		updates["status"] = model.AutomationNodeSucceeded
 		updates["error_message"] = ""
 		updates["completed_at"] = now
-	} else if nodeRun.Attempt < nodeRun.MaxAttempts {
+	} else if nodeRun.Attempt < nodeRun.MaxAttempts && !isAutomationNonRetryableNode(nodeRun.NodeType) {
 		delay := time.Duration(math.Min(math.Pow(2, float64(nodeRun.Attempt-1))*5, 300)) * time.Second
 		next := now.Add(delay)
 		updates["status"] = model.AutomationNodePending
@@ -717,6 +727,7 @@ func (s *AutomationService) buildAutomationRunContext(run model.AutomationRun, c
 		return nil, err
 	}
 	orderedAncestors, err := automationAncestorTopologicalOrder(definition, currentNodeID)
+	contextValue["params"] = definition.Parameters
 	if err != nil {
 		return nil, err
 	}

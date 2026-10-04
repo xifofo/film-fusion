@@ -64,11 +64,11 @@ func TestOrganize115CookieRequestFailureIsLogged(t *testing.T) {
 	r := httptest.NewRequest("POST", "/api/organize/115-cookie", strings.NewReader(`{"cloud_directory_id":2,"dry_run":false}`))
 	r.Header.Set("Content-Type", "application/json")
 	router.ServeHTTP(w, r)
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "115 目录ID为空") {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "缺少已确认的整理计划；历史预览不兼容，请重新预览") {
 		t.Fatalf("unexpected response: %d %s", w.Code, w.Body.String())
 	}
 	row := waitForOrganizeFailureLog(t, db)
-	if row.Action != model.OrganizeActionMediaOrganize || row.Status != model.OrganizeStatusFailed || row.Trigger != model.OrganizeTriggerManual || row.Error != "115 目录ID为空" {
+	if row.Action != model.OrganizeActionMediaOrganize || row.Status != model.OrganizeStatusFailed || row.Trigger != model.OrganizeTriggerManual || row.Error != "缺少已确认的整理计划；历史预览不兼容，请重新预览" {
 		t.Fatalf("unexpected failure log: %+v", row)
 	}
 }

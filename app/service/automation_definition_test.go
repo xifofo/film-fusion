@@ -379,7 +379,7 @@ func TestValidateAutomationDefinitionRequiresMediaNodePredecessors(t *testing.T)
 		},
 	}
 	result := ValidateAutomationDefinition(definition)
-	if result.Valid || !containsAutomationValidationError(result.Errors, "必须连接在 115 离线节点之后") {
+	if result.Valid || !containsAutomationValidationError(result.Errors, "必须连接在 115 下载提交或按 Hash 查询任务节点之后") {
 		t.Fatalf("unexpected validation result: %#v", result)
 	}
 }

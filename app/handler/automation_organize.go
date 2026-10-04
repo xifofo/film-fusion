@@ -33,12 +33,13 @@ func (h *OrganizeHandler) OrganizeAutomation(
 			FolderID: item.FolderID, FolderName: item.FolderName, FolderPath: item.FolderPath,
 		})
 	}
-	result, err := h.buildOrganize115CookieResult(request.UserID, Organize115CookieRequest{
+	params := Organize115CookieRequest{
 		CloudDirectoryID:         request.CloudDirectoryID,
 		FolderIDs:                request.FolderIDs,
 		FileIDs:                  request.FileIDs,
 		FolderContexts:           contexts,
-		DryRun:                   false,
+		DryRun:                   true,
+		RecognitionSource:        request.RecognitionSource,
 		MediaType:                request.MediaType,
 		Category:                 request.Category,
 		BestVersionEnabled:       request.BestVersionEnabled,
@@ -46,10 +47,18 @@ func (h *OrganizeHandler) OrganizeAutomation(
 		FilenameRegexEnabled:     request.FilenameRegexEnabled,
 		FilenameRegexPattern:     request.FilenameRegexPattern,
 		FilenameRegexReplacement: request.FilenameRegexReplacement,
-	})
-	if err != nil {
-		return nil, err
 	}
+	result, err := h.buildOrganize115CookieResult(request.UserID, params)
+	if err == nil {
+		err = organizePreviewError(result)
+	}
+	if err == nil && !request.DryRun {
+		params.PlanID = result.PlanID
+		params.RecognitionSource = result.RecognitionSource
+		params.DryRun = false
+		result, err = h.buildOrganize115CookieResult(request.UserID, params)
+	}
+	planErr := err
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return nil, err
@@ -58,7 +67,7 @@ func (h *OrganizeHandler) OrganizeAutomation(
 	if err := json.Unmarshal(encoded, &output); err != nil {
 		return nil, err
 	}
-	return output, nil
+	return output, planErr
 }
 
 func (h *OrganizeHandler) CheckAutomationMediaStatus(

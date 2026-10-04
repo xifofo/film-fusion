@@ -333,7 +333,9 @@ func newAutomationTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&model.SystemConfig{},
+		&model.RSSFeedCache{},
 		&model.AutomationSource{}, &model.AutomationWorkflow{}, &model.AutomationTarget{},
+		&model.AutomationSettings{}, &model.AutomationTemplate{}, &model.AutomationRevision{}, &model.AutomationAlert{},
 		&model.AutomationEntry{}, &model.AutomationRun{}, &model.AutomationNodeRun{},
 		&model.AutomationDedupRecord{}, &model.AutomationRateLimitBucket{}, &model.AutomationRateLimitClaim{},
 		&model.Automation115DirectoryCursor{}, &model.Automation115SeenItem{}, &model.Automation115Candidate{},

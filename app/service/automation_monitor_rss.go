@@ -3,11 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"film-fusion/app/model"
@@ -16,10 +12,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const (
-	automationRSSSampleLimit      = 20
-	automationRSSDefaultUserAgent = "FilmFusion-RSS-Automation/1.0"
-)
+const automationRSSSampleLimit = 20
 
 func (s *AutomationService) SampleRSSSource(ctx context.Context, input AutomationSourceInput) (RSSAutomationParsedFeed, error) {
 	input.TriggerType = model.AutomationTriggerRSS
@@ -27,20 +20,11 @@ func (s *AutomationService) SampleRSSSource(ctx context.Context, input Automatio
 	if err != nil {
 		return RSSAutomationParsedFeed{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, input.FeedURL, nil)
+	cached, err := s.rssFeedService().readRSSFeed(ctx, input.FeedURL, true)
 	if err != nil {
-		return RSSAutomationParsedFeed{}, errors.New("创建 RSS 请求失败")
+		return RSSAutomationParsedFeed{}, err
 	}
-	s.setAutomationRSSRequestHeaders(req)
-	resp, err := s.automationHTTPClient().Do(req)
-	if err != nil {
-		return RSSAutomationParsedFeed{}, fmt.Errorf("请求 RSS 源失败: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RSSAutomationParsedFeed{}, fmt.Errorf("RSS 源返回 HTTP %d", resp.StatusCode)
-	}
-	return ParseRSSAutomationFeed(resp.Body, input.Mapping, automationRSSSampleLimit)
+	return parseCachedRSSFeed(cached, input.Mapping, automationRSSSampleLimit)
 }
 
 func (s *AutomationService) scanAutomationRSS(ctx context.Context, source model.AutomationSource) (result AutomationScanResult, returnErr error) {
@@ -55,53 +39,14 @@ func (s *AutomationService) scanAutomationRSS(ctx context.Context, source model.
 		s.recordAutomationRSSFailure(source.ID, err)
 		return result, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source.FeedURL, nil)
-	if err != nil {
-		return result, err
-	}
-	s.setAutomationRSSRequestHeaders(req)
-	if source.Initialized && source.ETag != "" {
-		req.Header.Set("If-None-Match", source.ETag)
-	}
-	if source.Initialized && source.LastModified != "" {
-		req.Header.Set("If-Modified-Since", source.LastModified)
-	}
-	hasConditionalHeaders := req.Header.Get("If-None-Match") != "" || req.Header.Get("If-Modified-Since") != ""
-	resp, err := s.automationHTTPClient().Do(req)
+	cached, err := s.rssFeedService().readRSSFeed(ctx, source.FeedURL, true)
 	if err != nil {
 		s.recordAutomationRSSFailure(source.ID, err)
-		return result, fmt.Errorf("请求 RSS 源失败: %w", err)
+		return result, err
 	}
-	conditionalFallback := false
-	if hasConditionalHeaders && resp.StatusCode >= http.StatusInternalServerError {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
-		_ = resp.Body.Close()
-		fallbackReq, requestErr := http.NewRequestWithContext(ctx, http.MethodGet, source.FeedURL, nil)
-		if requestErr != nil {
-			s.recordAutomationRSSFailure(source.ID, requestErr)
-			return result, requestErr
-		}
-		s.setAutomationRSSRequestHeaders(fallbackReq)
-		resp, err = s.automationHTTPClient().Do(fallbackReq)
-		if err != nil {
-			s.recordAutomationRSSFailure(source.ID, err)
-			return result, fmt.Errorf("无条件重试 RSS 源失败: %w", err)
-		}
-		conditionalFallback = true
-	}
-	defer resp.Body.Close()
+	result.RSSCacheMetadata = cached.RSSCacheMetadata
 	checkedAt := time.Now()
-	if resp.StatusCode == http.StatusNotModified {
-		result.NotModified = true
-		s.recordAutomationRSSSuccess(source.ID, checkedAt, source.Initialized, source.ETag, source.LastModified)
-		return result, nil
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		err := fmt.Errorf("RSS 源返回 HTTP %d", resp.StatusCode)
-		s.recordAutomationRSSFailure(source.ID, err)
-		return result, err
-	}
-	feed, err := ParseRSSAutomationFeed(io.LimitReader(resp.Body, maxRSSAutomationBodyBytes+1), mapping, 0)
+	feed, err := parseCachedRSSFeed(cached, mapping, 0)
 	if err != nil {
 		s.recordAutomationRSSFailure(source.ID, err)
 		return result, err
@@ -129,13 +74,13 @@ func (s *AutomationService) scanAutomationRSS(ctx context.Context, source model.
 		result.CreatedEntries++
 		result.CreatedRuns += createdRuns
 	}
-	newETag := strings.TrimSpace(resp.Header.Get("ETag"))
-	newLastModified := strings.TrimSpace(resp.Header.Get("Last-Modified"))
-	if conditionalFallback {
-		newETag = ""
-		newLastModified = ""
+	updates := map[string]any{
+		"last_checked_at": checkedAt, "initialized": true,
+		"last_success_at": cached.CacheFetchedAt, "last_error": cached.CacheWarning,
 	}
-	s.recordAutomationRSSSuccess(source.ID, checkedAt, true, newETag, newLastModified)
+	if err := s.db.Model(&model.AutomationSource{}).Where("id = ?", source.ID).Updates(updates).Error; err != nil {
+		return result, err
+	}
 	s.wakeExecution()
 	return result, nil
 }
@@ -204,34 +149,9 @@ func (s *AutomationService) recordAutomationRSSFailure(sourceID uint, refreshErr
 	}).Error
 }
 
-func (s *AutomationService) recordAutomationRSSSuccess(sourceID uint, checkedAt time.Time, initialized bool, etag, lastModified string) {
-	_ = s.db.Model(&model.AutomationSource{}).Where("id = ?", sourceID).Updates(map[string]any{
-		"last_checked_at": checkedAt, "last_success_at": checkedAt, "last_error": "",
-		"initialized": initialized, "etag": etag, "last_modified": lastModified,
-	}).Error
-}
-
 func (s *AutomationService) automationHTTPClient() *http.Client {
 	if s != nil && s.httpClient != nil {
 		return s.httpClient
 	}
 	return &http.Client{Timeout: 30 * time.Second}
-}
-
-func (s *AutomationService) setAutomationRSSRequestHeaders(req *http.Request) {
-	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5")
-	req.Header.Set("User-Agent", s.automationRSSUserAgent())
-}
-
-func (s *AutomationService) automationRSSUserAgent() string {
-	if s != nil && s.db != nil && s.db.Migrator().HasTable(&model.SystemConfig{}) {
-		var setting model.SystemConfig
-		if err := s.db.Where("config_key IN ?", []string{"rss_automation.user_agent", "automation.rss_user_agent"}).
-			Order("CASE config_key WHEN 'automation.rss_user_agent' THEN 0 ELSE 1 END").First(&setting).Error; err == nil {
-			if value := strings.TrimSpace(setting.ConfigValue); value != "" && !strings.ContainsAny(value, "\r\n") {
-				return value
-			}
-		}
-	}
-	return automationRSSDefaultUserAgent
 }

@@ -36,15 +36,17 @@ const web115DirCacheTTL = 10 * time.Minute
 
 // OrganizeHandler 处理整理文件的接口
 type OrganizeHandler struct {
-	logger         *logger.Logger
-	sdk115Open     *sdk115.Client
-	moviePilotSvc  *service.MoviePilotService
-	tmdbSvc        *service.TMDBService
-	web115Svc      *service.Web115Service
-	download115Svc *service.Download115Service
-	dirCache       *service.Web115DirCache
-	embyClient     *embyhelper.EmbyClient
-	previewQueue   *service.OrganizePreviewQueue
+	logger              *logger.Logger
+	sdk115Open          *sdk115.Client
+	moviePilotSvc       *service.MoviePilotService
+	tmdbSvc             *service.TMDBService
+	web115Svc           *service.Web115Service
+	download115Svc      *service.Download115Service
+	dirCache            *service.Web115DirCache
+	embyClient          *embyhelper.EmbyClient
+	previewQueue        *service.OrganizePreviewQueue
+	newOrganizeClient   func(string) (*driver.Pan115Client, error)
+	readUpgradeSubtitle func(*model.CloudStorage, string, int64) ([]byte, error)
 }
 
 func NewOrganizeHandler(log *logger.Logger, moviePilotSvc *service.MoviePilotService, tmdbSvc *service.TMDBService, download115Svc *service.Download115Service, embyClient *embyhelper.EmbyClient) *OrganizeHandler {
@@ -86,6 +88,7 @@ type Organize115Request struct {
 }
 
 type Organize115CookieRequest struct {
+	PlanID                   string                     `json:"plan_id,omitempty"`
 	CloudDirectoryID         uint                       `json:"cloud_directory_id" binding:"required"`
 	FolderID                 string                     `json:"folder_id"`
 	FolderIDs                []string                   `json:"folder_ids"`
@@ -109,34 +112,40 @@ type Organize115FolderContext struct {
 }
 
 type Organize115CookieGroup struct {
-	FolderID string                  `json:"folder_id"`
-	Total    int                     `json:"total"`
-	DirDebug []Organize115DirDebug   `json:"dir_debug,omitempty"`
-	Items    []Organize115ItemResult `json:"items,omitempty"`
-	Error    string                  `json:"error,omitempty"`
+	SourceManifest string                  `json:"source_manifest,omitempty"`
+	FolderID       string                  `json:"folder_id"`
+	Total          int                     `json:"total"`
+	DirDebug       []Organize115DirDebug   `json:"dir_debug,omitempty"`
+	Items          []Organize115ItemResult `json:"items,omitempty"`
+	Error          string                  `json:"error,omitempty"`
 }
 
 type Organize115CookieResult struct {
-	CloudDirectoryID               uint                     `json:"cloud_directory_id"`
-	CloudStorageID                 uint                     `json:"cloud_storage_id"`
-	FolderID                       string                   `json:"folder_id"`
-	FolderIDs                      []string                 `json:"folder_ids,omitempty"`
-	MediaType                      string                   `json:"media_type,omitempty"`
-	RecognitionSource              string                   `json:"recognition_source"`
-	Category                       string                   `json:"category,omitempty"`
-	BestVersionEnabled             bool                     `json:"best_version_enabled,omitempty"`
-	DryRun                         bool                     `json:"dry_run"`
-	Total                          int                      `json:"total"`
-	DirDebug                       []Organize115DirDebug    `json:"dir_debug,omitempty"`
-	Items                          []Organize115ItemResult  `json:"items,omitempty"`
-	TmdbRefs                       []OrganizePreviewTmdbRef `json:"tmdb_refs,omitempty"`
-	VersionGroups                  []OrganizeVersionGroup   `json:"version_groups,omitempty"`
-	Groups                         []Organize115CookieGroup `json:"groups,omitempty"`
-	SourceFolderDeleted            bool                     `json:"source_folder_deleted,omitempty"`
-	SourceFolderDeletedCount       int                      `json:"source_folder_deleted_count,omitempty"`
-	SourceFolderDeletePending      bool                     `json:"source_folder_delete_pending,omitempty"`
-	SourceFolderDeletePendingCount int                      `json:"source_folder_delete_pending_count,omitempty"`
-	SourceFolderDeleteErrors       []string                 `json:"source_folder_delete_errors,omitempty"`
+	UpgradePolicy                  *service.MediaUpgradePolicy    `json:"upgrade_policy,omitempty"`
+	UpgradeDirectories             []OrganizeUpgradeDirectory     `json:"upgrade_directories,omitempty"`
+	UpgradeJob                     *model.OrganizeUpgradeJob      `json:"upgrade_job,omitempty"`
+	PlanID                         string                         `json:"plan_id,omitempty"`
+	Pipeline                       *service.MediaPipelineSnapshot `json:"pipeline,omitempty"`
+	CloudDirectoryID               uint                           `json:"cloud_directory_id"`
+	CloudStorageID                 uint                           `json:"cloud_storage_id"`
+	FolderID                       string                         `json:"folder_id"`
+	FolderIDs                      []string                       `json:"folder_ids,omitempty"`
+	MediaType                      string                         `json:"media_type,omitempty"`
+	RecognitionSource              string                         `json:"recognition_source"`
+	Category                       string                         `json:"category,omitempty"`
+	BestVersionEnabled             bool                           `json:"best_version_enabled,omitempty"`
+	DryRun                         bool                           `json:"dry_run"`
+	Total                          int                            `json:"total"`
+	DirDebug                       []Organize115DirDebug          `json:"dir_debug,omitempty"`
+	Items                          []Organize115ItemResult        `json:"items,omitempty"`
+	TmdbRefs                       []OrganizePreviewTmdbRef       `json:"tmdb_refs,omitempty"`
+	VersionGroups                  []OrganizeVersionGroup         `json:"version_groups,omitempty"`
+	Groups                         []Organize115CookieGroup       `json:"groups,omitempty"`
+	SourceFolderDeleted            bool                           `json:"source_folder_deleted,omitempty"`
+	SourceFolderDeletedCount       int                            `json:"source_folder_deleted_count,omitempty"`
+	SourceFolderDeletePending      bool                           `json:"source_folder_delete_pending,omitempty"`
+	SourceFolderDeletePendingCount int                            `json:"source_folder_delete_pending_count,omitempty"`
+	SourceFolderDeleteErrors       []string                       `json:"source_folder_delete_errors,omitempty"`
 }
 
 type organizeFactSummary struct {
@@ -146,47 +155,53 @@ type organizeFactSummary struct {
 }
 
 type Organize115ItemResult struct {
-	FileID             string                       `json:"file_id"`
-	FileName           string                       `json:"file_name"`
-	FileSize           int64                        `json:"file_size,omitempty"`
-	IsSubtitle         bool                         `json:"is_subtitle,omitempty"`
-	MatchedVideoFileID string                       `json:"matched_video_file_id,omitempty"`
-	RecognizeName      string                       `json:"recognize_name,omitempty"`
-	RecognizeInput     string                       `json:"recognize_input,omitempty"`
-	PickCode           string                       `json:"pickcode"`
-	MediaType          string                       `json:"media_type"`
-	Category           string                       `json:"category"`
-	TmdbID             string                       `json:"tmdb_id,omitempty"`
-	Title              string                       `json:"title"`
-	Year               string                       `json:"year"`
-	TitleYear          string                       `json:"title_year,omitempty"`
-	TransferName       string                       `json:"transfer_name"`
-	TargetPath         string                       `json:"target_path"`
-	TargetDir          string                       `json:"target_dir,omitempty"`
-	TargetDirID        string                       `json:"target_dir_id,omitempty"`
-	NeedCreate         bool                         `json:"need_create,omitempty"`
-	MissingDirs        []string                     `json:"missing_dirs,omitempty"`
-	RenameTo           string                       `json:"rename_to,omitempty"`
-	StrmPath           string                       `json:"strm_path,omitempty"`
-	StrmContent        string                       `json:"strm_content,omitempty"`
-	SubtitleQueued     bool                         `json:"subtitle_queued,omitempty"`
-	SubtitleError      string                       `json:"subtitle_error,omitempty"`
-	LocalDir           string                       `json:"local_dir,omitempty"`
-	LocalExists        bool                         `json:"local_exists,omitempty"`
-	SubtitleFiles      []string                     `json:"external_subtitle_files,omitempty"`
-	VersionScore       int                          `json:"version_score,omitempty"`
-	VersionReasons     []string                     `json:"version_reasons,omitempty"`
-	VersionKey         string                       `json:"version_key,omitempty"`
-	VersionLabel       string                       `json:"version_label,omitempty"`
-	BestVersion        bool                         `json:"best_version,omitempty"`
-	AltVersion         bool                         `json:"alternate_version,omitempty"`
-	SourceSeason       int                          `json:"source_season,omitempty"`
-	SourceEpisode      int                          `json:"source_episode,omitempty"`
-	TargetSeason       int                          `json:"target_season,omitempty"`
-	TargetEpisode      int                          `json:"target_episode,omitempty"`
-	EpisodeMatched     *bool                        `json:"episode_matched,omitempty"`
-	ShadowComparison   *Organize115ShadowComparison `json:"shadow_comparison,omitempty"`
-	Error              string                       `json:"error,omitempty"`
+	Upgrade            *OrganizeUpgradeDecision      `json:"upgrade,omitempty"`
+	Engine             string                        `json:"engine,omitempty"`
+	SeasonEpisode      string                        `json:"season_episode,omitempty"`
+	Medianame          *service.MedianameRecognition `json:"medianame,omitempty"`
+	RecognitionRaw     map[string]any                `json:"recognition_raw,omitempty"`
+	RenameContext      map[string]any                `json:"rename_context,omitempty"`
+	FileID             string                        `json:"file_id"`
+	FileName           string                        `json:"file_name"`
+	FileSize           int64                         `json:"file_size,omitempty"`
+	IsSubtitle         bool                          `json:"is_subtitle,omitempty"`
+	MatchedVideoFileID string                        `json:"matched_video_file_id,omitempty"`
+	RecognizeName      string                        `json:"recognize_name,omitempty"`
+	RecognizeInput     string                        `json:"recognize_input,omitempty"`
+	PickCode           string                        `json:"pickcode"`
+	MediaType          string                        `json:"media_type"`
+	Category           string                        `json:"category"`
+	TmdbID             string                        `json:"tmdb_id,omitempty"`
+	Title              string                        `json:"title"`
+	Year               string                        `json:"year"`
+	TitleYear          string                        `json:"title_year,omitempty"`
+	TransferName       string                        `json:"transfer_name"`
+	TargetPath         string                        `json:"target_path"`
+	TargetDir          string                        `json:"target_dir,omitempty"`
+	TargetDirID        string                        `json:"target_dir_id,omitempty"`
+	NeedCreate         bool                          `json:"need_create,omitempty"`
+	MissingDirs        []string                      `json:"missing_dirs,omitempty"`
+	RenameTo           string                        `json:"rename_to,omitempty"`
+	StrmPath           string                        `json:"strm_path,omitempty"`
+	StrmContent        string                        `json:"strm_content,omitempty"`
+	SubtitleQueued     bool                          `json:"subtitle_queued,omitempty"`
+	SubtitleError      string                        `json:"subtitle_error,omitempty"`
+	LocalDir           string                        `json:"local_dir,omitempty"`
+	LocalExists        bool                          `json:"local_exists,omitempty"`
+	SubtitleFiles      []string                      `json:"external_subtitle_files,omitempty"`
+	VersionScore       int                           `json:"version_score,omitempty"`
+	VersionReasons     []string                      `json:"version_reasons,omitempty"`
+	VersionKey         string                        `json:"version_key,omitempty"`
+	VersionLabel       string                        `json:"version_label,omitempty"`
+	BestVersion        bool                          `json:"best_version,omitempty"`
+	AltVersion         bool                          `json:"alternate_version,omitempty"`
+	SourceSeason       int                           `json:"source_season,omitempty"`
+	SourceEpisode      int                           `json:"source_episode,omitempty"`
+	TargetSeason       int                           `json:"target_season,omitempty"`
+	TargetEpisode      int                           `json:"target_episode,omitempty"`
+	EpisodeMatched     *bool                         `json:"episode_matched,omitempty"`
+	ShadowComparison   *Organize115ShadowComparison  `json:"shadow_comparison,omitempty"`
+	Error              string                        `json:"error,omitempty"`
 }
 
 // Organize115ShadowDifference 是整理预览中一项可直接展示的 MP2/本地差异。
@@ -211,6 +226,7 @@ type Organize115ShadowVariableComparison struct {
 // Organize115ShadowComparison 将识别、命名和最终目标路径的影子结果汇总到
 // 同一条整理明细。MP2 仍是权威结果，本结构只用于预览和观测。
 type Organize115ShadowComparison struct {
+	Medianame            *Organize115ItemResult                    `json:"medianame,omitempty"`
 	Status               string                                    `json:"status"`
 	Matched              bool                                      `json:"matched"`
 	Recognition          *service.MediaRecognitionShadowComparison `json:"recognition,omitempty"`
@@ -339,7 +355,7 @@ func resolveBestVersionEnabled(mediaType string, enabled *bool) bool {
 }
 
 func (h *OrganizeHandler) GetCategoryConfig(c *gin.Context) {
-	cfg, err := h.moviePilotSvc.GetCategoryConfig()
+	cfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(c.Query("recognition_source"))
 	if err != nil {
 		h.error(c, http.StatusBadRequest, 400, "获取 MoviePilot 分类配置失败: "+err.Error())
 		return
@@ -573,11 +589,24 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 		return
 	}
 
-	categoryCfg, err := h.moviePilotSvc.GetCategoryConfig()
+	frozen, snapshot, err := h.moviePilotSvc.FreezeMediaPipeline("")
 	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "获取 MoviePilot 分类配置失败")
+		h.error(c, 400, 400, err.Error())
 		return
 	}
+	worker := *h
+	worker.moviePilotSvc = frozen
+	h = &worker
+	categoryCfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(snapshot.Source)
+	categoryError := ""
+	if err != nil {
+		if snapshot.Source != service.MediaRecognitionSourceShadow {
+			h.error(c, http.StatusBadRequest, 400, "获取媒体分类配置失败")
+			return
+		}
+		categoryError = "获取 MP2 分类配置失败: " + err.Error()
+	}
+	frozen.RecordPipelineCategories(categoryCfg)
 
 	h.sdk115Open.SetAccessToken(storage.AccessToken)
 
@@ -609,68 +638,7 @@ func (h *OrganizeHandler) Organize115(c *gin.Context) {
 			}
 
 			totalFiles++
-			item := Organize115ItemResult{
-				FileID:   file.Fid,
-				FileName: file.Fn,
-				PickCode: file.Pc,
-			}
-
-			recognizeName := normalizeFilenameForRecognition(file.Fn)
-			item.RecognizeName = recognizeName
-			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
-
-			info, recognitionRaw, recErr := h.moviePilotSvc.RecognizeFile(recognizeName)
-			if recErr != nil {
-				item.Error = recErr.Error()
-				continue
-			}
-			if strings.TrimSpace(info.TmdbID) == "" {
-				continue
-			}
-
-			recognizeInput := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
-				info,
-				"",
-				recognizeName,
-				recognizeName,
-			)
-			item.RecognizeInput = recognizeInput
-
-			transferName, transferRaw, transErr := h.moviePilotSvc.TransferName(recognizeInput, ext)
-			transferName = dedupeConsecutiveTransferTags(transferName)
-			if transErr != nil {
-				if item.Error == "" {
-					item.Error = transErr.Error()
-				} else {
-					item.Error = item.Error + "; " + transErr.Error()
-				}
-			}
-
-			item.MediaType = info.MediaType
-			item.TmdbID = info.TmdbID
-			item.Title = info.Title
-			item.Year = info.Year
-			item.TitleYear = info.TitleYear
-			item.TransferName = transferName
-			item.Category = info.Category
-			if item.Category == "" {
-				item.Category = service.SelectMoviePilotCategory(info.MediaType, info, categoryCfg)
-			}
-			targetPath, targetErr := h.moviePilotSvc.BuildOrganizeTargetPath(item.Category, service.MediaRenameInput{
-				Info: info, MediaType: item.MediaType, Category: item.Category,
-				RecognizeName: recognizeName, TransferName: transferName, OriginalName: file.Fn,
-				RecognitionRaw: recognitionRaw, TransferRaw: transferRaw,
-			})
-			if targetErr != nil {
-				if item.Error == "" {
-					item.Error = "生成重命名路径失败: " + targetErr.Error()
-				} else {
-					item.Error += "; 生成重命名路径失败: " + targetErr.Error()
-				}
-			} else {
-				item.TargetPath = targetPath
-			}
-
+			item := h.planOrganizeItem(processOrganizeArgs{recognitionSource: snapshot.Source, dryRun: true, categoryCfg: categoryCfg, categoryError: categoryError, dir: model.CloudDirectory{ClassifyByCategory: true}}, service.Web115File{FileID: file.Fid, Name: file.Fn, PickCode: file.Pc})
 			results = append(results, item)
 		}
 
@@ -809,6 +777,13 @@ func (h *OrganizeHandler) CreatePreviewTasks(c *gin.Context) {
 		First(&dir).Error; err != nil {
 		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
 		return
+	}
+	if req.RecognitionSource == "" && dir.RecognitionSource != "" {
+		recognitionSource, err = h.moviePilotSvc.ResolveMediaRecognitionSource(dir.RecognitionSource)
+		if err != nil {
+			h.error(c, 400, 400, err.Error())
+			return
+		}
 	}
 	storage := dir.CloudStorage
 	if storage == nil {
@@ -1501,6 +1476,12 @@ func (h *OrganizeHandler) deletePreviewTaskSourceFolder(userID uint, id uint) er
 	if task.Status == model.OrganizePreviewStatusProcessing {
 		return errors.New("任务正在处理中，不能删除源文件夹")
 	}
+	var upgradeLock model.OrganizeStorageLock
+	if err := database.DB.Where("cloud_storage_id = ? AND (lease_until IS NULL OR lease_until > ?)", task.CloudStorageID, time.Now()).First(&upgradeLock).Error; err == nil {
+		return fmt.Errorf("账号的整理任务 %s 尚未结束，请先完成或恢复后再删除源目录", upgradeLock.PlanID)
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
 	folderID := strings.TrimSpace(task.FolderID)
 	if folderID == "" || folderID == "0" {
 		return errors.New("源文件夹 ID 无效，不能删除")
@@ -1765,7 +1746,7 @@ func (h *OrganizeHandler) buildPreviewChildTaskInputs(args buildPreviewChildTask
 	return children, nil
 }
 
-func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize115CookieRequest) (Organize115CookieResult, error) {
+func (h *OrganizeHandler) computeOrganize115CookieResult(userID uint, req Organize115CookieRequest) (Organize115CookieResult, error) {
 	folderIDs := normalizeFolderIDs(req.FolderIDs, req.FolderID)
 	if len(folderIDs) == 0 {
 		return Organize115CookieResult{}, fmt.Errorf("115 目录ID为空")
@@ -1805,11 +1786,16 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 	}
 
 	categoryCfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(recognitionSource)
+	categoryError := ""
 	if err != nil {
-		return Organize115CookieResult{}, fmt.Errorf("获取媒体分类配置失败: %w", err)
+		if recognitionSource != service.MediaRecognitionSourceShadow {
+			return Organize115CookieResult{}, fmt.Errorf("获取媒体分类配置失败: %w", err)
+		}
+		categoryError = "获取 MP2 分类配置失败: " + err.Error()
 	}
 
-	webClient, err := h.web115Svc.NewClient(storage.Cookie)
+	h.moviePilotSvc.RecordPipelineCategories(categoryCfg)
+	webClient, err := h.organizeClient(storage.Cookie)
 	if err != nil {
 		return Organize115CookieResult{}, fmt.Errorf("115 Cookie 无效")
 	}
@@ -1847,6 +1833,7 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 				storage:                storage,
 				webClient:              webClient,
 				categoryCfg:            categoryCfg,
+				categoryError:          categoryError,
 				includeExts:            includeExts,
 				excludeExts:            excludeExts,
 				folderID:               folderID,
@@ -1933,10 +1920,12 @@ func (h *OrganizeHandler) buildOrganize115CookieResult(userID uint, req Organize
 }
 
 type processOrganizeArgs struct {
+	recognitionMode        string
 	dir                    model.CloudDirectory
 	storage                *model.CloudStorage
 	webClient              *driver.Pan115Client
 	categoryCfg            service.MoviePilotCategoryConfig
+	categoryError          string
 	includeExts            []string
 	excludeExts            []string
 	folderID               string
@@ -1993,18 +1982,14 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 	dir := args.dir
 	storage := args.storage
 	webClient := args.webClient
-	categoryCfg := args.categoryCfg
 	includeExts := args.includeExts
 	excludeExts := args.excludeExts
 	folderID := args.folderID
 	fileIDs := args.fileIDs
 	dryRun := args.dryRun
 	minSizeMB := dir.ExcludeSmallerThanMB
-	filenameProcessor := args.filename
-	expectedMediaType := args.mediaType
-	recognitionSource := args.recognitionSource
-	categoryOverride := strings.TrimSpace(args.category)
 
+	manifest := []organizeSourceIdentity{}
 	results := make([]Organize115ItemResult, 0)
 	subtitleSources := make([]service.Web115File, 0)
 	subtitleSourceSet := make(map[string]struct{})
@@ -2022,6 +2007,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		}
 
 		for _, file := range listResp.Items {
+			manifest = append(manifest, sourceIdentity(file))
 			if !file.IsFile {
 				continue
 			}
@@ -2053,167 +2039,12 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 			}
 
 			totalFiles++
-			item := Organize115ItemResult{
-				FileID:   file.FileID,
-				FileName: file.Name,
-				FileSize: file.Size,
-				PickCode: file.PickCode,
-			}
-			recognizeSourceName := file.Name
-			if expectedMediaType == "movie" {
-				recognizeSourceName = stripDuplicateMovieTitleYearPrefix(recognizeSourceName)
-			}
-			recognizeName := filenameProcessor.apply(recognizeSourceName)
-			item.RecognizeName = recognizeName
-
-			ext := strings.TrimPrefix(filepath.Ext(recognizeName), ".")
-			if ext == "" {
-				ext = strings.TrimPrefix(filepath.Ext(file.Name), ".")
-			}
-
-			info, recognizeInput, recognitionRaw, recErr := h.recognizeFileWithContext(file.Name, recognizeName, args.context, recognitionSource)
-			item.RecognizeInput = recognizeInput
-			if recognitionSource == service.MediaRecognitionSourceShadow {
-				item.ShadowComparison = buildOrganize115ShadowComparison(recognitionRaw, nil)
-			}
-			if recErr != nil {
-				item.Error = recErr.Error()
-				results = append(results, item)
-				if !dryRun {
-					group.Error = item.Error
-					group.Total = totalFiles
-					group.Items = results
-					return group
-				}
-				continue
-			}
-			if strings.TrimSpace(info.TmdbID) == "" {
-				item.Error = "未识别到 TMDB ID"
-				results = append(results, item)
-				if !dryRun {
-					group.Error = item.Error
-					group.Total = totalFiles
-					group.Items = results
-					return group
-				}
-				continue
-			}
-
-			recognizeInput = h.enhanceEpisodeRecognizeInputWithTMDBEnglishSource(
-				info,
-				expectedMediaType,
-				recognizeName,
-				recognizeInput,
-				recognitionSource,
-			)
-			item.RecognizeInput = recognizeInput
-
-			transferInput := recognizeInput
-			targetOriginalName := file.Name
-			effectiveCategory := info.Category
-			if categoryOverride != "" {
-				effectiveCategory = categoryOverride
-			}
-			if shouldStripDuplicateMovieTitleYearPrefix(expectedMediaType, info.MediaType, effectiveCategory) {
-				movieSourceName := stripDuplicateMovieTitleYearPrefix(file.Name)
-				if movieSourceName != file.Name {
-					targetOriginalName = movieSourceName
-					if movieRecognizeName := filenameProcessor.apply(movieSourceName); movieRecognizeName != "" {
-						item.RecognizeName = movieRecognizeName
-						transferInput = buildMovieTransferInput(movieRecognizeName, info)
-					}
-				}
-			}
-
-			transferName, transferRaw, transErr := h.moviePilotSvc.TransferNameWithSource(transferInput, ext, recognitionSource)
-			transferName = dedupeConsecutiveTransferTags(transferName)
-			if recognitionSource == service.MediaRecognitionSourceShadow {
-				item.ShadowComparison = buildOrganize115ShadowComparison(recognitionRaw, transferRaw)
-			}
-			if transErr != nil {
-				if item.Error == "" {
-					item.Error = transErr.Error()
-				} else {
-					item.Error = item.Error + "; " + transErr.Error()
-				}
-				if !dryRun {
-					results = append(results, item)
-					group.Error = item.Error
-					group.Total = totalFiles
-					group.Items = results
-					return group
-				}
-			}
-
-			item.MediaType = info.MediaType
-			if item.MediaType == "" && expectedMediaType != "" {
-				item.MediaType = expectedMediaType
-				info.MediaType = expectedMediaType
-			}
-			item.TmdbID = info.TmdbID
-			item.Title = info.Title
-			item.Year = info.Year
-			item.TitleYear = info.TitleYear
-			item.TransferName = transferName
-			item.Category = info.Category
-			if categoryOverride != "" {
-				item.Category = categoryOverride
-			} else if item.Category == "" {
-				item.Category = service.SelectMoviePilotCategory(info.MediaType, info, categoryCfg)
-			}
-			categoryForPath := item.Category
-			if !dir.ClassifyByCategory {
-				categoryForPath = ""
-			}
-			targetPath, targetErr := h.buildTargetPathWithDirectory(dir.DirectoryName, categoryForPath, service.MediaRenameInput{
-				Info: info, MediaType: item.MediaType, Category: item.Category,
-				RecognizeName: item.RecognizeName, TransferName: transferName, OriginalName: file.Name,
-				LegacyOriginalName: targetOriginalName,
-				RecognitionRaw:     recognitionRaw, TransferRaw: transferRaw,
-			})
-			if targetErr != nil {
-				item.Error = "生成重命名路径失败: " + targetErr.Error()
-				results = append(results, item)
-				if !dryRun {
-					group.Error = item.Error
-					group.Total = totalFiles
-					group.Items = results
-					return group
-				}
-				continue
-			}
-			item.TargetPath = targetPath
-			item.TargetDir = path.Dir(item.TargetPath)
-			item.RenameTo = path.Base(item.TargetPath)
-			if item.ShadowComparison != nil {
-				h.completeOrganize115ShadowTargetComparison(item.ShadowComparison, organize115ShadowTargetInput{
-					DirectoryName:       dir.DirectoryName,
-					ClassifyByCategory:  dir.ClassifyByCategory,
-					CategoryOverride:    categoryOverride,
-					CategoryConfig:      categoryCfg,
-					RecognizeName:       item.RecognizeName,
-					OriginalName:        file.Name,
-					PrimaryTargetPath:   item.TargetPath,
-					PrimaryInfo:         info,
-					PrimaryMediaType:    item.MediaType,
-					PrimaryCategory:     item.Category,
-					PrimaryTransferName: transferName,
-					LegacyOriginalName:  targetOriginalName,
-					RecognitionRaw:      recognitionRaw,
-					TransferRaw:         transferRaw,
-				})
-			}
-			item.SourceSeason, item.SourceEpisode = inferSourceSeasonEpisode(file.Name, recognizeName, recognizeInput, args.context, info)
-			item.TargetSeason, item.TargetEpisode = inferTargetSeasonEpisode(transferName, item.TargetPath)
-			if isOrganizeTVMedia(item.MediaType, item.Category) {
-				matched := item.SourceEpisode > 0 && item.TargetEpisode > 0 && item.SourceEpisode == item.TargetEpisode
-				if item.SourceSeason > 0 && item.TargetSeason > 0 {
-					matched = matched && item.SourceSeason == item.TargetSeason
-				}
-				item.EpisodeMatched = &matched
-			}
-
+			item := h.planOrganizeItem(args, file)
 			results = append(results, item)
+			if item.Error != "" && !dryRun {
+				group.Error, group.Total, group.Items = item.Error, totalFiles, results
+				return group
+			}
 		}
 
 		if listResp.Total > 0 {
@@ -2227,6 +2058,7 @@ func (h *OrganizeHandler) processOrganize115CookieFolder(args processOrganizeArg
 		offset += limit
 	}
 
+	group.SourceManifest = organizeManifest(manifest)
 	attachOrganizeSubtitles(subtitleSources, &results)
 
 	group.Total = totalFiles

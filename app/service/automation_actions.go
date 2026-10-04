@@ -19,8 +19,6 @@ import (
 	"unicode/utf8"
 
 	"film-fusion/app/model"
-
-	sdk115 "github.com/OpenListTeam/115-sdk-go"
 )
 
 var automationTemplatePattern = regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
@@ -332,75 +330,20 @@ func (s *AutomationService) executeAutomationOffline115(ctx context.Context, nod
 }
 
 func (s *AutomationService) executeAutomationOffline115OpenAPI(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
-	storageID := automationConfigUint(node.Config, "cloud_storage_id")
-	var storage model.CloudStorage
-	if err := s.db.First(&storage, storageID).Error; err != nil {
-		return nil, fmt.Errorf("115 OpenAPI 账号不存在: %w", err)
-	}
-	if storage.StorageType != model.StorageType115Open {
-		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
-	}
-	if storage.Status != model.StatusActive {
-		return nil, fmt.Errorf("115 OpenAPI 账号当前状态为 %s", storage.Status)
-	}
-	accessToken := strings.TrimSpace(storage.AccessToken)
-	if accessToken == "" {
-		return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
-	}
-
-	downloadURL, err := resolveAutomationString(runContext, automationConfigString(node.Config, "url"))
-	if err != nil {
-		return nil, err
-	}
-	if err := validateAutomationDownloadURL(downloadURL); err != nil {
-		return nil, err
-	}
-	directoryID := strings.TrimSpace(automationConfigString(node.Config, "directory_id"))
-	if directoryID == "" {
-		directoryID = "0"
-	}
-
-	client := sdk115.New(sdk115.WithAccessToken(accessToken))
-	if s.httpClient != nil {
-		client.SetHttpClient(s.httpClient)
-	}
-	hashes, err := client.AddOfflineTaskURIs(ctx, []string{downloadURL}, directoryID)
-	if err != nil {
-		return nil, fmt.Errorf("通过 115 OpenAPI 提交离线任务失败: %w", err)
-	}
-	if len(hashes) == 0 {
-		return nil, errors.New("115 OpenAPI 未返回已创建的离线任务")
-	}
-	return map[string]any{
-		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName,
-		"directory_id": directoryID, "hashes": hashes,
-		"access_method": "openapi",
-		"content_key":   automationContentKey(downloadURL), "submitted": true,
-	}, nil
+	return s.executeAutomation115Links(ctx, node, runContext)
 }
 
 func (s *AutomationService) executeAutomationRename115OpenAPI(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
-	storageID := automationConfigUint(node.Config, "cloud_storage_id")
-	var storage model.CloudStorage
-	if err := s.db.First(&storage, storageID).Error; err != nil {
-		return nil, fmt.Errorf("115 OpenAPI 账号不存在: %w", err)
-	}
-	if storage.StorageType != model.StorageType115Open {
-		return nil, errors.New("所选云存储不是 115 OpenAPI 账号")
-	}
-	if storage.Status != model.StatusActive {
-		return nil, fmt.Errorf("115 OpenAPI 账号当前状态为 %s", storage.Status)
-	}
-	accessToken := strings.TrimSpace(storage.AccessToken)
-	if accessToken == "" {
-		return nil, errors.New("115 OpenAPI 账号没有可用 AccessToken")
+	storage, err := s.automationOpenAPIStorage(node)
+	if err != nil {
+		return nil, err
 	}
 
 	fileID, err := resolveAutomationString(runContext, automationConfigString(node.Config, "file_id"))
 	if err != nil {
 		return nil, fmt.Errorf("解析 115 文件 ID 失败: %w", err)
 	}
-	if fileID == "0" || len(fileID) > 100 || strings.IndexFunc(fileID, unicode.IsSpace) >= 0 {
+	if fileID == "" || fileID == "0" || len(fileID) > 100 || strings.IndexFunc(fileID, unicode.IsSpace) >= 0 {
 		return nil, errors.New("115 文件或文件夹 ID 无效")
 	}
 	newName, err := resolveAutomationString(runContext, automationConfigString(node.Config, "new_name"))
@@ -411,22 +354,19 @@ func (s *AutomationService) executeAutomationRename115OpenAPI(ctx context.Contex
 		return nil, err
 	}
 
-	client := sdk115.New(sdk115.WithAccessToken(accessToken))
-	if s.httpClient != nil {
-		client.SetHttpClient(s.httpClient)
-	}
-	response, err := client.UpdateFile(ctx, &sdk115.UpdateFileReq{FileID: fileID, FileNma: newName})
+	response, err := automation115OpenAPIRequest(ctx, s.httpClient, storage.AccessToken, http.MethodPost, "ufile/update", map[string]string{
+		"file_id": fileID, "file_name": newName,
+	})
+	output := automation115APIOutput(storage, response)
 	if err != nil {
-		return nil, fmt.Errorf("通过 115 OpenAPI 重命名失败: %w", err)
+		return output, fmt.Errorf("通过 115 OpenAPI 重命名失败: %w", err)
 	}
 	fileName := newName
-	if response != nil && strings.TrimSpace(response.FileName) != "" {
-		fileName = strings.TrimSpace(response.FileName)
+	if data, ok := response["data"].(map[string]any); ok && automationAnyString(data["file_name"]) != "" {
+		fileName = automationAnyString(data["file_name"])
 	}
-	return map[string]any{
-		"renamed": true, "file_id": fileID, "file_name": fileName, "new_name": newName,
-		"cloud_storage_id": storage.ID, "storage_name": storage.StorageName, "access_method": "openapi",
-	}, nil
+	output["renamed"], output["file_id"], output["file_name"], output["new_name"] = true, fileID, fileName, newName
+	return output, nil
 }
 
 func validateAutomation115RenameName(name string) error {
@@ -456,6 +396,14 @@ func (s *AutomationService) executeAutomationNotification(ctx context.Context, n
 	message := renderAutomationTemplate(automationConfigString(node.Config, "message"), runContext)
 	title := renderAutomationTemplate(automationConfigString(node.Config, "title"), runContext)
 	imageURL := renderAutomationTemplate(automationConfigString(node.Config, "image_url"), runContext)
+	var channels []string
+	channel := automationConfigString(node.Config, "channel")
+	if channel != "" && channel != "default" {
+		if channel != "telegram" && channel != "webhook" {
+			return nil, errors.New("通知渠道必须为 default、telegram 或 webhook")
+		}
+		channels = []string{channel}
+	}
 	if strings.TrimSpace(message) == "" {
 		return nil, errors.New("渲染后的通知内容为空")
 	}
@@ -463,7 +411,8 @@ func (s *AutomationService) executeAutomationNotification(ctx context.Context, n
 		return nil, errors.New("渲染后的通知图片地址超过 4096 字节")
 	}
 	report := s.notifier.Publish(ctx, NotificationEvent{
-		Type: NotificationEventAutomationTriggered, Title: title, Message: message, ImageURL: imageURL,
+		Channels: channels,
+		Type:     NotificationEventAutomationTriggered, Title: title, Message: message, ImageURL: imageURL,
 		Severity: NotificationSeverityInfo, OccurredAt: time.Now(),
 		Metadata: map[string]string{"source": "automation"},
 	})
@@ -495,7 +444,13 @@ func validateAutomationDownloadURL(value string) error {
 	}
 	switch strings.ToLower(parsed.Scheme) {
 	case "magnet":
-		if !strings.Contains(strings.ToLower(value), "xt=urn:btih:") {
+		hasBTIH := false
+		for _, xt := range parsed.Query()["xt"] {
+			if strings.HasPrefix(strings.ToLower(xt), "urn:btih:") && len(xt) > len("urn:btih:") {
+				hasBTIH = true
+			}
+		}
+		if !hasBTIH {
 			return errors.New("磁力链接缺少 BTIH")
 		}
 	case "bc":

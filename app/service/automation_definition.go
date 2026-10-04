@@ -13,48 +13,55 @@ import (
 const AutomationSchemaVersion = 1
 
 const (
-	AutomationNodeTrigger             = "trigger"
-	AutomationNodeDelay               = "delay"
-	AutomationNodeRegex               = "regex"
-	AutomationNodeExtractBetween      = "extract_between"
-	AutomationNodeKeyword             = "keyword"
-	AutomationNodeKeywordReplace      = "keyword_replace"
-	AutomationNodeRegexReplace        = "regex_replace"
-	AutomationNodeConvert             = "convert"
-	AutomationNodeSetVariable         = "set_variable"
-	AutomationNodeTemplate            = "template"
-	AutomationNodeJSONExtract         = "json_extract"
-	AutomationNodeMath                = "math"
-	AutomationNodeDatetimeOperation   = "datetime_operation"
-	AutomationNodeListOperation       = "list_operation"
-	AutomationNodeSwitch              = "switch"
-	AutomationNodeCoalesce            = "coalesce"
-	AutomationNodeDeduplicate         = "deduplicate"
-	AutomationNodeRateLimit           = "rate_limit"
-	AutomationNodeForeach             = "foreach"
-	AutomationNodeIf                  = "if"
-	AutomationNodeParallel            = "parallel"
-	AutomationNodeJoin                = "join"
-	AutomationNodeQBittorrent         = "qbittorrent"
-	AutomationNodeWaitQBittorrent     = "wait_qbittorrent"
-	AutomationNodeStopQBittorrent     = "stop_qbittorrent"
-	AutomationNodeDeleteQBittorrent   = "delete_qbittorrent"
-	AutomationNodeOffline115          = "offline115"
-	AutomationNodeOffline115OpenAPI   = "offline115_openapi"
-	AutomationNodeWait115             = "wait115"
-	AutomationNodeRename115OpenAPI    = "rename115_openapi"
-	AutomationNodeMoviePilotTitle     = "moviepilot_title_recognize"
-	AutomationNodeFilmFusionRecognize = "filmfusion_recognize"
-	AutomationNodeMoviePilotTransfer  = "moviepilot_transfer"
-	AutomationNodeMediaExists         = "media_exists"
-	AutomationNodeMoviePilotRecognize = "moviepilot_recognize"
-	AutomationNodeOrganizeStrm        = "organize_strm"
-	AutomationNodeStrmVerify          = "strm_verify"
-	AutomationNodeStrmRegenerate      = "strm_regenerate"
-	AutomationNodeEmbyRefreshWait     = "emby_refresh_wait"
-	AutomationNodeHTTPRequest         = "http_request"
-	AutomationNodeNotification        = "notification"
-	AutomationNodeEnd                 = "end"
+	AutomationNodeTrigger              = "trigger"
+	AutomationNodeDelay                = "delay"
+	AutomationNodeRegex                = "regex"
+	AutomationNodeExtractBetween       = "extract_between"
+	AutomationNodeKeyword              = "keyword"
+	AutomationNodeKeywordReplace       = "keyword_replace"
+	AutomationNodeRegexReplace         = "regex_replace"
+	AutomationNodeConvert              = "convert"
+	AutomationNodeSetVariable          = "set_variable"
+	AutomationNodeTemplate             = "template"
+	AutomationNodeJSONExtract          = "json_extract"
+	AutomationNodeMath                 = "math"
+	AutomationNodeDatetimeOperation    = "datetime_operation"
+	AutomationNodeListOperation        = "list_operation"
+	AutomationNodeSwitch               = "switch"
+	AutomationNodeCoalesce             = "coalesce"
+	AutomationNodeDeduplicate          = "deduplicate"
+	AutomationNodeRateLimit            = "rate_limit"
+	AutomationNodeForeach              = "foreach"
+	AutomationNodeIf                   = "if"
+	AutomationNodeParallel             = "parallel"
+	AutomationNodeJoin                 = "join"
+	AutomationNodeQBittorrent          = "qbittorrent"
+	AutomationNodeWaitQBittorrent      = "wait_qbittorrent"
+	AutomationNodeStopQBittorrent      = "stop_qbittorrent"
+	AutomationNodeDeleteQBittorrent    = "delete_qbittorrent"
+	AutomationNodeOffline115           = "offline115"
+	AutomationNodeOffline115OpenAPI    = "offline115_openapi"
+	AutomationNodeTorrentToMagnet      = "torrent_to_magnet"
+	AutomationNodeTorrent115OpenAPI    = "torrent115_openapi"
+	AutomationNodeOffline115BTOpenAPI  = "offline115_bt_openapi"
+	AutomationNodeList115TasksOpenAPI  = "list115_tasks_openapi"
+	AutomationNodeQuota115OpenAPI      = "quota115_openapi"
+	AutomationNodeDelete115TaskOpenAPI = "delete115_task_openapi"
+	AutomationNodeClear115TasksOpenAPI = "clear115_tasks_openapi"
+	AutomationNodeWait115              = "wait115"
+	AutomationNodeRename115OpenAPI     = "rename115_openapi"
+	AutomationNodeMoviePilotTitle      = "moviepilot_title_recognize"
+	AutomationNodeFilmFusionRecognize  = "filmfusion_recognize"
+	AutomationNodeMoviePilotTransfer   = "moviepilot_transfer"
+	AutomationNodeMediaExists          = "media_exists"
+	AutomationNodeMoviePilotRecognize  = "moviepilot_recognize"
+	AutomationNodeOrganizeStrm         = "organize_strm"
+	AutomationNodeStrmVerify           = "strm_verify"
+	AutomationNodeStrmRegenerate       = "strm_regenerate"
+	AutomationNodeEmbyRefreshWait      = "emby_refresh_wait"
+	AutomationNodeHTTPRequest          = "http_request"
+	AutomationNodeNotification         = "notification"
+	AutomationNodeEnd                  = "end"
 )
 
 var automationNodeIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$`)
@@ -71,13 +78,14 @@ type AutomationViewport struct {
 }
 
 type AutomationNode struct {
-	ID          string                 `json:"id"`
-	Type        string                 `json:"type"`
-	Name        string                 `json:"name,omitempty"`
-	Position    AutomationPosition     `json:"position"`
-	Config      map[string]any         `json:"config,omitempty"`
-	MaxAttempts int                    `json:"max_attempts,omitempty"`
-	UI          map[string]interface{} `json:"ui,omitempty"`
+	ID                string                 `json:"id"`
+	Type              string                 `json:"type"`
+	Name              string                 `json:"name,omitempty"`
+	Position          AutomationPosition     `json:"position"`
+	Config            map[string]any         `json:"config,omitempty"`
+	ParameterBindings map[string]string      `json:"parameter_bindings,omitempty"`
+	MaxAttempts       int                    `json:"max_attempts,omitempty"`
+	UI                map[string]interface{} `json:"ui,omitempty"`
 }
 
 type AutomationEdge struct {
@@ -94,6 +102,7 @@ type AutomationDefinition struct {
 	Edges         []AutomationEdge           `json:"edges"`
 	Viewport      AutomationViewport         `json:"viewport,omitempty"`
 	Metadata      map[string]json.RawMessage `json:"metadata,omitempty"`
+	Parameters    map[string]any             `json:"parameters,omitempty"`
 }
 
 type AutomationValidationResult struct {
@@ -160,6 +169,12 @@ func MarshalAutomationDefinition(definition AutomationDefinition) (string, error
 
 func ValidateAutomationDefinition(definition AutomationDefinition) AutomationValidationResult {
 	result := AutomationValidationResult{Errors: []string{}, Warnings: []string{}}
+	resolved, err := resolveAutomationParameters(definition)
+	if err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	definition = resolved
 	if definition.SchemaVersion != AutomationSchemaVersion {
 		result.Errors = append(result.Errors, fmt.Sprintf("不支持的流程版本 %d", definition.SchemaVersion))
 	}
@@ -195,7 +210,7 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 		if node.MaxAttempts < 0 || node.MaxAttempts > 10 {
 			result.Errors = append(result.Errors, fmt.Sprintf("节点 %s 的重试次数必须在 0 到 10 之间", node.ID))
 		}
-		if isAutomationNonRetryableNode(node.Type) && node.MaxAttempts > 1 {
+		if isAutomationNonRetryableNode(node.Type) && node.MaxAttempts > 1 && node.Type != AutomationNodeOffline115OpenAPI {
 			result.Errors = append(result.Errors, fmt.Sprintf("可能产生重复副作用的节点 %s 不能自动重试", node.ID))
 		}
 		if err := validateAutomationNodeConfig(node); err != nil {
@@ -366,11 +381,14 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 					result.Errors = append(result.Errors, fmt.Sprintf("删除 qBittorrent 任务节点 %s 只有在 MP2 整理成功后才能同时删除下载文件", id))
 				}
 			case AutomationNodeWait115:
-				if predecessor.Type != AutomationNodeOffline115 && predecessor.Type != AutomationNodeOffline115OpenAPI {
-					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接在 115 离线节点之后，中间仅可插入延迟节点", id))
+				if predecessor.Type != AutomationNodeOffline115 && predecessor.Type != AutomationNodeOffline115OpenAPI && predecessor.Type != AutomationNodeOffline115BTOpenAPI && predecessor.Type != AutomationNodeList115TasksOpenAPI {
+					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接在 115 下载提交或按 Hash 查询任务节点之后，中间仅可插入延迟节点", id))
 				}
 				if sourcePort != "success" {
-					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接 115 离线节点的成功出口", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("等待节点 %s 必须连接 115 下载提交或查询节点的成功出口", id))
+				}
+				if predecessor.Type == AutomationNodeList115TasksOpenAPI && automationConfigString(predecessor.Config, "info_hash") == "" {
+					result.Errors = append(result.Errors, "等待 115 下载前的任务列表节点必须配置 info_hash")
 				}
 			case AutomationNodeMoviePilotRecognize:
 				if predecessor.Type != AutomationNodeWait115 && predecessor.Type != AutomationNodeTrigger {
@@ -481,6 +499,7 @@ func isAutomationNonRetryableNode(nodeType string) bool {
 		AutomationNodeDatetimeOperation, AutomationNodeListOperation, AutomationNodeSwitch, AutomationNodeCoalesce,
 		AutomationNodeDeduplicate, AutomationNodeRateLimit, AutomationNodeForeach,
 		AutomationNodeDeleteQBittorrent, AutomationNodeMoviePilotTransfer,
+		AutomationNodeOffline115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
 		AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeHTTPRequest:
 		return true
 	default:
@@ -499,6 +518,8 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 			AutomationNodeDelay, AutomationNodeJoin,
 			AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 			AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
+			AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
+			AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
 			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
 			AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
 			AutomationNodeStrmVerify, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
@@ -535,6 +556,8 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 		AutomationNodeDelay, AutomationNodeJoin,
 		AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
+		AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
+		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer,
 		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 		AutomationNodeHTTPRequest, AutomationNodeNotification:
@@ -796,6 +819,11 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		if automationConfigString(config, "url") == "" {
 			return errors.New("必须配置下载地址变量")
 		}
+	case AutomationNodeTorrentToMagnet:
+		return validateAutomationTorrentConfig(config)
+	case AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
+		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI:
+		return validateAutomation115OpenAPIConfig(node)
 	case AutomationNodeWait115:
 		pollSeconds := automationConfigUint(config, "poll_interval_seconds")
 		if pollSeconds > 0 && pollSeconds < minAutomation115PollSeconds {
@@ -891,6 +919,12 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 			return errors.New("必须配置 TMDB ID")
 		}
 	case AutomationNodeOrganizeStrm:
+		if source := automationConfigString(config, "recognition_source"); source != "" {
+			if _, err := NormalizeMediaRecognitionSource(source); err != nil {
+				return err
+			}
+		}
+
 		if automationConfigUint(config, "cloud_directory_id") == 0 {
 			return errors.New("必须选择整理目录配置")
 		}
@@ -902,7 +936,7 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 		if len([]rune(automationConfigString(config, "category"))) > 200 {
 			return errors.New("媒体分类不能超过 200 个字符")
 		}
-		for _, key := range []string{"best_version_enabled", "delete_source_folder", "filename_regex_enabled"} {
+		for _, key := range []string{"best_version_enabled", "delete_source_folder", "filename_regex_enabled", "dry_run"} {
 			if value, exists := config[key]; exists {
 				if _, ok := value.(bool); !ok {
 					return fmt.Errorf("%s 必须是布尔值", key)
@@ -959,6 +993,10 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 	case AutomationNodeNotification:
 		if automationConfigString(config, "message") == "" {
 			return errors.New("通知内容不能为空")
+		}
+		channel := automationConfigString(config, "channel")
+		if channel != "" && channel != "default" && channel != "telegram" && channel != "webhook" {
+			return errors.New("通知渠道必须为 default、telegram 或 webhook")
 		}
 		if len(automationConfigString(config, "image_url")) > 4096 {
 			return errors.New("通知图片地址不能超过 4096 字节")

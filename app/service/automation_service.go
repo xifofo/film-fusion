@@ -68,8 +68,9 @@ type AutomationCreateWorkflowInput struct {
 }
 
 type AutomationCreateInput struct {
-	Source   AutomationSourceInput         `json:"source"`
-	Workflow AutomationCreateWorkflowInput `json:"workflow"`
+	ExpectedVersion int                           `json:"expected_version,omitempty"`
+	Source          AutomationSourceInput         `json:"source"`
+	Workflow        AutomationCreateWorkflowInput `json:"workflow"`
 }
 
 type AutomationCreateResult struct {
@@ -108,6 +109,8 @@ type AutomationDashboard struct {
 	FailedRuns    int64                      `json:"failed_runs"`
 	ScanningCount int                        `json:"scanning_count"`
 	NodeProtocols []AutomationNodeProtocol   `json:"node_protocols"`
+	Settings      []model.AutomationSettings `json:"settings"`
+	Alerts        []model.AutomationAlert    `json:"alerts"`
 }
 
 type AutomationService struct {
@@ -116,6 +119,8 @@ type AutomationService struct {
 	notifier    NotificationPublisher
 	web115      *Web115Service
 	httpClient  *http.Client
+	rssClock    func() time.Time
+	rssService  *RSSService
 	moviePilot  automationMoviePilotRecognizer
 	localMedia  automationLocalMediaRecognizer
 	mpTransfer  automationMoviePilotTransferer
@@ -178,9 +183,10 @@ func (s *AutomationService) Start() {
 	s.db.Model(&model.AutomationRun{}).
 		Where("status = ?", model.AutomationRunRunning).
 		Update("status", model.AutomationRunPending)
-	s.wg.Add(2)
+	s.wg.Add(3)
 	go s.sourceScheduleLoop()
 	go s.executionScheduleLoop()
+	go s.automationHealthLoop()
 	if s.log != nil {
 		s.log.Info("自动化触发器调度器已启动")
 	}
@@ -233,6 +239,14 @@ func (s *AutomationService) Dashboard(limit int) (AutomationDashboard, error) {
 		return dashboard, err
 	}
 	redactAutomationTargets(dashboard.Targets)
+	dashboard.Settings = []model.AutomationSettings{}
+	dashboard.Alerts = []model.AutomationAlert{}
+	if err := s.db.Find(&dashboard.Settings).Error; err != nil {
+		return dashboard, err
+	}
+	if err := s.db.Where("active = ?", true).Order("updated_at DESC").Find(&dashboard.Alerts).Error; err != nil {
+		return dashboard, err
+	}
 	if err := s.db.Order("id DESC").Limit(limit).Find(&dashboard.RecentRuns).Error; err != nil {
 		return dashboard, err
 	}
@@ -294,6 +308,9 @@ func (s *AutomationService) CreateAutomation(input AutomationCreateInput) (Autom
 		if err := tx.Create(&result.Workflow).Error; err != nil {
 			return err
 		}
+		if err := snapshotAutomationRevision(tx, result.Source.ID); err != nil {
+			return err
+		}
 		if result.Source.TriggerType == model.AutomationTrigger115Directory {
 			return tx.Create(&model.Automation115DirectoryCursor{
 				SourceID: result.Source.ID, DirectoryID: result.Source.DirectoryID,
@@ -338,6 +355,9 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 	if err := s.db.Where("source_id = ?", id).First(&result.Workflow).Error; err != nil {
 		return result, err
 	}
+	if input.ExpectedVersion > 0 && input.ExpectedVersion != result.Workflow.Version {
+		return result, errors.New("流程已被修改，请刷新版本历史后重试")
+	}
 	workflowName := strings.TrimSpace(input.Workflow.Name)
 	if workflowName == "" {
 		workflowName = sourceInput.Name
@@ -353,11 +373,11 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 		return result, err
 	}
 	reset := automationSourceConfigurationChanged(result.Source, sourceInput, mappingJSON)
-	version := result.Workflow.Version
-	if result.Workflow.DefinitionJSON != definitionJSON {
-		version++
-	}
+	version := result.Workflow.Version + 1
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := snapshotAutomationRevision(tx, id); err != nil {
+			return err
+		}
 		sourceUpdates := map[string]any{
 			"name": sourceInput.Name, "description": sourceInput.Description,
 			"enabled": sourceInput.Enabled, "trigger_type": sourceInput.TriggerType,
@@ -392,11 +412,14 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 				return err
 			}
 		}
-		return tx.Model(&result.Workflow).Updates(map[string]any{
+		if err := tx.Model(&result.Workflow).Updates(map[string]any{
 			"name": workflowName, "description": workflowDescription,
 			"enabled": sourceInput.Enabled, "version": version,
 			"definition_json": definitionJSON,
-		}).Error
+		}).Error; err != nil {
+			return err
+		}
+		return snapshotAutomationRevision(tx, id)
 	})
 	if err != nil {
 		return AutomationCreateResult{Validation: validation}, err
@@ -446,6 +469,9 @@ func (s *AutomationService) UpdateSource(id uint, input AutomationSourceInput) (
 	}
 	reset := automationSourceConfigurationChanged(source, input, mappingJSON)
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := snapshotAutomationRevision(tx, id); err != nil {
+			return err
+		}
 		updates := map[string]any{
 			"name": input.Name, "description": input.Description, "enabled": input.Enabled,
 			"trigger_type":     input.TriggerType,
@@ -480,7 +506,10 @@ func (s *AutomationService) UpdateSource(id uint, input AutomationSourceInput) (
 				return err
 			}
 		}
-		return tx.Model(&workflow).Update("enabled", input.Enabled).Error
+		if err := tx.Model(&workflow).Updates(map[string]any{"enabled": input.Enabled, "version": workflow.Version + 1}).Error; err != nil {
+			return err
+		}
+		return snapshotAutomationRevision(tx, id)
 	})
 	if err != nil {
 		return source, err
@@ -531,6 +560,11 @@ func (s *AutomationService) DeleteAutomation(id uint) error {
 		if err := tx.Where("source_id = ?", id).Delete(&model.AutomationEntry{}).Error; err != nil {
 			return err
 		}
+		for _, record := range []any{&model.AutomationRevision{}, &model.AutomationSettings{}, &model.AutomationAlert{}} {
+			if err := tx.Where("source_id = ?", id).Delete(record).Error; err != nil {
+				return err
+			}
+		}
 		if err := tx.Delete(&workflow).Error; err != nil {
 			return err
 		}
@@ -566,6 +600,13 @@ func (s *AutomationService) UpdateWorkflow(id uint, input AutomationWorkflowInpu
 	if err := s.db.First(&workflow, id).Error; err != nil {
 		return workflow, AutomationValidationResult{}, err
 	}
+	if !s.beginAutomationScan(workflow.SourceID) {
+		return workflow, AutomationValidationResult{}, ErrAutomationScanRunning
+	}
+	defer s.endAutomationScan(workflow.SourceID)
+	if err := s.db.First(&workflow, id).Error; err != nil {
+		return workflow, AutomationValidationResult{}, err
+	}
 	if input.SourceID != workflow.SourceID {
 		return workflow, AutomationValidationResult{}, errors.New("流程不能改绑到其他触发源")
 	}
@@ -586,18 +627,21 @@ func (s *AutomationService) UpdateWorkflow(id uint, input AutomationWorkflowInpu
 	if err := s.validateAutomationSourceWorkflow(sourceInput, input.Definition); err != nil {
 		return workflow, validation, err
 	}
-	version := workflow.Version
-	if workflow.DefinitionJSON != definitionJSON {
-		version++
-	}
+	version := workflow.Version + 1
 	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := snapshotAutomationRevision(tx, workflow.SourceID); err != nil {
+			return err
+		}
 		if err := tx.Model(&workflow).Updates(map[string]any{
 			"name": name, "description": description, "enabled": input.Enabled,
 			"version": version, "definition_json": definitionJSON,
 		}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&model.AutomationSource{}).Where("id = ?", workflow.SourceID).Update("enabled", input.Enabled).Error
+		if err := tx.Model(&model.AutomationSource{}).Where("id = ?", workflow.SourceID).Update("enabled", input.Enabled).Error; err != nil {
+			return err
+		}
+		return snapshotAutomationRevision(tx, workflow.SourceID)
 	})
 	if err != nil {
 		return workflow, validation, err
@@ -891,6 +935,11 @@ func validateAutomationWorkflowContent(name, description string, definition Auto
 }
 
 func (s *AutomationService) validateAutomationSourceWorkflow(input AutomationSourceInput, definition AutomationDefinition) error {
+	resolved, err := resolveAutomationParameters(definition)
+	if err != nil {
+		return err
+	}
+	definition = resolved
 	if input.TriggerType != model.AutomationTrigger115Directory {
 		return nil
 	}
@@ -1094,6 +1143,8 @@ func isAutomationActionNode(nodeType string) bool {
 	switch nodeType {
 	case AutomationNodeQBittorrent, AutomationNodeWaitQBittorrent, AutomationNodeStopQBittorrent, AutomationNodeDeleteQBittorrent,
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
+		AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
+		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
 		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle,
 		AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
 		AutomationNodeMoviePilotRecognize,
@@ -1106,6 +1157,9 @@ func isAutomationActionNode(nodeType string) bool {
 }
 
 func automationNodeMaxAttempts(node AutomationNode) int {
+	if isAutomationNonRetryableNode(node.Type) {
+		return 1
+	}
 	if node.MaxAttempts > 0 {
 		return node.MaxAttempts
 	}
@@ -1114,3 +1168,14 @@ func automationNodeMaxAttempts(node AutomationNode) int {
 	}
 	return 1
 }
+
+// RSS fetching is provided by the independent RSS service. Test instances may
+// supply only a database/client; the cache still coordinates through the DB.
+func (s *AutomationService) rssFeedService() *RSSService {
+	if s.rssService != nil {
+		return s.rssService
+	}
+	return &RSSService{db: s.db, httpClient: s.httpClient, clock: s.rssClock}
+}
+
+func (s *AutomationService) SetRSSService(rss *RSSService) { s.rssService = rss }

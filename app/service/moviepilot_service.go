@@ -25,6 +25,7 @@ const (
 	moviePilotLocalFallbackTTL       = 2 * time.Minute
 	MediaRecognitionSourceMoviePilot = config.MediaRecognitionSourceMoviePilot
 	MediaRecognitionSourceLocal      = config.MediaRecognitionSourceLocal
+	MediaRecognitionSourceMedianame  = config.MediaRecognitionSourceMedianame
 	MediaRecognitionSourceShadow     = config.MediaRecognitionSourceShadow
 )
 
@@ -89,6 +90,11 @@ func (s *MoviePilotService) ResolveMediaRecognitionSource(value string) (string,
 // FilmFusion has taken ownership of rename configuration. Until the first save,
 // it deliberately preserves the historical FilmFusion target path.
 func (s *MoviePilotService) BuildOrganizeTargetPath(category string, input MediaRenameInput) (string, error) {
+	if r, ok := input.RecognitionRaw["medianame"].(MedianameRecognition); ok {
+		target, _, err := s.MedianameTarget(context.Background(), r, "", category != "", input.Category)
+		return target, err
+	}
+
 	if s != nil && s.local != nil {
 		target, configured, err := s.local.BuildMediaRenameTargetPath(category, input)
 		if err != nil {
@@ -540,6 +546,12 @@ func (s *MoviePilotService) GetCategoryConfigWithSource(source string) (MoviePil
 	if err != nil {
 		return MoviePilotCategoryConfig{}, err
 	}
+	if normalized == MediaRecognitionSourceMedianame {
+		if s.local == nil {
+			return MoviePilotCategoryConfig{}, errors.New("medianame 服务未初始化")
+		}
+		return s.local.MedianameCategoryNames()
+	}
 	if normalized != MediaRecognitionSourceLocal {
 		return s.GetCategoryConfig()
 	}
@@ -659,6 +671,9 @@ func (s *MoviePilotService) RecognizeFileWithSource(filePath, source string) (Mo
 	if err != nil {
 		return MoviePilotMediaInfo{}, nil, err
 	}
+	if normalized == MediaRecognitionSourceMedianame {
+		return s.recognizeMedianameCompat(filePath, MediaRecognitionModeFile)
+	}
 	if normalized == MediaRecognitionSourceLocal {
 		if s.local == nil {
 			return MoviePilotMediaInfo{}, nil, errors.New("FilmFusion 本地识别未初始化")
@@ -709,6 +724,9 @@ func (s *MoviePilotService) RecognizeTitleWithSource(title, source string) (Movi
 	normalized, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return MoviePilotMediaInfo{}, nil, err
+	}
+	if normalized == MediaRecognitionSourceMedianame {
+		return s.recognizeMedianameCompat(title, MediaRecognitionModeTitle)
 	}
 	if normalized == MediaRecognitionSourceLocal {
 		if s.local == nil {
@@ -775,6 +793,14 @@ func (s *MoviePilotService) TransferNameWithSource(filePath, fileType, source st
 	normalized, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return "", nil, err
+	}
+	if normalized == MediaRecognitionSourceMedianame {
+		r := s.RecognizeMedianame(context.Background(), filePath, MediaRecognitionOptions{Mode: MediaRecognitionModeFile, LookupTMDB: true})
+		target, vars, err := s.MedianameTarget(context.Background(), r, "", false, "")
+		if err != nil {
+			return "", map[string]any{"medianame": r}, err
+		}
+		return path.Base(target), map[string]any{"medianame": r, "rename_context": vars, "target_path": target}, nil
 	}
 	if normalized == MediaRecognitionSourceLocal {
 		if s.local == nil {

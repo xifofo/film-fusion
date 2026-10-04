@@ -18,6 +18,7 @@ require (
 	github.com/shirou/gopsutil/v4 v4.26.7
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/viper v1.20.1
+	github.com/xifofo/medianame v0.1.1
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.40.0
 	golang.org/x/image v0.39.0

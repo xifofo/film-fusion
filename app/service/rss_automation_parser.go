@@ -39,6 +39,7 @@ type RSSAutomationParsedItem struct {
 }
 
 type RSSAutomationParsedFeed struct {
+	RSSCacheMetadata
 	Title     string                    `json:"title"`
 	Items     []RSSAutomationParsedItem `json:"items"`
 	Selectors []string                  `json:"selectors,omitempty"`

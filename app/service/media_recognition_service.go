@@ -105,9 +105,11 @@ type MediaRecognitionOptions struct {
 
 // MediaRecognitionService 提供 FilmFusion 自己的识别词、标题解析和 TMDB 匹配能力。
 type MediaRecognitionService struct {
-	db     *gorm.DB
-	tmdb   *TMDBService
-	logger *logger.Logger
+	frozen          *MediaPipelineSnapshot
+	medianameClient *medianameTMDBClient
+	db              *gorm.DB
+	tmdb            *TMDBService
+	logger          *logger.Logger
 }
 
 // NewMediaRecognitionService 创建本地媒体识别服务。
@@ -117,6 +119,9 @@ func NewMediaRecognitionService(db *gorm.DB, tmdb *TMDBService, log *logger.Logg
 
 // LoadWords 读取 FilmFusion 自己保存的识别词；configured 用于区分尚未接管和已保存空词表。
 func (s *MediaRecognitionService) LoadWords() (words []string, configured bool, err error) {
+	if s != nil && s.frozen != nil {
+		return s.frozen.Words, s.frozen.WordsConfigured, nil
+	}
 	if s == nil || s.db == nil {
 		return nil, false, errors.New("数据库未初始化")
 	}

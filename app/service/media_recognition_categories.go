@@ -286,6 +286,9 @@ func mediaRecognitionCategoryGroupLabel(group string) string {
 
 // LoadCategoryConfig 读取已保存分类配置；未保存时返回 MoviePilot 兼容默认值。
 func (s *MediaRecognitionService) LoadCategoryConfig() (MediaRecognitionCategoryConfigResult, error) {
+	if s != nil && s.frozen != nil {
+		return s.frozen.MP2Categories, nil
+	}
 	if s == nil || s.db == nil {
 		return MediaRecognitionCategoryConfigResult{}, errors.New("数据库未初始化")
 	}

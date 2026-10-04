@@ -191,13 +191,14 @@ func TestMediaRecognitionHandlerRunsMP2FirstShadowComparison(t *testing.T) {
 		t.Fatalf("shadow response=%+v", response)
 	}
 	comparison, _ := response.Data["comparison"].(map[string]any)
-	if comparison["status"] != service.MediaRecognitionShadowDifferent || comparison["matched"] != false {
+	if comparison["status"] != service.MediaRecognitionShadowLocalError || comparison["matched"] != false {
 		t.Fatalf("comparison=%#v", comparison)
 	}
 	moviePilotSnapshot, _ := comparison["moviepilot"].(map[string]any)
-	localSnapshot, _ := comparison["local"].(map[string]any)
-	if moviePilotSnapshot["title"] != "MP2 Example" || localSnapshot["title"] != "Example" || localSnapshot["season_episode"] != "S02E04" {
-		t.Fatalf("snapshots mp=%#v local=%#v", moviePilotSnapshot, localSnapshot)
+	localResult, _ := response.Data["local"].(map[string]any)
+	meta, _ := localResult["meta_info"].(map[string]any)
+	if moviePilotSnapshot["title"] != "MP2 Example" || comparison["local"] != nil || meta["season_episode"] != "S02E04" || localResult["tmdb_status"] != "not_identified" {
+		t.Fatalf("offline parsing must retain evidence without selecting identity: %#v", response)
 	}
 }
 

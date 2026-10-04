@@ -104,6 +104,9 @@ func (s *Download115Service) addDownloadTask(cloudStorageID uint, pickCode, save
 	if cloudStorageID == 0 || pickCode == "" || savePath == "" {
 		return errors.New("下载任务参数不完整")
 	}
+	if err := CheckUpgradeDownloadOwnership(s.db, cloudStorageID, savePath); err != nil {
+		return err
+	}
 	s.queueMutationMu.Lock()
 	defer s.queueMutationMu.Unlock()
 
@@ -368,6 +371,9 @@ func (s *Download115Service) downloadTask(task model.Download115Queue) {
 
 // performDownload 执行实际下载
 func (s *Download115Service) performDownload(task *model.Download115Queue) error {
+	if err := CheckUpgradeDownloadOwnership(s.db, task.CloudStorageID, task.SavePath); err != nil {
+		return err
+	}
 	userAgent := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 	s.logger.Debugf("正在通过115Open下载文件: PickCode=%s", task.PickCode)
 
@@ -400,9 +406,32 @@ func (s *Download115Service) performDownload(task *model.Download115Queue) error
 	// 使用简单的下载方法
 	startTime := time.Now()
 
-	err = downloader.DownloadFromURLSimple(u.URL.URL, userAgent, task.SavePath)
+	temp, err := os.CreateTemp(filepath.Dir(task.SavePath), ".filmfusion-download-*")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	if err = temp.Close(); err != nil {
+		return err
+	}
+	defer os.Remove(tempPath)
+	defer os.Remove(tempPath + ".tmp")
+	downloadConfig := downloader.DefaultDownloadConfig()
+	downloadConfig.UserAgent, downloadConfig.OverwriteFile = userAgent, true
+	_, err = downloader.DownloadFromURL(u.URL.URL, tempPath, downloadConfig)
 	if err != nil {
 		return fmt.Errorf("文件下载失败: %v", err)
+	}
+	unlock := LockUpgradeLocalPath(task.SavePath)
+	defer unlock()
+	if err := CheckUpgradeDownloadOwnership(s.db, task.CloudStorageID, task.SavePath); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(task.SavePath); !os.IsNotExist(err) {
+		return fmt.Errorf("目标文件已存在或无法核验: %s", task.SavePath)
+	}
+	if err := os.Rename(tempPath, task.SavePath); err != nil {
+		return err
 	}
 
 	// 记录下载完成信息

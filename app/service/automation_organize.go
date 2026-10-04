@@ -22,6 +22,8 @@ type AutomationOrganizeFolderContext struct {
 // AutomationOrganizeRequest is deliberately equivalent to the existing
 // organize request without importing the handler package back into service.
 type AutomationOrganizeRequest struct {
+	RecognitionSource        string
+	DryRun                   bool
 	UserID                   uint
 	CloudDirectoryID         uint
 	FolderIDs                []string
@@ -128,11 +130,30 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 		"direct_file_batch":    directFileBatch,
 		"items":                []any{},
 		"batch_count":          len(batches),
+		"dry_run":              automationConfigBool(node.Config, "dry_run"),
+		"plans":                []any{},
 	}
 	if directFileBatch && deleteSourceFolder {
 		output["source_delete_skipped_for_direct_files"] = true
 	}
 
+	recognitionSource := automationConfigString(node.Config, "recognition_source")
+	if upstream := automationAnyString(sourceOutput["recognition_source"]); upstream != "" {
+		if recognitionSource != "" && recognitionSource != upstream {
+			return nil, errors.New("识别节点与整理节点引擎不一致，请统一流程配置")
+		}
+		recognitionSource = upstream
+	}
+	if recognitionSource == "" {
+		recognitionSource = directory.RecognitionSource
+	}
+	if resolver, ok := s.moviePilot.(interface{ ResolveMediaRecognitionSource(string) (string, error) }); ok {
+		recognitionSource, err = resolver.ResolveMediaRecognitionSource(recognitionSource)
+		if err != nil {
+			return nil, err
+		}
+	}
+	output["recognition_source"] = recognitionSource
 	total := 0
 	organizedCount := 0
 	strmCount := 0
@@ -146,6 +167,8 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 		}
 		result, organizeErr := s.organizer.OrganizeAutomation(ctx, AutomationOrganizeRequest{
 			UserID:                   directory.UserID,
+			RecognitionSource:        recognitionSource,
+			DryRun:                   automationConfigBool(node.Config, "dry_run"),
 			CloudDirectoryID:         directory.ID,
 			FolderIDs:                batch.folderIDs,
 			FileIDs:                  batch.fileIDs,
@@ -160,8 +183,11 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 		})
 		if organizeErr != nil {
 			technicalErrors = append(technicalErrors, organizeErr)
+		}
+		if result == nil {
 			continue
 		}
+		output["plans"] = appendAutomationAnySlice(output["plans"], []any{map[string]any{"plan_id": result["plan_id"], "pipeline": result["pipeline"]}})
 		output["items"] = appendAutomationAnySlice(output["items"], result["items"])
 		summary := summarizeAutomationOrganizeResult(result)
 		total += summary.total
@@ -184,6 +210,22 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 	output["partial"] = strmCount > 0 && (failedCount > 0 || len(resultErrors) > 0 || len(technicalErrors) > 0)
 	if len(resultErrors) > 0 {
 		output["errors"] = resultErrors
+	}
+	if automationConfigBool(node.Config, "dry_run") {
+		output["planned_count"] = organizedCount
+		output["planned_strm_count"] = strmCount
+		output["organized_count"] = 0
+		output["strm_count"] = 0
+		output["selected_port"] = "success"
+		output["reason"] = "仅生成预览计划，未执行文件操作"
+		if failedCount > 0 || len(technicalErrors) > 0 || strmCount == 0 {
+			output["selected_port"] = "failure"
+			output["reason"] = "预览包含失败，请检查计划与识别诊断"
+		}
+		if len(technicalErrors) > 0 {
+			return output, errors.Join(technicalErrors...)
+		}
+		return output, nil
 	}
 	if len(technicalErrors) > 0 {
 		technicalMessages := make([]string, 0, len(technicalErrors))

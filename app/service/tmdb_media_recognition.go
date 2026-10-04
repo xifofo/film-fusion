@@ -294,7 +294,7 @@ func addMediaRecognitionMatchTitle(candidate *MediaRecognitionCandidate, title s
 }
 
 func (s *TMDBService) doMediaRecognitionTMDBRequest(ctx context.Context, endpoint string, query url.Values, target any) error {
-	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/")
+	baseURL := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/"), "/3")
 	if baseURL == "" {
 		baseURL = "https://api.themoviedb.org"
 	}

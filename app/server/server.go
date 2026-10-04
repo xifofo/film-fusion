@@ -42,6 +42,7 @@ type Server struct {
 	appLoginProtection      *service.EmbyLoginProtection
 	notificationService     *service.NotificationService
 	automationService       *service.AutomationService
+	rssService              *service.RSSService
 	taskQueue               *service.PersistentTaskQueue
 }
 
@@ -110,7 +111,9 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		notificationService:     notificationService,
 		taskQueue:               taskQueue,
 	}
+	s.rssService = service.NewRSSService(log)
 	s.automationService = service.NewAutomationService(log, s.notificationService, s.moviePilotService)
+	s.automationService.SetRSSService(s.rssService)
 	s.automationService.SetLocalMediaRecognition(s.mediaRecognitionService)
 	s.appLoginProtection = service.NewAppLoginProtection(cfg, log, s.notificationService)
 	s.embyLoginProtection = service.NewEmbyLoginProtection(cfg, log, s.notificationService)
@@ -175,7 +178,8 @@ func (s *Server) Start() error {
 	// 启动 Emby 本地多版本定时检查调度
 	s.versionCheckHandler.Start()
 
-	// 启动独立的 115 目录自动化调度
+	// RSS 中转和自动化分别管理自己的调度生命周期。
+	s.rssService.Start()
 	s.automationService.Start()
 
 	// 启动Emby代理服务器（如果启用）
@@ -231,6 +235,10 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.automationService.Stop()
 	}
 
+	if s.rssService != nil {
+		s.rssService.Stop()
+	}
+
 	// 停止Emby代理服务器
 	if s.embyProxyServer != nil {
 		if err := s.embyProxyServer.Stop(ctx); err != nil {
@@ -280,6 +288,7 @@ func (s *Server) setupRoutes() {
 	apiTokenHandler := handler.NewAPITokenHandler(apiTokenService)
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	automationHandler := handler.NewAutomationHandler(s.automationService)
+	rssRelayHandler := handler.NewRSSRelayHandler(s.rssService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudPathHandler := handler.NewCloudPathHandler()
 	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService, s.moviePilotService)
@@ -313,6 +322,7 @@ func (s *Server) setupRoutes() {
 
 	// API路由组
 	api := s.gin.Group("/api")
+	api.GET("/rss-relay/:id/:token", rssRelayHandler.ReadRSSRelay)
 
 	// 登录页公开配置与公开背景图片
 	api.GET("/public-config", appConfigHandler.GetPublic)
@@ -369,10 +379,30 @@ func (s *Server) setupRoutes() {
 		// 旧版前端兼容入口。
 		protected.POST("/telegram/test", notificationHandler.TestTelegram)
 
+		rssRelays := protected.Group("/rss-relays")
+		{
+			rssRelays.GET("", rssRelayHandler.List)
+			rssRelays.POST("", rssRelayHandler.Create)
+			rssRelays.GET("/:id", rssRelayHandler.Get)
+			rssRelays.PUT("/:id", rssRelayHandler.Update)
+			rssRelays.PATCH("/:id/enabled", rssRelayHandler.SetEnabled)
+			rssRelays.POST("/:id/refresh", rssRelayHandler.Refresh)
+			rssRelays.POST("/:id/token", rssRelayHandler.RotateToken)
+			rssRelays.DELETE("/:id", rssRelayHandler.Delete)
+		}
+
 		automation := protected.Group("/automations")
 		{
 			automation.GET("", automationHandler.Dashboard)
 			automation.POST("", automationHandler.CreateAutomation)
+			automation.POST("/batch", automationHandler.Batch)
+			automation.GET("/templates", automationHandler.ListTemplates)
+			automation.POST("/templates", automationHandler.SaveTemplate)
+			automation.PUT("/templates/:id", automationHandler.SaveTemplate)
+			automation.DELETE("/templates/:id", automationHandler.DeleteTemplate)
+			automation.PUT("/:id/settings", automationHandler.SaveSettings)
+			automation.GET("/:id/revisions", automationHandler.ListRevisions)
+			automation.POST("/:id/restore", automationHandler.RestoreRevision)
 			automation.POST("/sources/sample", automationHandler.SampleRSSSource)
 			automation.PUT("/:id", automationHandler.UpdateAutomation)
 			automation.GET("/node-protocols", automationHandler.NodeProtocols)
@@ -518,6 +548,11 @@ func (s *Server) setupRoutes() {
 		// FilmFusion 本地识别词、媒体分类配置与识别测试。
 		mediaRecognition := protected.Group("/media-recognition")
 		{
+			mediaRecognition.GET("/medianame-config", mediaRecognitionHandler.GetMedianameConfig)
+			mediaRecognition.PUT("/medianame-config", mediaRecognitionHandler.SaveMedianameConfig)
+			mediaRecognition.POST("/medianame-config/validate", mediaRecognitionHandler.ValidateMedianameConfig)
+			mediaRecognition.POST("/medianame-config/preview", mediaRecognitionHandler.PreviewMedianameTemplate)
+			mediaRecognition.POST("/pipeline-test", organizeHandler.TestMediaPipeline)
 			mediaRecognition.GET("/words", mediaRecognitionHandler.GetWords)
 			mediaRecognition.PUT("/words", mediaRecognitionHandler.UpdateWords)
 			mediaRecognition.GET("/category-config", mediaRecognitionHandler.GetCategoryConfig)
@@ -536,6 +571,11 @@ func (s *Server) setupRoutes() {
 		{
 			organize.POST("/115", organizeHandler.Organize115)
 			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
+			organize.GET("/upgrade/presets", organizeHandler.UpgradePresets)
+			organize.POST("/upgrade/test", organizeHandler.TestUpgradePolicy)
+			organize.GET("/upgrade/jobs", organizeHandler.ListUpgradeJobs)
+			organize.POST("/upgrade/jobs/:id/retry", organizeHandler.RetryUpgradeJob)
+			organize.POST("/upgrade/jobs/:id/refresh", organizeHandler.RefreshUpgradeLibrary)
 			organize.GET("/category-config", organizeHandler.GetCategoryConfig)
 			organize.POST("/media-search", organizeHandler.SearchMedia)
 			organize.POST("/media-local-status", organizeHandler.CheckMediaLocalStatus)

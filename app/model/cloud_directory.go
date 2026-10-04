@@ -8,6 +8,8 @@ import (
 
 // CloudDirectory 云盘目录配置模型
 type CloudDirectory struct {
+	UpgradePolicy        string         `gorm:"type:text" json:"upgrade_policy,omitempty"`
+	RecognitionSource    string         `gorm:"size:32" json:"recognition_source,omitempty"`
 	ID                   uint           `gorm:"primarykey" json:"id"`
 	UserID               uint           `gorm:"not null;index;comment:所属用户ID" json:"user_id"`
 	CloudStorageID       uint           `gorm:"not null;index;comment:云存储ID" json:"cloud_storage_id"`

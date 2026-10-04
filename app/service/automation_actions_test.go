@@ -33,7 +33,7 @@ func TestAutomationOffline115OpenAPIActionSubmitsWithAccessToken(t *testing.T) {
 		if got := request.Header.Get("Authorization"); got != "Bearer open-token" {
 			t.Fatalf("Authorization = %q", got)
 		}
-		if err := request.ParseForm(); err != nil {
+		if err := request.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatal(err)
 		}
 		if got := request.Form.Get("urls"); got != magnet {
@@ -103,7 +103,7 @@ func TestAutomationRename115OpenAPIActionUsesResolvedFileIDAndName(t *testing.T)
 		if got := request.Header.Get("Authorization"); got != "Bearer rename-token" {
 			t.Fatalf("Authorization = %q", got)
 		}
-		if err := request.ParseForm(); err != nil {
+		if err := request.ParseMultipartForm(1 << 20); err != nil {
 			t.Fatal(err)
 		}
 		if got := request.Form.Get("file_id"); got != "987654321" {

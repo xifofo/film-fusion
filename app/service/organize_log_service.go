@@ -24,6 +24,12 @@ type OrganizeLogEntry struct {
 
 // WriteOrganizeLog 异步写入一条整理日志，写入失败仅记录到 logger
 func WriteOrganizeLog(log *logger.Logger, entry OrganizeLogEntry) {
+	// Capture the connection before handing work to a goroutine; it must not
+	// write to a different database if the service is reinitialized meanwhile.
+	db := database.DB
+	if db == nil {
+		return
+	}
 	go func() {
 		row := model.OrganizeLog{
 			Action:         entry.Action,
@@ -39,7 +45,7 @@ func WriteOrganizeLog(log *logger.Logger, entry OrganizeLogEntry) {
 			DurationMS:     entry.DurationMS,
 			SizeBytes:      entry.SizeBytes,
 		}
-		if err := database.DB.Create(&row).Error; err != nil {
+		if err := db.Create(&row).Error; err != nil {
 			if log != nil {
 				log.Warnf("写入 OrganizeLog 失败: %v", err)
 			}

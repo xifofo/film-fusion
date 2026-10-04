@@ -612,6 +612,7 @@ func (s *BalanceAssignmentService) FindReadyPlaybackCacheByPath(filePath string)
 		Preload("Match302.PoolMembers.CloudStorage").
 		Preload("SourceStorage").
 		Preload("PlaybackStorage").
+		Where("retired = ?", false).
 		Where("status = ? AND is_source_playback = ? AND forced = ? AND target_pickcode <> ?",
 			model.BalanceAssignmentStatusReady,
 			false,
@@ -651,6 +652,9 @@ func (s *BalanceAssignmentService) RetryAssignment(ctx context.Context, matchID,
 	if err := database.DB.Where("id = ? AND match302_id = ?", assignmentID, matchID).First(&assignment).Error; err != nil {
 		return nil, err
 	}
+	if assignment.Retired {
+		return nil, fmt.Errorf("源文件已被洗版替换，此缓存不能重新启用")
+	}
 	if assignment.IsSourcePlayback {
 		return &assignment, nil
 	}
@@ -685,6 +689,7 @@ func (s *BalanceAssignmentService) StartTransferAsync(assignmentID uint) {
 
 func (s *BalanceAssignmentService) RunTransfer(ctx context.Context, assignmentID uint) error {
 	updated := database.DB.Model(&model.Match302BalanceAssignment{}).
+		Where("retired = ?", false).
 		Where("id = ? AND status IN ?", assignmentID, []string{
 			model.BalanceAssignmentStatusPending,
 			model.BalanceAssignmentStatusFailed,
@@ -1058,7 +1063,7 @@ func (s *BalanceAssignmentService) ensureAssignment(ctx context.Context, match *
 }
 
 func assignmentCacheReusable(assignment *model.Match302BalanceAssignment, now time.Time) bool {
-	if assignment == nil {
+	if assignment == nil || assignment.Retired {
 		return false
 	}
 	if assignment.CleanupStatus == model.BalanceCleanupStatusCleaning || assignment.CleanupStatus == model.BalanceCleanupStatusCleaned {

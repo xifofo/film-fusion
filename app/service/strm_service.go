@@ -12,13 +12,15 @@ import (
 	"strings"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
+	driver "github.com/SheltonZhu/115driver/pkg/driver"
 )
 
 // StrmService STRM 文件处理服务
 type StrmService struct {
-	logger         *logger.Logger
-	sdk115Open     *sdk115.Client
-	download115Svc *Download115Service
+	logger           *logger.Logger
+	sdk115Open       *sdk115.Client
+	download115Svc   *Download115Service
+	newUpgradeClient func(string) (*driver.Pan115Client, error)
 }
 
 // NewStrmService 创建新的 StrmService
@@ -158,6 +160,9 @@ func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.Clou
 //   - cloudPath: 云盘路径配置信息
 //   - depth: 当前递归深度，用于防止无限递归
 func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudPath, depth int) {
+	if upgradeRecoveryEvent(currentPath, cloudPath) {
+		return
+	}
 	// 防止无限递归
 	maxDepth := 50
 	if depth >= maxDepth {
@@ -220,6 +225,9 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 }
 
 func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath, pickcode string) {
+	if upgradeRecoveryEvent(path, cloudPath) {
+		return
+	}
 	savePath, err := pathhelper.JoinUnderRoot(cloudPath.LocalPath, path)
 	if err != nil {
 		s.logger.Warnf("拒绝不安全的 STRM 目标路径 %q: %v", path, err)
@@ -231,6 +239,9 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		return
 	}
 	fileExt := strings.ToLower(filepath.Ext(savePath))
+	if s.protectUpgradeEntry(cloudPath.LocalPath, upgradeStrmPath(savePath), false, true) || s.protectUpgradeEntry(cloudPath.LocalPath, savePath, false, true) {
+		return
+	}
 
 	fullPathName := savePath[:len(savePath)-len(fileExt)]
 
@@ -378,6 +389,13 @@ func (s *StrmService) DeleteAction(localRootPath, eventPath string, isDirectory 
 	localPath, err := pathhelper.JoinUnderRoot(localRootPath, eventPath)
 	if err != nil {
 		s.logger.Warnf("拒绝越界删除路径 %q: %v", eventPath, err)
+		return
+	}
+	guardPath := localPath
+	if !isDirectory {
+		guardPath = upgradeStrmPath(localPath)
+	}
+	if s.protectUpgradeEntry(localRootPath, guardPath, isDirectory, false) || (!isDirectory && s.protectUpgradeEntry(localRootPath, localPath, false, false)) {
 		return
 	}
 	root, err := os.OpenRoot(localRootPath)

@@ -33,6 +33,7 @@ const (
 
 // NotificationEvent 是业务层与投递渠道之间的稳定契约。
 type NotificationEvent struct {
+	Channels   []string              `json:"channels,omitempty"`
 	Type       NotificationEventType `json:"event"`
 	Title      string                `json:"title,omitempty"`
 	Message    string                `json:"message"`
@@ -181,6 +182,9 @@ func (s *NotificationService) Publish(ctx context.Context, event NotificationEve
 	}
 
 	routes := s.route(event.Type)
+	if len(event.Channels) > 0 {
+		routes = append([]string(nil), event.Channels...)
+	}
 	if len(routes) == 0 {
 		report.Skipped = true
 		report.SkipReason = "该事件未配置投递渠道"

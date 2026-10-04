@@ -17,9 +17,11 @@ import (
 )
 
 type TMDBService struct {
-	cfg    *config.Config
-	logger *logger.Logger
-	client *http.Client
+	medianameMu     sync.Mutex
+	medianameClient *medianameTMDBClient
+	cfg             *config.Config
+	logger          *logger.Logger
+	client          *http.Client
 
 	mu          sync.Mutex
 	cache       map[string]tmdbEpisodeCacheEntry
@@ -81,7 +83,7 @@ func (s *TMDBService) GetMediaEnglishTitle(ctx context.Context, tmdbID, mediaTyp
 }
 
 func (s *TMDBService) fetchMediaEnglishTitle(ctx context.Context, tmdbID, mediaType string) (string, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/")
+	baseURL := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/"), "/3")
 	if baseURL == "" {
 		baseURL = "https://api.themoviedb.org"
 	}
@@ -168,7 +170,7 @@ func (s *TMDBService) GetTVSeasonEpisodeCount(ctx context.Context, tmdbID string
 }
 
 func (s *TMDBService) fetchTVSeasonEpisodeCount(ctx context.Context, tmdbID string, seasonNumber int) (int, error) {
-	baseURL := strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/")
+	baseURL := strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(s.cfg.TMDB.BaseURL), "/"), "/3")
 	if baseURL == "" {
 		baseURL = "https://api.themoviedb.org"
 	}

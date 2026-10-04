@@ -29,7 +29,11 @@ func (s *AutomationService) executeAutomationMoviePilotTitleRecognize(ctx contex
 	if err != nil {
 		return nil, err
 	}
-	if tmdbID == "" {
+	recognizer, err := freezeAutomationRecognizer(s.moviePilot, automationConfigString(node.Config, "recognition_source"))
+	if err != nil {
+		return nil, err
+	}
+	if tmdbID == "" && recognizer.source != MediaRecognitionSourceMedianame {
 		tmdbID = extractLocalTMDBMarkerID(input)
 	}
 	category := ""
@@ -37,14 +41,15 @@ func (s *AutomationService) executeAutomationMoviePilotTitleRecognize(ctx contex
 		category = strings.TrimSpace(fmt.Sprint(value))
 	}
 
-	recognizer := automationRecognitionSourceAdapter{
-		base: s.moviePilot, source: automationConfigString(node.Config, "recognition_source"),
-	}
 	media, recognizeInput, responded, recognized, recognizeErr := recognizeAutomationTitle(recognizer, input, category, tmdbID)
-	if recognized {
+	if recognized && recognizer.source != MediaRecognitionSourceMedianame {
 		media = s.reclassifyAutomationMoviePilotTitle(ctx, input, media)
 	}
 	output := automationTitleRecognitionOutput(input, recognizeInput, tmdbID, media)
+	output["recognition_source"] = recognizer.source
+	if recognizer.raw != nil {
+		output["recognition_raw"] = *recognizer.raw
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return output, ctxErr
 	}
@@ -136,6 +141,13 @@ func recognizeAutomationTitle(recognizer AutomationMediaRecognizer, title, categ
 		SeasonEpisode: extractAutomationSeasonEpisode(title), Quality: extractAutomationQuality(title),
 	}
 	candidates := automationTitleRecognitionCandidates(title, tmdbID)
+	if medianameAutomationRecognizer(recognizer) {
+		candidates = []string{title}
+		if tmdbID != "" {
+			// Keep embedded IDs and their conflicts intact for medianame to validate.
+			candidates[0] = title + " [tmdb=" + tmdbID + "]"
+		}
+	}
 	requestErrors := make([]error, 0)
 	responded := false
 	lastInput := ""
@@ -160,6 +172,9 @@ func recognizeAutomationTitle(recognizer AutomationMediaRecognizer, title, categ
 		media.MediaType = normalizeAutomationMediaType(info.MediaType)
 		media.Category = firstAutomationNonEmpty(info.Category, strings.Join(info.Genres, "、"), category)
 		media.SeasonEpisode = firstAutomationNonEmpty(media.SeasonEpisode, normalizeAutomationSeasonEpisode(info.SeasonEpisode))
+		if medianameAutomationRecognizer(recognizer) {
+			media.SeasonEpisode = info.SeasonEpisode
+		}
 		if media.Quality == "" {
 			media.Quality = extractAutomationQuality(strings.TrimSpace(info.ResourceType + " " + info.ResourcePix))
 		}
@@ -167,7 +182,7 @@ func recognizeAutomationTitle(recognizer AutomationMediaRecognizer, title, categ
 		media.TmdbID = recognizedID
 		media.PosterURL = automationTMDBImageURL(firstAutomationNonEmpty(info.BackdropPath, info.PosterPath))
 
-		if media.PosterURL == "" && media.Title != "" {
+		if !medianameAutomationRecognizer(recognizer) && media.PosterURL == "" && media.Title != "" {
 			if results, searchErr := recognizer.SearchMedia(media.Title, 8); searchErr == nil {
 				if match := matchAutomationMediaSearchResult(media, results); match != nil {
 					media.Year = firstAutomationNonEmpty(media.Year, match.Year)

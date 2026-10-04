@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"film-fusion/app/config"
 	"film-fusion/app/database"
 	"film-fusion/app/model"
+	"film-fusion/app/service"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +43,8 @@ func (h *CloudDirectoryHandler) error(c *gin.Context, statusCode int, errorCode 
 // CreateCloudDirectory 创建云盘目录配置
 func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 	var req struct {
+		UpgradePolicy      string `json:"upgrade_policy"`
+		RecognitionSource  string `json:"recognition_source"`
 		CloudStorageID     uint   `json:"cloud_storage_id"`
 		DirectoryName      string `json:"directory_name"`
 		DirectoryID        string `json:"directory_id"`
@@ -56,6 +61,18 @@ func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 		return
 	}
 
+	if _, err := service.ParseMediaUpgradePolicy(req.UpgradePolicy); err != nil {
+		h.error(c, 400, 400, err.Error())
+		return
+	}
+	if req.RecognitionSource != "" {
+		source, err := config.NormalizeMediaRecognitionSource(req.RecognitionSource)
+		if err != nil {
+			h.error(c, 400, 400, err.Error())
+			return
+		}
+		req.RecognitionSource = source
+	}
 	// 获取当前用户ID
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -109,6 +126,7 @@ func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 	}
 
 	newDir := model.CloudDirectory{
+		UpgradePolicy:        req.UpgradePolicy,
 		UserID:               uid,
 		CloudStorageID:       req.CloudStorageID,
 		DirectoryName:        req.DirectoryName,
@@ -120,6 +138,7 @@ func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 		ExcludeExtensions:    req.ExcludeExtensions,
 		ExcludeSmallerThanMB: req.ExcludeSmallerThan,
 		ClassifyByCategory:   classifyByCategory,
+		RecognitionSource:    req.RecognitionSource,
 	}
 
 	if err := database.DB.Create(&newDir).Error; err != nil {
@@ -235,6 +254,8 @@ func (h *CloudDirectoryHandler) UpdateCloudDirectory(c *gin.Context) {
 	}
 
 	var req struct {
+		UpgradePolicy        *string `json:"upgrade_policy"`
+		RecognitionSource    *string `json:"recognition_source"`
 		CloudStorageID       *uint   `json:"cloud_storage_id"`
 		DirectoryName        *string `json:"directory_name"`
 		DirectoryID          *string `json:"directory_id"`
@@ -296,6 +317,13 @@ func (h *CloudDirectoryHandler) UpdateCloudDirectory(c *gin.Context) {
 	updates := map[string]interface{}{
 		"updated_at": time.Now(),
 	}
+	if req.UpgradePolicy != nil {
+		if _, err := service.ParseMediaUpgradePolicy(*req.UpgradePolicy); err != nil {
+			h.error(c, 400, 400, err.Error())
+			return
+		}
+		updates["upgrade_policy"] = *req.UpgradePolicy
+	}
 	if req.CloudStorageID != nil {
 		updates["cloud_storage_id"] = *req.CloudStorageID
 	}
@@ -322,6 +350,18 @@ func (h *CloudDirectoryHandler) UpdateCloudDirectory(c *gin.Context) {
 	}
 	if req.ExcludeSmallerThanMB != nil {
 		updates["exclude_smaller_than_mb"] = *req.ExcludeSmallerThanMB
+	}
+	if req.RecognitionSource != nil {
+		source := strings.TrimSpace(*req.RecognitionSource)
+		if source != "" {
+			var err error
+			source, err = config.NormalizeMediaRecognitionSource(source)
+			if err != nil {
+				h.error(c, 400, 400, err.Error())
+				return
+			}
+		}
+		updates["recognition_source"] = source
 	}
 	if req.ClassifyByCategory != nil {
 		updates["classify_by_category"] = *req.ClassifyByCategory

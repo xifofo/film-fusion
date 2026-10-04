@@ -22,18 +22,27 @@ type automationRecognitionSourceCapable interface {
 type automationRecognitionSourceAdapter struct {
 	base   automationMoviePilotRecognizer
 	source string
+	raw    *map[string]any
 }
 
 func (a automationRecognitionSourceAdapter) RecognizeTitle(title string) (MoviePilotMediaInfo, map[string]any, error) {
 	if capable, ok := a.base.(automationRecognitionSourceCapable); ok {
-		return capable.RecognizeTitleWithSource(title, a.source)
+		info, raw, err := capable.RecognizeTitleWithSource(title, a.source)
+		if a.raw != nil {
+			*a.raw = raw
+		}
+		return info, raw, err
 	}
 	return a.base.RecognizeTitle(title)
 }
 
 func (a automationRecognitionSourceAdapter) RecognizeFile(filePath string) (MoviePilotMediaInfo, map[string]any, error) {
 	if capable, ok := a.base.(automationRecognitionSourceCapable); ok {
-		return capable.RecognizeFileWithSource(filePath, a.source)
+		info, raw, err := capable.RecognizeFileWithSource(filePath, a.source)
+		if a.raw != nil {
+			*a.raw = raw
+		}
+		return info, raw, err
 	}
 	return a.base.RecognizeFile(filePath)
 }
@@ -203,4 +212,20 @@ func firstAutomationNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func freezeAutomationRecognizer(base automationMoviePilotRecognizer, source string) (automationRecognitionSourceAdapter, error) {
+	var raw map[string]any
+	if actual, ok := base.(*MoviePilotService); ok {
+		frozen, snapshot, err := actual.FreezeMediaPipeline(source)
+		if err != nil {
+			return automationRecognitionSourceAdapter{}, err
+		}
+		return automationRecognitionSourceAdapter{base: frozen, source: snapshot.Source, raw: &raw}, nil
+	}
+	return automationRecognitionSourceAdapter{base: base, source: source, raw: &raw}, nil
+}
+func medianameAutomationRecognizer(recognizer any) bool {
+	adapter, ok := recognizer.(automationRecognitionSourceAdapter)
+	return ok && adapter.source == MediaRecognitionSourceMedianame
 }

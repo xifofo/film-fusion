@@ -176,6 +176,9 @@ func MediaRenameTVVariables() []MediaRenameVariable {
 }
 
 func (s *MediaRecognitionService) LoadMediaRenameConfig() (MediaRenameConfigResult, error) {
+	if s != nil && s.frozen != nil {
+		return s.frozen.MP2Rename, nil
+	}
 	result := mediaRenameConfigView(MediaRenameFormats{
 		MovieFormat: DefaultMovieRenameFormat,
 		TVFormat:    DefaultTVRenameFormat,

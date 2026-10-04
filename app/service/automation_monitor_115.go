@@ -47,6 +47,7 @@ func (l *defaultAutomation115MonitorLister) ListDirectory(
 }
 
 type AutomationScanResult struct {
+	RSSCacheMetadata
 	SourceID       uint      `json:"source_id"`
 	SourceName     string    `json:"source_name"`
 	TriggerType    string    `json:"trigger_type"`
