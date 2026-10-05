@@ -55,7 +55,8 @@ func NewEmbyStatsService(cfg *config.Config, log *logger.Logger, emby *embyhelpe
 
 // Collect 实时拉取统计快照。partial 错误不阻断；ListLibraries 失败才整体失败。
 func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
-	libs, err := s.emby.ListLibraries()
+	emby := s.emby.WithContext(ctx)
+	libs, err := emby.ListLibraries()
 	if err != nil {
 		return nil, fmt.Errorf("获取 Emby 媒体库列表失败: %w", err)
 	}
@@ -93,7 +94,7 @@ func (s *EmbyStatsService) Collect(ctx context.Context) (*EmbyStats, error) {
 			targets := embyStatsItemTypes(collectionType)
 			typedContentCount := 0
 			for _, itemType := range targets {
-				count, countErr := s.emby.CountItems(libID, itemType)
+				count, countErr := emby.CountItems(libID, itemType)
 
 				mu.Lock()
 				if countErr != nil {

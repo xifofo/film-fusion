@@ -1,6 +1,7 @@
 package embyhelper
 
 import (
+	"context"
 	"encoding/json"
 	"film-fusion/app/config"
 	"fmt"
@@ -66,6 +67,12 @@ type GetEmbyItemsResult struct {
 }
 
 func GetEmbyItems(itemInfoUri string, itemId string, etag string, mediaSourceId string, apiKey string) (GetEmbyItemsResult, error) {
+	return GetEmbyItemsContext(context.Background(), itemInfoUri, itemId, etag, mediaSourceId, apiKey)
+}
+
+var itemHTTPClient = &http.Client{Timeout: embyRequestTimeout}
+
+func GetEmbyItemsContext(ctx context.Context, itemInfoUri string, itemId string, etag string, mediaSourceId string, apiKey string) (GetEmbyItemsResult, error) {
 	rvt := GetEmbyItemsResult{
 		ID:                  "",
 		Protocol:            "File",
@@ -73,17 +80,16 @@ func GetEmbyItems(itemInfoUri string, itemId string, etag string, mediaSourceId 
 		NeedAddMediaStreams: false,
 	}
 
-	client := &http.Client{}
-	req, err := http.NewRequest("GET", itemInfoUri, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", itemInfoUri, nil)
 	if err != nil {
 		return rvt, fmt.Errorf("初始化代理请求 %s 错误 %v", itemInfoUri, err)
 	}
 
 	req.Header.Set("Content-Type", "application/json;charset=utf-8")
 
-	resp, err := client.Do(req)
+	resp, err := itemHTTPClient.Do(req)
 	if err != nil {
-		return rvt, fmt.Errorf("代理请求 mediaItemInfo 错误, %v", err)
+		return rvt, fmt.Errorf("代理请求 mediaItemInfo 错误, %w", err)
 	}
 
 	defer resp.Body.Close()

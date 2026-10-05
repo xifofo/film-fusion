@@ -4,6 +4,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"film-fusion/app/organize"
 	"film-fusion/app/utils/pathhelper"
 	"fmt"
 	"io/fs"
@@ -754,7 +755,7 @@ func parentSegments(segments []string) []string {
 
 func findTmdbIdentity(segments []string) (string, string) {
 	for i := len(segments) - 1; i >= 0; i-- {
-		if tmdbID := extractTmdbIDFromName(segments[i]); tmdbID != "" {
+		if tmdbID := organize.ExtractTMDBIDFromName(segments[i]); tmdbID != "" {
 			return tmdbID, cleanEmbyVersionTitle(segments[i])
 		}
 	}
@@ -793,7 +794,7 @@ func inferSeriesTitle(dirSegments []string, seasonIdx int) string {
 
 func cleanEmbyVersionTitle(value string) string {
 	value = strings.TrimSpace(value)
-	value = tmdbFolderIDRegexp.ReplaceAllString(value, "")
+	value = organize.StripTMDBID(value)
 	value = embyVersionCleanupRegexp.ReplaceAllString(value, " ")
 	value = strings.TrimSpace(value)
 	if value == "" {
@@ -869,35 +870,35 @@ func extractEmbyVersionTags(path string) []string {
 	}
 
 	switch {
-	case containsAny(text, "4320p", "8k"):
+	case organize.ContainsAny(text, "4320p", "8k"):
 		add("8K")
-	case containsAny(text, "2160p", "4k", "uhd"):
+	case organize.ContainsAny(text, "2160p", "4k", "uhd"):
 		add("4K")
-	case containsAny(text, "1080p", "fhd"):
+	case organize.ContainsAny(text, "1080p", "fhd"):
 		add("1080p")
-	case containsAny(text, "720p", "hd"):
+	case organize.ContainsAny(text, "720p", "hd"):
 		add("720p")
-	case containsAny(text, "576p", "540p", "480p", "sd"):
+	case organize.ContainsAny(text, "576p", "540p", "480p", "sd"):
 		add("SD")
 	}
 
 	switch {
 	case strings.Contains(text, "remux"):
 		add("Remux")
-	case containsAny(text, "blu-ray", "bluray", "bdrip", "bdmv", "bd25", "bd50"):
+	case organize.ContainsAny(text, "blu-ray", "bluray", "bdrip", "bdmv", "bd25", "bd50"):
 		add("BluRay")
-	case containsAny(text, "web-dl", "webdl"):
+	case organize.ContainsAny(text, "web-dl", "webdl"):
 		add("WEB-DL")
-	case containsAny(text, "web-rip", "webrip"):
+	case organize.ContainsAny(text, "web-rip", "webrip"):
 		add("WEBRip")
 	case strings.Contains(text, "hdtv"):
 		add("HDTV")
 	}
 
 	switch {
-	case containsAny(text, "dolby vision", "dovi", " dv ", ".dv.", "-dv-"):
+	case organize.ContainsAny(text, "dolby vision", "dovi", " dv ", ".dv.", "-dv-"):
 		add("DoVi")
-	case containsAny(text, "hdr10+", "hdr10plus"):
+	case organize.ContainsAny(text, "hdr10+", "hdr10plus"):
 		add("HDR10+")
 	case strings.Contains(text, "hdr10"):
 		add("HDR10")
@@ -906,11 +907,11 @@ func extractEmbyVersionTags(path string) []string {
 	}
 
 	switch {
-	case containsAny(text, "h.265", "h265", "x265", "hevc"):
+	case organize.ContainsAny(text, "h.265", "h265", "x265", "hevc"):
 		add("HEVC")
 	case strings.Contains(text, "av1"):
 		add("AV1")
-	case containsAny(text, "h.264", "h264", "x264", "avc"):
+	case organize.ContainsAny(text, "h.264", "h264", "x264", "avc"):
 		add("H.264")
 	}
 

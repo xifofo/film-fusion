@@ -139,7 +139,7 @@ func (s *MoviePilotService) finishRecognitionWithShadow(
 		moviePilotInfoPtr = &moviePilotInfo
 	}
 	shadow := s.runLocalRecognitionShadow(
-		context.Background(),
+		s.requestContext(),
 		input,
 		mode,
 		MediaRecognitionOptions{Mode: mode, LookupTMDB: true},
@@ -164,7 +164,7 @@ func (s *MoviePilotService) runLocalRecognitionShadow(
 ) mediaRecognitionShadowRun {
 	run := mediaRecognitionShadowRun{}
 	if ctx == nil {
-		ctx = context.Background()
+		ctx = s.requestContext()
 	}
 	if s == nil || s.local == nil {
 		run.localErr = errors.New("FilmFusion 本地识别未初始化")

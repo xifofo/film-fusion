@@ -8,6 +8,7 @@ import (
 	"film-fusion/app/model"
 	"film-fusion/app/service"
 	"film-fusion/app/utils/pathhelper"
+	"film-fusion/app/utils/sdk115helper"
 	"fmt"
 	"io"
 	"net/http"
@@ -326,9 +327,9 @@ func (h *StrmHandler) generateLinksFrom115DirectoryTree(worldFilePath string, st
 
 			queuedDownload++
 
-			h.sdk115Open.SetAccessToken(storage.AccessToken)
+			client := sdk115helper.WithAccessToken(h.sdk115Open, storage.AccessToken)
 
-			folderInfo, err := h.sdk115Open.GetFolderInfoByPath(context.Background(), filepath.Join("/", p))
+			folderInfo, err := client.GetFolderInfoByPath(context.Background(), filepath.Join("/", p))
 			if err != nil {
 				h.logger.Errorf("获取115Open文件夹信息失败: %v", err)
 				continue

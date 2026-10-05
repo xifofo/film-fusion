@@ -49,7 +49,7 @@ func (e *EmbyClient) ListPlayedItems(userID string, startIndex, limit int) ([]Pl
 	}
 
 	var resp playedItemsResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IsPlayed", "true").
 		SetQueryParam("IncludeItemTypes", "Movie,Episode").

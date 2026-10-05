@@ -331,6 +331,14 @@ func newAutomationTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	pool, err := db.DB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Exercise the same transaction/connection ownership as the runtime database.
+	pool.SetMaxOpenConns(1)
+	pool.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = pool.Close() })
 	if err := db.AutoMigrate(
 		&model.SystemConfig{},
 		&model.RSSFeedCache{},

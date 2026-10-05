@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
@@ -72,6 +73,9 @@ type OrganizePreviewQueue struct {
 	db                 *gorm.DB
 	log                *logger.Logger
 	processor          OrganizePreviewProcessor
+	contextProcessor   func(context.Context, model.OrganizePreviewTask) (OrganizePreviewProcessResult, error)
+	ctx                context.Context
+	cancel             context.CancelFunc
 	stopCh             chan struct{}
 	wg                 sync.WaitGroup
 	mu                 sync.Mutex
@@ -90,6 +94,12 @@ func NewOrganizePreviewQueue(log *logger.Logger, processor OrganizePreviewProces
 		stopCh:      make(chan struct{}),
 		subscribers: make(map[uint64]organizePreviewQueueSubscriber),
 	}
+}
+
+func NewOrganizePreviewQueueWithContext(log *logger.Logger, processor func(context.Context, model.OrganizePreviewTask) (OrganizePreviewProcessResult, error)) *OrganizePreviewQueue {
+	queue := NewOrganizePreviewQueue(log, nil)
+	queue.contextProcessor = processor
+	return queue
 }
 
 func (q *OrganizePreviewQueue) Subscribe(userID, cloudDirectoryID uint) (<-chan OrganizePreviewQueueEvent, func(), error) {
@@ -224,6 +234,7 @@ func (q *OrganizePreviewQueue) Start() {
 	}
 
 	q.stopCh = make(chan struct{})
+	q.ctx, q.cancel = context.WithCancel(context.Background())
 	q.running = true
 	q.db.Model(&model.OrganizePreviewTask{}).
 		Where("status = ?", model.OrganizePreviewStatusProcessing).
@@ -251,7 +262,10 @@ func (q *OrganizePreviewQueue) Stop() {
 	}
 	q.running = false
 	close(q.stopCh)
-	q.mu.Unlock()
+	if q.cancel != nil {
+		q.cancel()
+	}
+	defer q.mu.Unlock()
 
 	q.wg.Wait()
 	if q.log != nil {
@@ -566,7 +580,7 @@ func (q *OrganizePreviewQueue) worker() {
 }
 
 func (q *OrganizePreviewQueue) processNext() bool {
-	if q.processor == nil || q.db == nil {
+	if (q.processor == nil && q.contextProcessor == nil) || q.db == nil {
 		return false
 	}
 
@@ -617,7 +631,22 @@ func (q *OrganizePreviewQueue) processNext() bool {
 		q.log.Infof("开始预整理目录: task_id=%d folder_id=%s folder_path=%s", task.ID, task.FolderID, task.FolderPath)
 	}
 
-	result, err := q.processor(task)
+	var result OrganizePreviewProcessResult
+	var err error
+	if q.contextProcessor != nil {
+		result, err = q.contextProcessor(q.ctx, task)
+	} else {
+		result, err = q.processor(task)
+	}
+	if q.ctx != nil && q.ctx.Err() != nil {
+		// Shutdown interrupts a read-only preview, not a failed business attempt.
+		// Keep it pending so startup resumes it with the same options.
+		if updateErr := q.db.Model(&model.OrganizePreviewTask{}).Where("id = ?", task.ID).
+			Updates(map[string]any{"status": model.OrganizePreviewStatusPending, "started_at": nil}).Error; updateErr != nil && q.log != nil {
+			q.log.Errorf("恢复中断预整理任务失败: task_id=%d err=%v", task.ID, updateErr)
+		}
+		return false
+	}
 	completedAt := time.Now()
 	updates := map[string]any{
 		"total":                   result.Total,

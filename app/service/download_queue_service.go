@@ -7,6 +7,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/downloader"
+	"film-fusion/app/utils/sdk115helper"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -378,10 +379,10 @@ func (s *Download115Service) performDownload(task *model.Download115Queue) error
 	s.logger.Debugf("正在通过115Open下载文件: PickCode=%s", task.PickCode)
 
 	// 设置115 SDK的访问令牌
-	s.sdk115.SetAccessToken(task.CloudStorage.AccessToken)
+	client := sdk115helper.WithAccessToken(s.sdk115, task.CloudStorage.AccessToken)
 
 	// 获取下载URL
-	downURLResp, err := s.sdk115.DownURL(context.Background(), task.PickCode, userAgent)
+	downURLResp, err := client.DownURL(context.Background(), task.PickCode, userAgent)
 	if err != nil {
 		s.logger.Errorf("115Open获取下载URL失败: %v", err)
 		return err

@@ -105,7 +105,7 @@ func (s *AutomationService) ListEntryHistory(filter string, sourceID uint, limit
 		entryIDs = append(entryIDs, entry.ID)
 	}
 	var sources []model.AutomationSource
-	if err := s.db.Where("id IN ?", sourceIDs).Find(&sources).Error; err != nil {
+	if err := s.db.Select("id", "name").Where("id IN ?", sourceIDs).Find(&sources).Error; err != nil {
 		return result, err
 	}
 	sourceNames := make(map[uint]string, len(sources))
@@ -114,7 +114,12 @@ func (s *AutomationService) ListEntryHistory(filter string, sourceID uint, limit
 	}
 
 	var runs []model.AutomationRun
-	if err := s.db.Where("entry_id IN ?", entryIDs).Order("id DESC").Find(&runs).Error; err != nil {
+	// The existing contract defines "latest" by ID, including repeated runs and
+	// workflow revisions. Select those IDs in SQL so old JSON snapshots are never
+	// loaded just to be discarded. Keep the complete latest run in the response.
+	latestIDs := s.db.Model(&model.AutomationRun{}).
+		Select("MAX(id)").Where("entry_id IN ?", entryIDs).Group("entry_id")
+	if err := s.db.Where("id IN (?)", latestIDs).Order("id DESC").Find(&runs).Error; err != nil {
 		return result, err
 	}
 	latestRuns := make(map[uint]model.AutomationRun, len(entries))

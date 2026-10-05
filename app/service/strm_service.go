@@ -6,6 +6,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/utils/pathhelper"
+	"film-fusion/app/utils/sdk115helper"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -129,8 +130,10 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 //   - dirPath: 要遍历的目录路径
 //   - cloudPath: 云盘路径配置信息，包含过滤规则等
 func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.CloudPath) {
-	// 设置访问令牌
-	s.sdk115Open.SetAccessToken(cloudPath.CloudStorage.AccessToken)
+	// Keep this traversal and its recursive pages bound to the same account.
+	worker := *s
+	worker.sdk115Open = sdk115helper.WithAccessToken(s.sdk115Open, cloudPath.CloudStorage.AccessToken)
+	s = &worker
 
 	sourceCloudPath := pathhelper.EnsureLeadingSlash(dirPath)
 	// 转换路径为云盘路径
@@ -264,8 +267,8 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 			return
 		}
 
-		s.sdk115Open.SetAccessToken(cloudPath.CloudStorage.AccessToken)
-		folderInfo, err := s.sdk115Open.GetFolderInfoByPath(context.Background(), sourceCloudPath)
+		client := sdk115helper.WithAccessToken(s.sdk115Open, cloudPath.CloudStorage.AccessToken)
+		folderInfo, err := client.GetFolderInfoByPath(context.Background(), sourceCloudPath)
 		if err != nil {
 			s.logger.Errorf("获取115Open文件夹信息失败: %v", err)
 			WriteOrganizeLog(s.logger, OrganizeLogEntry{

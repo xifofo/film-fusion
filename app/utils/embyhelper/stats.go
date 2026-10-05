@@ -26,7 +26,7 @@ func (e *EmbyClient) CountItems(libraryID, typesCSV string) (int, error) {
 		return 0, fmt.Errorf("typesCSV 不能为空")
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", typesCSV).
 		SetQueryParam("Limit", "1").

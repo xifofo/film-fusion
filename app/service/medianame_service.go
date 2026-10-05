@@ -462,10 +462,12 @@ func (s *MoviePilotService) FreezeMediaPipeline(source string) (*MoviePilotServi
 	cfg.MediaRecognition.Source = source
 	frozen := NewMoviePilotService(&cfg, s.logger)
 	frozen.client = s.client
-	s.mu.RLock()
-	frozen.accessToken = s.accessToken
-	frozen.tokenExpiresAt = s.tokenExpiresAt
-	s.mu.RUnlock()
+	frozen.operationCtx = s.requestContext()
+	state := s.sharedState()
+	state.mu.RLock()
+	frozen.accessToken = state.accessToken
+	frozen.tokenExpiresAt = state.tokenExpiresAt
+	state.mu.RUnlock()
 	if s.local != nil {
 		local := *s.local
 		local.frozen = snapshot
@@ -494,7 +496,7 @@ func MedianameMoviePilotInfo(r MedianameRecognition) (MoviePilotMediaInfo, error
 	return medianameInfo(r), medianameCompatible(r)
 }
 func (s *MoviePilotService) recognizeMedianameCompat(input, mode string) (MoviePilotMediaInfo, map[string]any, error) {
-	r := s.RecognizeMedianame(context.Background(), input, MediaRecognitionOptions{Mode: mode, LookupTMDB: true})
+	r := s.RecognizeMedianame(s.requestContext(), input, MediaRecognitionOptions{Mode: mode, LookupTMDB: true})
 	return medianameInfo(r), map[string]any{"engine": "medianame", "medianame": r}, medianameCompatible(r)
 }
 

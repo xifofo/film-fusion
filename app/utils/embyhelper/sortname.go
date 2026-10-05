@@ -34,7 +34,7 @@ func (e *EmbyClient) ListItemsForSort(libraryID string, includeTypes []string, s
 		includeTypes = []string{"Movie", "Series", "BoxSet", "Folder"}
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", strings.Join(includeTypes, ",")).
 		SetQueryParam("Fields", "SortName,ForcedSortName,LockedFields").
@@ -75,7 +75,7 @@ func (e *EmbyClient) GetItemDetail(itemID string) (map[string]any, error) {
 	}
 
 	var detail map[string]any
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetResult(&detail).
 		Get(fmt.Sprintf("/Users/%s/Items/%s", uid, itemID))
 	if err != nil {
@@ -91,7 +91,7 @@ func (e *EmbyClient) GetItemDetail(itemID string) (map[string]any, error) {
 // 我们写元数据的 SortName/ForcedSortName 已加锁，刮削器不会覆盖，安全。
 // 该接口异步：Emby 立即返回，扫描在后端线程跑。
 func (e *EmbyClient) RefreshLibrary() (int, string, error) {
-	r, err := e.client.R().Post("/Library/Refresh")
+	r, err := e.client.R().SetContext(e.requestContext()).Post("/Library/Refresh")
 	if err != nil {
 		return 0, "", fmt.Errorf("触发 Emby 库刷新失败: %w", err)
 	}
@@ -113,7 +113,7 @@ func (e *EmbyClient) UpdateItem(itemID string, body map[string]any) (int, string
 		return 0, "", fmt.Errorf("更新 Item 的 body 不能为空")
 	}
 
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetHeader("Content-Type", "application/json").
 		SetBody(body).
 		Post(fmt.Sprintf("/Items/%s", itemID))

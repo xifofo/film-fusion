@@ -39,7 +39,7 @@ func (e *EmbyClient) ListMissingEpisodes(parentID string, includeSpecials, inclu
 		startIndex = 0
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("UserId", uid).
 		SetQueryParam("IncludeSpecials", strconv.FormatBool(includeSpecials)).
 		SetQueryParam("IncludeUnaired", strconv.FormatBool(includeUnaired)).

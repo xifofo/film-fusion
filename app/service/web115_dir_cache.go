@@ -1,135 +1,194 @@
 package service
 
 import (
+	"container/list"
 	"sync"
 	"time"
 )
 
-// Web115DirCache 进程内的"父目录 -> 子目录 map" 缓存。
-//
-// 用途：加速整理流程中"已存在目录"的沿路径前缀查找（见 OrganizeHandler.resolveTargetDir），
-// 让同一 cloud_storage 的多次 organize 请求之间能复用 115 返回的子目录列表，显著
-// 降低对 115 的 /files 列目录请求量。
-//
-// 语义约束：
-//   - 只缓存目录（不含文件），不受文件的移动/重命名影响。
-//   - 不跨进程共享；进程重启即失效——作为 Single-node 服务足够。
-//   - 线程安全。
+const (
+	web115DirCacheMaxParents = 512
+	web115DirCacheMaxBytes   = 8 << 20
+)
+
+type web115DirCacheKey struct {
+	storageID uint
+	parentID  string
+}
+
+// Web115DirCache caches complete child-directory listings, isolated by storage.
+// It retains at most 512 parents and 8 MiB of estimated data per instance. The
+// byte estimate includes strings and map-entry overhead; it is not an RSS limit.
+// Eviction only causes a fresh listing, never a partial directory-cache hit.
 type Web115DirCache struct {
-	ttl     time.Duration
-	mu      sync.RWMutex
-	buckets map[uint]map[string]*web115DirCacheEntry
+	ttl        time.Duration
+	mu         sync.Mutex
+	entries    map[web115DirCacheKey]*web115DirCacheEntry
+	lru        list.List
+	maxParents int
+	maxBytes   int
+	usedBytes  int
+	nextSweep  time.Time
+	now        func() time.Time
 }
 
 type web115DirCacheEntry struct {
-	children map[string]string // childName -> childID
+	key      web115DirCacheKey
+	children map[string]string
 	expireAt time.Time
+	bytes    int
+	element  *list.Element
 }
 
-// NewWeb115DirCache 以指定 TTL 创建缓存；ttl <= 0 视为禁用（所有 Get 都 miss，所有写入都被丢弃）。
+// NewWeb115DirCache preserves the caller's TTL; a nonpositive TTL disables it.
 func NewWeb115DirCache(ttl time.Duration) *Web115DirCache {
 	return &Web115DirCache{
-		ttl:     ttl,
-		buckets: make(map[uint]map[string]*web115DirCacheEntry),
+		ttl: ttl, entries: make(map[web115DirCacheKey]*web115DirCacheEntry),
+		maxParents: web115DirCacheMaxParents, maxBytes: web115DirCacheMaxBytes,
+		now: time.Now,
 	}
 }
 
-// Get 返回 parentID 下的子目录 map 的副本；未命中或过期返回 (nil, false)。
-// 返回副本可避免调用方不经意修改缓存内部状态。
+// Get returns an independent copy. Keep the lock while checking expiry and
+// copying: AddChild may mutate the same map, and Set may replace the entry.
 func (c *Web115DirCache) Get(storageID uint, parentID string) (map[string]string, bool) {
 	if c == nil || c.ttl <= 0 {
 		return nil, false
 	}
-	c.mu.RLock()
-	bucket, ok := c.buckets[storageID]
-	if !ok {
-		c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	c.sweepLocked(now)
+	entry := c.entries[web115DirCacheKey{storageID, parentID}]
+	if entry == nil {
 		return nil, false
 	}
-	entry, ok := bucket[parentID]
-	c.mu.RUnlock()
-	if !ok {
+	if now.After(entry.expireAt) {
+		c.removeLocked(entry)
 		return nil, false
 	}
-	if time.Now().After(entry.expireAt) {
-		c.Invalidate(storageID, parentID)
-		return nil, false
-	}
+	c.lru.MoveToFront(entry.element)
 	clone := make(map[string]string, len(entry.children))
-	for k, v := range entry.children {
-		clone[k] = v
+	for name, id := range entry.children {
+		clone[name] = id
 	}
 	return clone, true
 }
 
-// Set 替换某父目录的子目录 map，并重置过期时间。
+// Set replaces a complete listing and resets only that listing's expiration.
+// Oversized listings bypass the cache instead of retaining a truncated map.
 func (c *Web115DirCache) Set(storageID uint, parentID string, children map[string]string) {
 	if c == nil || c.ttl <= 0 {
 		return
 	}
-	clone := make(map[string]string, len(children))
-	for k, v := range children {
-		clone[k] = v
+	size := 128 + len(parentID)
+	for name, id := range children {
+		size += 64 + len(name) + len(id)
+	}
+	var clone map[string]string
+	if size <= c.maxBytes {
+		clone = make(map[string]string, len(children))
+		for name, id := range children {
+			clone[name] = id
+		}
 	}
 	c.mu.Lock()
-	bucket, ok := c.buckets[storageID]
-	if !ok {
-		bucket = make(map[string]*web115DirCacheEntry)
-		c.buckets[storageID] = bucket
+	defer c.mu.Unlock()
+	now := c.now()
+	c.sweepLocked(now)
+	key := web115DirCacheKey{storageID, parentID}
+	if old := c.entries[key]; old != nil {
+		c.removeLocked(old)
 	}
-	bucket[parentID] = &web115DirCacheEntry{
-		children: clone,
-		expireAt: time.Now().Add(c.ttl),
-	}
-	c.mu.Unlock()
-}
-
-// AddChild 向 parentID 的缓存项里追加一个 name -> childID 映射。
-//
-// 仅在该 parentID 已有有效缓存时生效；否则 no-op（避免构造出"只有一个孩子"的虚假视图
-// 让后续的 Get 误以为缓存是完整的）。新增不续期过期时间。
-func (c *Web115DirCache) AddChild(storageID uint, parentID, name, childID string) {
-	if c == nil || c.ttl <= 0 {
+	if size > c.maxBytes {
 		return
 	}
-	if name == "" || childID == "" {
+	entry := &web115DirCacheEntry{key: key, children: clone, expireAt: now.Add(c.ttl), bytes: size}
+	entry.element = c.lru.PushFront(entry)
+	c.entries[key] = entry
+	c.usedBytes += size
+	c.evictLocked()
+}
+
+// AddChild updates only an existing, complete, unexpired listing. It never
+// extends its TTL or invents a listing containing only the newly created child.
+func (c *Web115DirCache) AddChild(storageID uint, parentID, name, childID string) {
+	if c == nil || c.ttl <= 0 || name == "" || childID == "" {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	bucket, ok := c.buckets[storageID]
-	if !ok {
+	now := c.now()
+	c.sweepLocked(now)
+	entry := c.entries[web115DirCacheKey{storageID, parentID}]
+	if entry == nil {
 		return
 	}
-	entry, ok := bucket[parentID]
-	if !ok {
+	if now.After(entry.expireAt) {
+		c.removeLocked(entry)
 		return
 	}
-	if time.Now().After(entry.expireAt) {
-		delete(bucket, parentID)
+	delta := 64 + len(name) + len(childID)
+	if old, ok := entry.children[name]; ok {
+		delta = len(childID) - len(old)
+	}
+	if entry.bytes+delta > c.maxBytes {
+		c.removeLocked(entry)
 		return
 	}
 	entry.children[name] = childID
+	entry.bytes += delta
+	c.usedBytes += delta
+	c.lru.MoveToFront(entry.element)
+	c.evictLocked()
 }
 
-// Invalidate 使 parentID 的缓存失效。
 func (c *Web115DirCache) Invalidate(storageID uint, parentID string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if bucket, ok := c.buckets[storageID]; ok {
-		delete(bucket, parentID)
+	if entry := c.entries[web115DirCacheKey{storageID, parentID}]; entry != nil {
+		c.removeLocked(entry)
 	}
 }
 
-// InvalidateStorage 清空某个 storage 的全部缓存（例如 Cookie 失效、重新绑定后）。
 func (c *Web115DirCache) InvalidateStorage(storageID uint) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.buckets, storageID)
+	for key, entry := range c.entries {
+		if key.storageID == storageID {
+			c.removeLocked(entry)
+		}
+	}
+}
+
+func (c *Web115DirCache) removeLocked(entry *web115DirCacheEntry) {
+	delete(c.entries, entry.key)
+	c.lru.Remove(entry.element)
+	c.usedBytes -= entry.bytes
+}
+
+func (c *Web115DirCache) evictLocked() {
+	for len(c.entries) > c.maxParents || c.usedBytes > c.maxBytes {
+		c.removeLocked(c.lru.Back().Value.(*web115DirCacheEntry))
+	}
+}
+
+// Lazy cleanup avoids a background goroutine for every per-plan cache. Work is
+// bounded by maxParents and performed at most once per minute (or TTL if less).
+func (c *Web115DirCache) sweepLocked(now time.Time) {
+	if now.Before(c.nextSweep) {
+		return
+	}
+	for _, entry := range c.entries {
+		if now.After(entry.expireAt) {
+			c.removeLocked(entry)
+		}
+	}
+	c.nextSweep = now.Add(min(c.ttl, time.Minute))
 }

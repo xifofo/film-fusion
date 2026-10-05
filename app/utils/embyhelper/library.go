@@ -32,7 +32,7 @@ func (e *EmbyClient) ListRecentItems(limit int) ([]EmbyItem, error) {
 		limit = 100
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", "Movie,Series").
 		SetQueryParam("SortBy", "DateCreated,SortName").
@@ -110,7 +110,7 @@ func (e *EmbyClient) ListLoginBackgroundItems(mode string, limit int) ([]EmbyIte
 		sortBy = "PlayCount,CommunityRating,SortName"
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", "Movie,Series").
 		SetQueryParam("SortBy", sortBy).
@@ -152,7 +152,7 @@ func (e *EmbyClient) ListLoginBackgroundItems(mode string, limit int) ([]EmbyIte
 // Emby /Library/MediaFolders 返回当前 api_key 可见的所有库
 func (e *EmbyClient) ListLibraries() ([]EmbyLibrary, error) {
 	var resp listMediaFoldersResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetResult(&resp).
 		Get("/Library/MediaFolders")
 	if err != nil {
@@ -190,7 +190,7 @@ func (e *EmbyClient) GetItemPath(itemID string) (string, error) {
 		return "", fmt.Errorf("itemID 不能为空")
 	}
 	var resp itemPathResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Ids", itemID).
 		SetQueryParam("Fields", "Path").
 		SetQueryParam("Limit", "1").
@@ -221,7 +221,7 @@ func (e *EmbyClient) ItemExists(itemID string) (bool, error) {
 		return false, fmt.Errorf("itemID 不能为空")
 	}
 	var resp itemPathResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Ids", itemID).
 		SetQueryParam("Limit", "1").
 		SetResult(&resp).
@@ -253,7 +253,7 @@ func (e *EmbyClient) GetItemProviderIDs(itemID string) (map[string]string, error
 		return nil, fmt.Errorf("itemID 不能为空")
 	}
 	var resp itemProviderIDsResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Ids", itemID).
 		SetQueryParam("Fields", "ProviderIds").
 		SetQueryParam("Limit", "1").
@@ -284,7 +284,7 @@ func (e *EmbyClient) ListLatestItems(libraryID string, limit int, includeTypes [
 		includeTypes = []string{"Movie", "Series"}
 	}
 
-	req := e.client.R().
+	req := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("ParentId", libraryID).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", strings.Join(includeTypes, ",")).
@@ -337,7 +337,7 @@ func (e *EmbyClient) FindItemByTmdbID(tmdbID, mediaType string) (*EmbyLookupItem
 	}
 
 	var resp listLookupItemsResp
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetQueryParam("Recursive", "true").
 		SetQueryParam("IncludeItemTypes", includeTypes).
 		SetQueryParam("Fields", "ProviderIds").
@@ -390,7 +390,7 @@ func (e *EmbyClient) DownloadImage(itemID, imageType string, maxWidth int) ([]by
 		imageType = "Primary"
 	}
 
-	req := e.client.R()
+	req := e.client.R().SetContext(e.requestContext())
 	if maxWidth > 0 {
 		req = req.SetQueryParam("maxWidth", strconv.Itoa(maxWidth)).
 			SetQueryParam("quality", "90")
@@ -433,7 +433,7 @@ func (e *EmbyClient) UploadPrimaryImage(itemID string, imageBytes []byte, conten
 
 	encoded := base64.StdEncoding.EncodeToString(imageBytes)
 
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetHeader("Content-Type", contentType).
 		SetBody(encoded).
 		Post(fmt.Sprintf("/Items/%s/Images/Primary", itemID))
@@ -454,7 +454,7 @@ func (e *EmbyClient) DeleteImage(itemID, imageType string) error {
 	if imageType == "" {
 		imageType = "Primary"
 	}
-	r, err := e.client.R().Delete(fmt.Sprintf("/Items/%s/Images/%s", itemID, imageType))
+	r, err := e.client.R().SetContext(e.requestContext()).Delete(fmt.Sprintf("/Items/%s/Images/%s", itemID, imageType))
 	if err != nil {
 		return fmt.Errorf("删除 Emby 图片失败: %w", err)
 	}

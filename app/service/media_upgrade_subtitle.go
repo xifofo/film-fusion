@@ -15,10 +15,14 @@ import (
 // Fetch into the journal before moving any cloud file. An asynchronous download
 // cannot then outlive a failed upgrade and overwrite a restored subtitle.
 func FetchUpgradeSubtitle(storage *model.CloudStorage, pickcode string, size int64) ([]byte, error) {
+	return FetchUpgradeSubtitleContext(context.Background(), storage, pickcode, size)
+}
+
+func FetchUpgradeSubtitleContext(parent context.Context, storage *model.CloudStorage, pickcode string, size int64) ([]byte, error) {
 	if storage == nil || storage.AccessToken == "" || pickcode == "" || size <= 0 || size > 2*1024*1024 {
 		return nil, errors.New("洗版字幕需要有效的 115 Open 令牌、下载标识和不超过 2 MiB 的文件")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	ctx, cancel := context.WithTimeout(parent, time.Minute)
 	defer cancel()
 	client := sdk115.New()
 	client.SetAccessToken(storage.AccessToken)

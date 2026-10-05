@@ -1,6 +1,7 @@
 package embyhelper
 
 import (
+	"context"
 	"film-fusion/app/config"
 	"fmt"
 	"net"
@@ -29,6 +30,10 @@ type embySession struct {
 // GetUserByToken 用播放请求里携带的用户 token 调用 /Users/Me 解析出当前 Emby 用户。
 // token 为空、无效或为管理员 APIKey(无用户上下文)时无法解析，返回 nil, nil（非错误，调用方据此跳过绑定）。
 func GetUserByToken(cfg *config.Config, token string) (*EmbyUser, error) {
+	return GetUserByTokenContext(context.Background(), cfg, token)
+}
+
+func GetUserByTokenContext(ctx context.Context, cfg *config.Config, token string) (*EmbyUser, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return nil, nil
@@ -39,11 +44,12 @@ func GetUserByToken(cfg *config.Config, token string) (*EmbyUser, error) {
 	}
 
 	client := resty.New()
+	client.SetTimeout(embyRequestTimeout)
 	defer client.Close()
 	client.SetBaseURL(base)
 
 	var user EmbyUser
-	r, err := client.R().
+	r, err := client.R().SetContext(ctx).
 		// 同时带上标准 Authorization 头与传统 X-Emby-Token 头，兼容禁用了传统头的服务端
 		SetHeader("Authorization", fmt.Sprintf("MediaBrowser Token=%q", token)).
 		SetHeader("X-Emby-Token", token).
@@ -67,7 +73,7 @@ func GetUserByToken(cfg *config.Config, token string) (*EmbyUser, error) {
 // 无法确定时返回 nil, nil。
 func (e *EmbyClient) GetUserBySession(itemID, remoteIP string) (*EmbyUser, error) {
 	var sessions []embySession
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetResult(&sessions).
 		Get("/Sessions")
 	if err != nil {
@@ -132,7 +138,7 @@ func sessionMatchesIP(remoteEndPoint, ip string) bool {
 // ListUsers 列出 Emby 所有用户(使用管理员 APIKey)。
 func (e *EmbyClient) ListUsers() ([]EmbyUser, error) {
 	var users []EmbyUser
-	r, err := e.client.R().
+	r, err := e.client.R().SetContext(e.requestContext()).
 		SetResult(&users).
 		Get("/Users")
 	if err != nil {

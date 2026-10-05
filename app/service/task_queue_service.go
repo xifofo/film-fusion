@@ -6,6 +6,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
@@ -23,7 +24,9 @@ type PersistentTaskQueue struct {
 	wg               sync.WaitGroup
 	running          bool
 	mu               sync.Mutex
-	executing        bool                 // 标记是否正在执行任务（确保单线程）
+	executing        atomic.Bool    // worker 与执行协程共享的状态
+	taskWg           sync.WaitGroup // 已领取任务必须在 Stop 返回前完成
+	addMu            sync.Mutex
 	cleanupWg        sync.WaitGroup       // 清理任务的WaitGroup
 	playbackCallback PlaybackInfoCallback // 播放信息回调函数
 }
@@ -65,6 +68,8 @@ func GetTaskQueue() *PersistentTaskQueue {
 
 // AddTask 添加任务
 func (q *PersistentTaskQueue) AddTask(itemID string) error {
+	q.addMu.Lock()
+	defer q.addMu.Unlock()
 	// 检查是否已存在未完成的任务
 	var count int64
 	err := q.db.Model(&model.MediaTask{}).Where("item_id = ? AND status IN (?)",
@@ -102,6 +107,7 @@ func (q *PersistentTaskQueue) Start() {
 	}
 
 	q.running = true
+	q.stopCh = make(chan struct{})
 
 	// 启动任务处理器
 	q.wg.Add(1)
@@ -129,6 +135,8 @@ func (q *PersistentTaskQueue) Stop() {
 	// 等待任务处理器和清理器都停止
 	q.wg.Wait()
 	q.cleanupWg.Wait()
+	// worker 已退出，之后不会再向 taskWg 添加任务。
+	q.taskWg.Wait()
 
 	q.log.Info("任务队列处理器已停止")
 }
@@ -147,7 +155,7 @@ func (q *PersistentTaskQueue) worker() {
 			return
 		case <-ticker.C:
 			// 检查是否距离上次处理已经过了10秒，并且没有任务正在执行
-			if time.Since(lastProcessTime) >= 10*time.Second && !q.executing {
+			if time.Since(lastProcessTime) >= 10*time.Second && !q.executing.Load() {
 				if q.processNextTask() {
 					lastProcessTime = time.Now() // 更新最后处理时间
 				}
@@ -184,10 +192,14 @@ func (q *PersistentTaskQueue) processNextTask() bool {
 	}
 
 	// 设置执行状态
-	q.executing = true
+	q.executing.Store(true)
 
 	// 处理任务（异步处理，不阻塞）
-	go q.executeTask(&task)
+	q.taskWg.Add(1)
+	go func() {
+		defer q.taskWg.Done()
+		q.executeTask(&task)
+	}()
 
 	return true // 成功开始处理任务
 }
@@ -196,10 +208,11 @@ func (q *PersistentTaskQueue) processNextTask() bool {
 func (q *PersistentTaskQueue) executeTask(task *model.MediaTask) {
 	// 确保在函数退出时重置执行状态
 	defer func() {
-		q.executing = false
+		q.executing.Store(false)
 	}()
 
 	q.log.Infof("🔄 开始处理媒体任务: TaskID=%d, ItemID=%s", task.ID, task.ItemID)
+	q.log.Debugf("媒体任务排队耗时: TaskID=%d queue_wait_ms=%d", task.ID, time.Since(task.CreatedAt).Milliseconds())
 
 	// 记录任务开始时间
 	startTime := time.Now()
@@ -268,16 +281,23 @@ func (q *PersistentTaskQueue) callGETPlaybackInfo(itemID string) error {
 
 // GetQueueStatus 获取队列状态
 func (q *PersistentTaskQueue) GetQueueStatus() (map[string]int64, error) {
-	status := make(map[string]int64)
-
-	for _, s := range []model.TaskStatus{model.TaskStatusPending, model.TaskStatusProcessing, model.TaskStatusCompleted, model.TaskStatusFailed} {
-		var count int64
-		if err := q.db.Model(&model.MediaTask{}).Where("status = ?", s).Count(&count).Error; err != nil {
-			return nil, err
-		}
-		status[string(s)] = count
+	status := map[string]int64{
+		string(model.TaskStatusPending): 0, string(model.TaskStatusProcessing): 0,
+		string(model.TaskStatusCompleted): 0, string(model.TaskStatusFailed): 0,
 	}
-
+	var rows []struct {
+		Status model.TaskStatus
+		Count  int64
+	}
+	if err := q.db.Model(&model.MediaTask{}).
+		Select("status, COUNT(*) AS count").Group("status").Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if _, known := status[string(row.Status)]; known {
+			status[string(row.Status)] = row.Count
+		}
+	}
 	return status, nil
 }
 

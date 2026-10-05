@@ -1,11 +1,65 @@
 package service
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
+	"film-fusion/app/config"
+	"film-fusion/app/logger"
 	"film-fusion/app/utils/embyhelper"
 )
+
+func TestEmbyStatsCancellationReachesLibraryAndCountRequests(t *testing.T) {
+	for _, blockList := range []bool{true, false} {
+		t.Run(map[bool]string{true: "libraries", false: "counts"}[blockList], func(t *testing.T) {
+			entered := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if !blockList && r.URL.Path == "/Library/MediaFolders" {
+					_, _ = w.Write([]byte(`{"Items":[{"Id":"movies","Name":"Movies","CollectionType":"movies"}]}`))
+					return
+				}
+				entered <- struct{}{}
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			cfg := &config.Config{Emby: config.EmbyConfig{URL: server.URL}}
+			client := embyhelper.New(cfg)
+			defer client.Close()
+			log := logger.New(config.LogConfig{Output: "stdout", Level: "error"})
+			defer log.Close()
+			svc := NewEmbyStatsService(cfg, log, client)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				stats, err := svc.Collect(ctx)
+				if blockList && err == nil {
+					t.Error("cancelled library listing succeeded")
+				}
+				if !blockList && (err != nil || stats == nil || len(stats.PartialErrors) != 1) {
+					t.Errorf("count failure lost partial-result contract: %+v, %v", stats, err)
+				}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("Emby request did not start")
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("Emby stats request ignored caller cancellation")
+			}
+		})
+	}
+}
 
 func TestEmbyStatsItemTypesFollowCollectionType(t *testing.T) {
 	tests := []struct {

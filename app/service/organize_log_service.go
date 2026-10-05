@@ -4,6 +4,8 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
+	"gorm.io/gorm"
+	"sync"
 )
 
 // OrganizeLogEntry 写入参数
@@ -26,11 +28,21 @@ type OrganizeLogEntry struct {
 func WriteOrganizeLog(log *logger.Logger, entry OrganizeLogEntry) {
 	// Capture the connection before handing work to a goroutine; it must not
 	// write to a different database if the service is reinitialized meanwhile.
-	db := database.DB
+	WriteOrganizeLogWithDB(database.DB, log, entry)
+}
+
+var organizeLogWrites sync.WaitGroup
+
+// WaitOrganizeLogs is called after HTTP handlers and background producers drain.
+func WaitOrganizeLogs() { organizeLogWrites.Wait() }
+
+func WriteOrganizeLogWithDB(db *gorm.DB, log *logger.Logger, entry OrganizeLogEntry) {
 	if db == nil {
 		return
 	}
+	organizeLogWrites.Add(1)
 	go func() {
+		defer organizeLogWrites.Done()
 		row := model.OrganizeLog{
 			Action:         entry.Action,
 			Status:         entry.Status,
