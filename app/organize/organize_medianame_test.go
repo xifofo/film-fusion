@@ -59,6 +59,15 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 			io.WriteString(w, `{"success":true,"data":{"media_info":{"media_type":"tv","title":"Example","year":"2024","tmdb_id":"123"},"meta_info":{"begin_season":0,"begin_episode":1,"season_episode":"S00E01"}}}`)
 		case "/api/v1/transfer/name":
 			io.WriteString(w, `{"success":true,"data":{"name":"MP2.S00E01.mkv"}}`)
+		case "/3/search/movie":
+			io.WriteString(w, `{"page":1,"total_pages":1,"results":[]}`)
+		case "/3/search/tv":
+			if query := r.URL.Query().Get("query"); query != "Towa no Yuugure" {
+				t.Errorf("unexpected TV query %q", query)
+			}
+			io.WriteString(w, `{"page":1,"total_pages":1,"results":[{"id":294867,"name":"永久的黄昏","original_name":"永久のユウグレ","first_air_date":"2025-09-26"}]}`)
+		case "/3/tv/294867":
+			io.WriteString(w, `{"id":294867,"name":"永久的黄昏","original_name":"永久のユウグレ","first_air_date":"2025-09-26","origin_country":["JP"],"genres":[{"id":16,"name":"Animation"}],"alternative_titles":{"results":[{"iso_3166_1":"JP","title":"Towa no Yuugure","type":"romaji"}]},"seasons":[{"season_number":1,"episode_count":12,"air_date":"2025-09-26"}]}`)
 		case "/3/tv/123":
 			if e.tmdbFail {
 				http.Error(w, "TMDB unavailable", 503)
@@ -125,6 +134,55 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 	e.req = Organize115CookieRequest{CloudDirectoryID: 2, FolderIDs: []string{"100"}, DryRun: true, MediaType: "tv"}
 	return e
 }
+
+func TestOrganizeMedianamePreservesAnimeEpisodeSeparator(t *testing.T) {
+	const filename = "[LoliHouse] Towa no Yuugure - 11 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv"
+	for _, source := range []string{"medianame", "shadow"} {
+		for _, withRegex := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/regex=%t", source, withRegex), func(t *testing.T) {
+				e := setupOrganizePlanTest(t)
+				e.sourceName = filename
+				e.req.RecognitionSource = source
+				wantInput := filename
+				if withRegex {
+					e.sourceName = "download_" + filename
+					e.req.FilenameRegexEnabled = true
+					e.req.FilenameRegexPattern = "^download_"
+					e.req.FolderContexts = []Organize115FolderContext{{FolderID: "100", FolderPath: "/Towa no Yuugure/Season 1"}}
+					wantInput = "/Towa no Yuugure/Season 1/" + filename
+				}
+				preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
+				if err != nil || len(preview.Items) != 1 {
+					t.Fatalf("preview: %+v, error: %v", preview, err)
+				}
+				item := preview.Items[0]
+				if source == "shadow" {
+					if item.Engine != "moviepilot" || item.ShadowComparison == nil || item.ShadowComparison.Medianame == nil {
+						t.Fatalf("missing independent shadow branch: %+v", item)
+					}
+					item = *item.ShadowComparison.Medianame
+				}
+				if item.Error != "" || item.Medianame == nil || item.Medianame.Result == nil {
+					t.Fatalf("medianame recognition failed: %+v", item)
+				}
+				meta := item.Medianame.Result.MetaInfo
+				if item.RecognizeName != filename || item.RecognizeInput != wantInput || meta.Original != wantInput {
+					t.Fatalf("anime filename was rewritten: name=%q input=%q parsed=%q", item.RecognizeName, item.RecognizeInput, meta.Original)
+				}
+				if meta.Title != "Towa no Yuugure" || meta.Type != "tv" || meta.ReleaseGroup != "LoliHouse" || item.SourceSeason != 1 || item.SourceEpisode != 11 {
+					t.Fatalf("anime metadata was lost: %+v", meta)
+				}
+				if item.Medianame.Result.Status != "compatible" || item.TmdbID != "294867" || item.SeasonEpisode != "S01E11" || !strings.Contains(item.TargetPath, "/Season 01/") || !strings.Contains(item.RenameTo, "S01E11") {
+					t.Fatalf("incorrect anime plan: %+v", item)
+				}
+				if e.mutations != 0 {
+					t.Fatal("preview mutated cloud files")
+				}
+			})
+		}
+	}
+}
+
 func TestOrganizeShadowPreviewAndConfirmedExecutionUseFrozenMP2Plan(t *testing.T) {
 	e := setupOrganizePlanTest(t)
 	preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
@@ -323,6 +381,39 @@ func TestPipelineWorkbenchUsesOrganizeBuildersWithoutCloudOperations(t *testing.
 			item := response.Data.Item
 			if response.Data.Pipeline.Source != "shadow" || item.Engine != "moviepilot" || item.Error != "" || item.ShadowComparison == nil || item.ShadowComparison.Medianame.Error != "" || !strings.Contains(item.ShadowComparison.Medianame.TargetPath, "/Season 00/") {
 				t.Fatalf("incomplete workbench plan: %s", rr.Body)
+			}
+		})
+	}
+}
+
+func TestPipelineWorkbenchPreservesAnimeEpisodeSeparator(t *testing.T) {
+	const filename = "[LoliHouse] Towa no Yuugure - 11 [WebRip 1080p HEVC-10bit AAC SRTx2].mkv"
+	for _, mode := range []string{"file", "title"} {
+		t.Run(mode, func(t *testing.T) {
+			e := setupOrganizePlanTest(t)
+			e.handler.newOrganizeClient = func(string) (*driver.Pan115Client, error) {
+				t.Fatal("workbench must not create a cloud client")
+				return nil, nil
+			}
+			rr := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rr)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/media-recognition/pipeline-test", strings.NewReader(planJSON(map[string]any{
+				"input": filename, "mode": mode, "source": "medianame", "root": "影视", "classify": true,
+			})))
+			c.Request.Header.Set("Content-Type", "application/json")
+			(&Handler{Service: e.handler}).TestMediaPipeline(c)
+			var response struct {
+				Code int `json:"code"`
+				Data struct {
+					Item Organize115ItemResult `json:"item"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil || response.Code != 0 || rr.Code != http.StatusOK {
+				t.Fatalf("workbench response %s, %v", rr.Body, err)
+			}
+			item := response.Data.Item
+			if item.Error != "" || item.Engine != "medianame" || item.RecognizeInput != filename || item.TmdbID != "294867" || item.SeasonEpisode != "S01E11" || !strings.Contains(item.RenameTo, "S01E11") {
+				t.Fatalf("incorrect anime workbench plan: %+v", item)
 			}
 		})
 	}

@@ -29,10 +29,15 @@ func newFilenameRegexProcessor(enabled bool, pattern, replacement string) (filen
 }
 
 func (p filenameRegexProcessor) apply(name string) string {
+	return normalizeFilenameForRecognition(p.applyRegex(name))
+}
+
+// User-defined replacements are shared; legacy filename normalization is not.
+func (p filenameRegexProcessor) applyRegex(name string) string {
 	if p.enabled && p.regex != nil {
 		name = strings.TrimSpace(p.regex.ReplaceAllString(name, p.replacement))
 	}
-	return normalizeFilenameForRecognition(name)
+	return name
 }
 
 func normalizeFilenameForRecognition(name string) string {
