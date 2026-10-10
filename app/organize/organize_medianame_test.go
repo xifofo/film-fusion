@@ -60,7 +60,13 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 		case "/api/v1/transfer/name":
 			io.WriteString(w, `{"success":true,"data":{"name":"MP2.S00E01.mkv"}}`)
 		case "/3/search/movie":
-			io.WriteString(w, `{"page":1,"total_pages":1,"results":[]}`)
+			if r.URL.Query().Get("query") == "Kingdom of Heaven" {
+				io.WriteString(w, `{"page":1,"total_pages":1,"results":[{"id":1495,"title":"天国王朝","original_title":"Kingdom of Heaven","release_date":"2005-05-03"}]}`)
+			} else {
+				io.WriteString(w, `{"page":1,"total_pages":1,"results":[]}`)
+			}
+		case "/3/movie/1495":
+			io.WriteString(w, `{"id":1495,"title":"天国王朝","original_title":"Kingdom of Heaven","release_date":"2005-05-03","original_language":"en"}`)
 		case "/3/search/tv":
 			if query := r.URL.Query().Get("query"); query != "Towa no Yuugure" {
 				t.Errorf("unexpected TV query %q", query)
@@ -133,6 +139,35 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 	}
 	e.req = Organize115CookieRequest{CloudDirectoryID: 2, FolderIDs: []string{"100"}, DryRun: true, MediaType: "tv"}
 	return e
+}
+
+func TestOrganizeMedianameUsesDotSeparatedTechnicalNames(t *testing.T) {
+	e := setupOrganizePlanTest(t)
+	e.sourceName = "Kingdom.of.Heaven.2005.2160p.Directors.Cut.Roadshow.Version.UHD.BluRay.REMUX.HEVC.DV.HDR.TrueHD.Atmos.7.1-HDHIVE.mkv"
+	e.req.RecognitionSource = "medianame"
+	e.req.MediaType = "movie"
+	preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
+	if err != nil || len(preview.Items) != 1 {
+		t.Fatalf("preview: %+v, error: %v", preview, err)
+	}
+	item := preview.Items[0]
+	const want = "Kingdom of Heaven.2005.REMUX.DV.HDR.Atmos.2160p.H.265.TrueHD.7.1-HDHIVE.mkv"
+	if item.Error != "" || item.RenameTo != want || item.TargetPath != "/影视/NEW电影/天国王朝 (2005) {tmdb-1495}/"+want {
+		t.Fatalf("incorrect movie naming plan: %+v", item)
+	}
+	if item.RenameContext["edition"] != "REMUX.DV.HDR.Atmos" || item.RenameContext["audioCodec"] != "TrueHD.7.1" {
+		t.Fatalf("naming fields not normalized by medianame: %+v", item.RenameContext)
+	}
+	if item.Medianame == nil || item.Medianame.Result == nil || item.Medianame.PackageVersion != service.MedianameVersion {
+		t.Fatalf("missing package provenance: %+v", item.Medianame)
+	}
+	meta := item.Medianame.Result.MetaInfo
+	if strings.Join(meta.Effects, ",") != "Dolby Vision,HDR,Atmos" || meta.AudioCodec != "TrueHD" || meta.AudioChannels != "7.1" {
+		t.Fatalf("parsed metadata changed: %+v", meta)
+	}
+	if preview.Pipeline == nil || preview.Pipeline.PackageVersion != service.MedianameVersion || preview.PlanID == "" || e.mutations != 0 {
+		t.Fatalf("preview provenance or isolation failed: %+v, mutations=%d", preview, e.mutations)
+	}
 }
 
 func TestOrganizeMedianamePreservesAnimeEpisodeSeparator(t *testing.T) {

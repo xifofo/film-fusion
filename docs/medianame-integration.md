@@ -1,5 +1,13 @@
 # medianame 并行引擎接入
 
+## 2026-10-10 命名字段更新
+
+当前依赖升级为 `github.com/xifofo/medianame v0.1.2`。`edition`、`effect`、`audioCodec`、`resource_term` 由包直接生成点号分隔的命名文本，Dolby Vision 在命名时缩写为 DV。独立的 HDR、HDR10、HDR10+ 标签保留，不根据 DV 推断或补充 HDR。Atmos 保留在 `effect` / `edition`，音轨不再重复附加。原始解析数据仍使用标准名称。
+
+例如 `Kingdom.of.Heaven.2005.2160p.Directors.Cut.Roadshow.Version.UHD.BluRay.REMUX.HEVC.DV.HDR.TrueHD.Atmos.7.1-HDHIVE.mkv` 的默认命名为 `Kingdom of Heaven.2005.REMUX.DV.HDR.Atmos.2160p.H.265.TrueHD.7.1-HDHIVE.mkv`。
+
+已有配置和模板不会被覆盖，直接引用这些字段的模板无需添加 `replace`；只使用 `audioCodec` 的自定义模板若要保留效果标签，需要加入 `effect` 或 `edition`。升级后新生成的预览采用新命名；已保存的整理计划仍执行其快照路径，需要重新预览才能使用新格式。下文为 v0.1.1 的初始接入记录。
+
 日期：2026-10-03。后端基线 `51ee358`，前端基线 `dd8734b`，两仓库开始实施时均无未提交改动。此次只交付工作区代码，未提交、推送或部署，也未修改运行中系统的默认引擎。
 
 ## 分支与配置

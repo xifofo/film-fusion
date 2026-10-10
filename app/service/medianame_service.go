@@ -24,7 +24,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-const MedianameVersion = "v0.1.1"
+const MedianameVersion = "v0.1.2"
 const medianameConfigKey = "media_recognition.medianame.v1"
 
 // Stored independently of MP2. Defaults are inserted once; upgrades never rewrite a saved row.
