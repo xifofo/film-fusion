@@ -19,6 +19,8 @@ type RSSFeedCache struct {
 	LastError          string `gorm:"type:text"`
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
+	// Remember upstreams that fail on validators, including across restarts.
+	ConditionalRequestsDisabled bool `gorm:"not null;default:false"`
 }
 
 func (RSSFeedCache) TableName() string { return "rss_feed_caches" }

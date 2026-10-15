@@ -169,7 +169,7 @@ func (s *RSSService) fetchRSSFeed(ctx context.Context, feedURL string, cached mo
 		return s.finishRSSFetch(cached, token, nil, "", "", "", nil, errors.New("创建 RSS 请求失败"))
 	}
 	s.setRSSRequestHeaders(req)
-	if len(cached.Body) > 0 {
+	if len(cached.Body) > 0 && !cached.ConditionalRequestsDisabled {
 		if cached.ETag != "" {
 			req.Header.Set("If-None-Match", cached.ETag)
 		}
@@ -205,8 +205,10 @@ func (s *RSSService) fetchRSSFeed(ctx context.Context, feedURL string, cached mo
 		return s.finishRSSFetch(cached, token, cached.Body, cached.ContentType, etag, modified, retryAt, nil)
 	}
 	if resp.StatusCode != http.StatusOK {
-		if resp.StatusCode >= 500 && (cached.ETag != "" || cached.LastModified != "") {
-			// Retry without validators only after the cooldown, never immediately.
+		if resp.StatusCode >= 500 && (req.Header.Get("If-None-Match") != "" || req.Header.Get("If-Modified-Since") != "") {
+			// Fall back after the cooldown and remember it for this URL. Some origins
+			// keep advertising validators even though using them consistently fails.
+			cached.ConditionalRequestsDisabled = true
 			cached.ETag, cached.LastModified = "", ""
 		}
 		fetchErr := fmt.Errorf("RSS 源返回 HTTP %d", resp.StatusCode)
@@ -253,6 +255,7 @@ func (s *RSSService) finishRSSFetch(cached model.RSSFeedCache, token string, bod
 	updates := map[string]any{
 		"next_fetch_at":  gorm.Expr("CASE WHEN next_fetch_at > ? THEN next_fetch_at ELSE ? END", next, next),
 		"fetching_until": nil, "fetch_token": "", "last_error": "",
+		"conditional_requests_disabled": cached.ConditionalRequestsDisabled,
 	}
 	if fetchErr != nil {
 		updates["last_error"] = fetchErr.Error()

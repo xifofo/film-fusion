@@ -194,6 +194,133 @@ func TestRSSCacheFailureCooldownStaleAndDeferredConditionalRetry(t *testing.T) {
 	}
 }
 
+func TestRSSCacheRemembersRejectedValidatorsAfterRecoveryAndRestart(t *testing.T) {
+	for _, validator := range []string{"ETag", "Last-Modified", "both"} {
+		t.Run(validator, func(t *testing.T) {
+			var calls, conditionalCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				// This upstream keeps advertising validators even though using them fails.
+				if validator != "Last-Modified" {
+					w.Header().Set("ETag", `"version1"`)
+				}
+				if validator != "ETag" {
+					w.Header().Set("Last-Modified", "Wed, 14 Oct 2026 23:50:45 GMT")
+				}
+				if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Modified-Since") != "" {
+					conditionalCalls.Add(1)
+					w.Header().Set("Retry-After", "600")
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = fmt.Fprint(w, "error code: 1101")
+					return
+				}
+				_, _ = fmt.Fprint(w, relayTestXML)
+			}))
+			defer server.Close()
+
+			now := time.Now()
+			dbPath := filepath.Join(t.TempDir(), "rss.db")
+			openService := func() *RSSService {
+				db, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				sqlDB, err := db.DB()
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = sqlDB.Close() })
+				if err := db.AutoMigrate(&model.RSSFeedCache{}); err != nil {
+					t.Fatal(err)
+				}
+				return &RSSService{db: db, clock: func() time.Time { return now }}
+			}
+			s := openService()
+			if _, err := s.readRSSFeed(context.Background(), server.URL, true); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(181 * time.Second)
+			feed, err := s.readRSSFeed(context.Background(), server.URL, true)
+			if err != nil || !feed.CacheStale || !strings.Contains(feed.CacheWarning, "500") || string(feed.Body) != relayTestXML || calls.Load() != 2 {
+				t.Fatalf("conditional failure must preserve XML without an immediate retry: %#v, calls %d, %v", feed.RSSCacheMetadata, calls.Load(), err)
+			}
+
+			// Restart before recovery: neither the cooldown nor the fallback may be lost.
+			sqlDB, _ := s.db.DB()
+			if err := sqlDB.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s = openService()
+			now = now.Add(599 * time.Second)
+			if _, err := s.readRSSFeed(context.Background(), server.URL, true); err != nil || calls.Load() != 2 {
+				t.Fatalf("restart bypassed Retry-After: calls %d, %v", calls.Load(), err)
+			}
+			now = now.Add(time.Second)
+			feed, err = s.readRSSFeed(context.Background(), server.URL, true)
+			if err != nil || feed.CacheStale || string(feed.Body) != relayTestXML || calls.Load() != 3 {
+				t.Fatalf("unconditional recovery failed: %#v, calls %d, %v", feed.RSSCacheMetadata, calls.Load(), err)
+			}
+
+			// A successful response re-advertises the same validators. Even after another
+			// restart, later refreshes must not alternate between HTTP 200 and 500.
+			sqlDB, _ = s.db.DB()
+			if err := sqlDB.Close(); err != nil {
+				t.Fatal(err)
+			}
+			s = openService()
+			for i := 0; i < 2; i++ {
+				now = now.Add(181 * time.Second)
+				feed, err = s.readRSSFeed(context.Background(), server.URL, true)
+				if err != nil || feed.CacheStale || string(feed.Body) != relayTestXML || calls.Load() != int32(4+i) || conditionalCalls.Load() != 1 {
+					t.Fatalf("refresh %d retried rejected validators: %#v, calls %d, conditional %d, %v", i, feed.RSSCacheMetadata, calls.Load(), conditionalCalls.Load(), err)
+				}
+			}
+
+			// Compatibility belongs to the complete feed URL, not the host or service.
+			if _, err := s.readRSSFeed(context.Background(), server.URL+"/other", true); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(181 * time.Second)
+			if _, err := s.readRSSFeed(context.Background(), server.URL+"/other", true); err != nil || conditionalCalls.Load() != 2 {
+				t.Fatalf("another URL lost conditional requests: conditional %d, %v", conditionalCalls.Load(), err)
+			}
+		})
+	}
+}
+
+func TestRSSCacheUnconditionalServerErrorDoesNotDisableValidators(t *testing.T) {
+	s, now := newRSSCacheTestService(t)
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.WriteHeader(http.StatusInternalServerError)
+		case 2:
+			w.Header().Set("ETag", `"version1"`)
+			_, _ = fmt.Fprint(w, relayTestXML)
+		default:
+			if r.Header.Get("If-None-Match") != `"version1"` {
+				t.Error("an unconditional server error disabled later conditional requests")
+			}
+			w.WriteHeader(http.StatusNotModified)
+		}
+	}))
+	defer server.Close()
+	if _, err := s.readRSSFeed(context.Background(), server.URL, true); err == nil {
+		t.Fatal("initial server error without cache must be reported")
+	}
+	for i := 0; i < 2; i++ {
+		*now = now.Add(181 * time.Second)
+		feed, err := s.readRSSFeed(context.Background(), server.URL, true)
+		if err != nil || feed.CacheStale || string(feed.Body) != relayTestXML {
+			t.Fatalf("refresh %d: %#v, %v", i, feed.RSSCacheMetadata, err)
+		}
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("upstream calls = %d, want 3", calls.Load())
+	}
+}
+
 func TestRSSCachePersistsCooldownAndBodyAcrossDatabaseReopen(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
@@ -296,6 +423,9 @@ func TestRSSCacheInvalidResponseAnd304PreserveOriginalXML(t *testing.T) {
 			w.Header().Set("ETag", `"one"`)
 			_, _ = fmt.Fprint(w, relayTestXML)
 		case 2:
+			if r.Header.Get("If-None-Match") != `"one"` {
+				t.Error("compatible upstream must still receive conditional requests")
+			}
 			w.WriteHeader(http.StatusNotModified)
 		default:
 			_, _ = fmt.Fprint(w, "<html><body>Login required</body></html>")
