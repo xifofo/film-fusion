@@ -103,37 +103,23 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 	}
 	source := assignment.Match302.CloudStorage
 	target := assignment.PlaybackStorage
-	if strings.TrimSpace(source.Cookie) == "" {
-		return transferSingleResult{}, fmt.Errorf("源账号 Cookie 缺失")
+	if useOpenAPITransfer(target) {
+		return s.transferSingleOpenAPI(ctx, assignment)
 	}
 	if strings.TrimSpace(target.Cookie) == "" {
 		return transferSingleResult{}, fmt.Errorf("子账号 Cookie 缺失")
 	}
 
-	matchedPath := assignment.Match302.GetMatchedPath(assignment.SourceFilePath)
-	sourceInfo, err := s.ResolveSourceFileInfo(ctx, assignment.Match302, assignment.SourceFilePath, matchedPath)
+	sourceInfo, err := s.prepareTransferSource(ctx, assignment)
 	if err != nil {
 		return transferSingleResult{}, err
 	}
 
-	fromClient, err := s.web115Svc.NewClient(source.Cookie)
-	if err != nil {
-		return transferSingleResult{}, fmt.Errorf("源账号 Cookie 无效: %w", err)
-	}
 	toClient, err := s.web115Svc.NewClient(target.Cookie)
 	if err != nil {
 		return transferSingleResult{}, fmt.Errorf("子账号 Cookie 无效: %w", err)
 	}
 
-	if err := s.enrichSourceFileFromSupervision(fromClient, &sourceInfo); err != nil {
-		return transferSingleResult{}, err
-	}
-	if sourceInfo.Size >= 115*1024*1024 && isCollectLike(sourceInfo) {
-		return transferSingleResult{}, fmt.Errorf("特殊资源或合集资源暂不支持秒传")
-	}
-	if err := s.updateAssignmentSourceInfo(assignment, sourceInfo); err != nil {
-		return transferSingleResult{}, err
-	}
 	if err := s.cleanupStorageCacheForQuota(ctx, assignment); err != nil {
 		return transferSingleResult{}, err
 	}
@@ -158,12 +144,7 @@ func (s *BalanceAssignmentService) transferSingle(ctx context.Context, assignmen
 	}
 
 	rangeHash := func(signCheck string) (string, error) {
-		downloadInfo, err := s.web115Svc.DownloadForP115Transfer(ctx, source.Match302AccessModeValue(), source.AccessToken, fromClient, sourceInfo)
-		if err != nil {
-			return "", fmt.Errorf("获取源账号直链失败: %w", err)
-		}
-		reader := newHTTPRangeReadSeeker(downloadInfo.Url.Url, downloadInfo.Header, sourceInfo.Size)
-		return hashWeb115RangeSHA1(reader, signCheck)
+		return s.web115Svc.readTransferRangeHash(ctx, source, sourceInfo, signCheck)
 	}
 	uploadResp, err := s.web115Svc.RapidUploadWithP115ClientVersion(toClient, sourceInfo.Size, targetName, targetDirID, "", sourceInfo.SHA1, rangeHash)
 	if err != nil {

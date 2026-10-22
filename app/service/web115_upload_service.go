@@ -134,12 +134,9 @@ func ensureWeb115UploadUserID(client *driver.Pan115Client) error {
 }
 
 func hashWeb115RangeSHA1(reader io.ReadSeeker, rangeSpec string) (string, error) {
-	var start, end int64
-	if _, err := fmt.Sscanf(rangeSpec, "%d-%d", &start, &end); err != nil {
+	start, end, err := parseWeb115Range(rangeSpec)
+	if err != nil {
 		return "", err
-	}
-	if end < start {
-		return "", fmt.Errorf("invalid range: %s", rangeSpec)
 	}
 	if _, err := reader.Seek(start, io.SeekStart); err != nil {
 		return "", err
@@ -149,6 +146,16 @@ func hashWeb115RangeSHA1(reader io.ReadSeeker, rangeSpec string) (string, error)
 		return "", err
 	}
 	return strings.ToUpper(hex.EncodeToString(hash.Sum(nil))), nil
+}
+
+func parseWeb115Range(spec string) (int64, int64, error) {
+	left, right, ok := strings.Cut(spec, "-")
+	start, startErr := strconv.ParseInt(left, 10, 64)
+	end, endErr := strconv.ParseInt(right, 10, 64)
+	if !ok || startErr != nil || endErr != nil || start < 0 || end < start || end-start == 1<<63-1 {
+		return 0, 0, fmt.Errorf("invalid range: %s", spec)
+	}
+	return start, end, nil
 }
 
 func setOptionalFormValue(form url.Values, key, value string) {

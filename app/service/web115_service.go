@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/url"
 	"path"
 	"strconv"
@@ -17,7 +18,18 @@ import (
 )
 
 type Web115Service struct {
-	logger *logger.Logger
+	logger     *logger.Logger
+	httpClient *http.Client
+}
+
+func (s *Web115Service) newOpenAPIClient(accessToken string) *sdk115.Client {
+	client := sdk115.New(sdk115.WithAccessToken(strings.TrimSpace(accessToken)))
+	if s.httpClient != nil {
+		client.SetHttpClient(s.httpClient)
+	} else {
+		client.SetHttpClient(&http.Client{Timeout: 30 * time.Second})
+	}
+	return client
 }
 
 type Web115File struct {
@@ -151,8 +163,7 @@ func (s *Web115Service) ResolveFilePathWithOpenAPI(ctx context.Context, accessTo
 		filePath = decoded
 	}
 	normalizedPath := path.Clean("/" + strings.TrimPrefix(filePath, "/"))
-	client := sdk115.New()
-	client.SetAccessToken(accessToken)
+	client := s.newOpenAPIClient(accessToken)
 	info, err := client.GetFolderInfoByPath(ctx, normalizedPath)
 	if err != nil {
 		return Web115File{}, false, err
@@ -303,8 +314,7 @@ func (s *Web115Service) GetDirectoriesWithOpenAPI(ctx context.Context, accessTok
 		limit = int(driver.MaxDirPageLimit)
 	}
 
-	client := sdk115.New()
-	client.SetAccessToken(accessToken)
+	client := s.newOpenAPIClient(accessToken)
 	result, err := client.GetFiles(ctx, &sdk115.GetFilesReq{
 		CID:     strings.TrimSpace(cid),
 		Limit:   int64(limit),
@@ -354,7 +364,7 @@ func (s *Web115Service) GetDirectoryEntriesWithOpenAPI(
 	if limit <= 0 || limit > int(driver.MaxDirPageLimit) {
 		limit = int(driver.MaxDirPageLimit)
 	}
-	client := sdk115.New(sdk115.WithAccessToken(accessToken))
+	client := s.newOpenAPIClient(accessToken)
 	result, err := client.GetFiles(ctx, &sdk115.GetFilesReq{
 		CID: strings.TrimSpace(cid), Limit: int64(limit), Offset: int64(offset),
 		O: "user_utime", ASC: false, Stdir: 1, Cur: 1, ShowDir: true,
@@ -608,8 +618,7 @@ func (s *Web115Service) MkdirWithOpenAPI(ctx context.Context, accessToken, paren
 		return "", fmt.Errorf("目录名不能为空")
 	}
 
-	client := sdk115.New()
-	client.SetAccessToken(accessToken)
+	client := s.newOpenAPIClient(accessToken)
 	result, err := client.Mkdir(ctx, parentID, name)
 	if err != nil {
 		return "", err

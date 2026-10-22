@@ -475,7 +475,7 @@ func (s *BalanceCleanupService) cleanupAssignment(ctx context.Context, matchID, 
 		return fmt.Errorf("当前仍有 active 播放请求")
 	}
 
-	// 目标子账号已被删除：FilmFusion 已无该账号 Cookie，无法也无需删除其 115 上的缓存文件。
+	// 目标子账号已被删除：FilmFusion 已无该账号凭据，无法也无需删除其 115 上的缓存文件。
 	// 若按普通失败处理会写回 failed，而清理扫描不排除 failed，导致每轮 5 分钟反复重试并刷
 	// "目标账号不存在" 告警。直接终结为 cleaned，停止重试。
 	if assignment.PlaybackStorage == nil {
@@ -544,6 +544,9 @@ func (s *BalanceCleanupService) ExtendRetention(matchID, assignmentID uint, hour
 func (s *BalanceCleanupService) cleanupTargetFile(ctx context.Context, assignment *model.Match302BalanceAssignment) error {
 	if assignment.PlaybackStorage == nil {
 		return fmt.Errorf("目标账号不存在")
+	}
+	if useOpenAPITransfer(assignment.PlaybackStorage) {
+		return s.web115Svc.cleanupTransferFileOpenAPI(ctx, assignment)
 	}
 	if strings.TrimSpace(assignment.PlaybackStorage.Cookie) == "" {
 		return fmt.Errorf("目标账号 Cookie 缺失")

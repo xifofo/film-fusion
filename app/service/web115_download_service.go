@@ -74,9 +74,14 @@ func (s *Web115Service) DownloadWithOpenAPIForRange(ctx context.Context, accessT
 		return nil, fmt.Errorf("pickcode 为空")
 	}
 
-	client := sdk115.New()
-	client.SetAccessToken(accessToken)
-	downURLResp, err := client.DownURL(ctx, pickCode, userAgent)
+	// Keep the same UA for URL issuance and the subsequent CDN Range request.
+	if strings.TrimSpace(userAgent) == "" {
+		userAgent = web115BrowserUA
+	}
+	client := s.newOpenAPIClient(accessToken)
+	var downURLResp sdk115.DownURLResp
+	response, err := client.AuthRequest(ctx, sdk115.ApiFsDownURL, http.MethodPost, &downURLResp,
+		sdk115.ReqWithForm(sdk115.Form{"pick_code": pickCode}), sdk115.ReqWithUA(userAgent))
 	if err != nil {
 		return nil, fmt.Errorf("调用 115 OpenAPI DownURL 失败: %w", err)
 	}
@@ -87,6 +92,11 @@ func (s *Web115Service) DownloadWithOpenAPIForRange(ctx context.Context, accessT
 		}
 		headers := http.Header{}
 		headers.Set("User-Agent", userAgent)
+		if response != nil {
+			if cookie := web115CookieHeaderFromSetCookie(response.Header().Values("Set-Cookie")); cookie != "" {
+				headers.Set("Cookie", cookie)
+			}
+		}
 		return &driver.DownloadInfo{
 			FileName: urlInfo.FileName,
 			FileSize: driver.StringInt64(urlInfo.FileSize),
