@@ -10,19 +10,20 @@ import (
 )
 
 type AutomationSourceInput struct {
-	Name            string               `json:"name"`
-	Description     string               `json:"description"`
-	Enabled         bool                 `json:"enabled"`
-	TriggerType     string               `json:"trigger_type"`
-	CloudStorageID  uint                 `json:"cloud_storage_id"`
-	DirectoryID     string               `json:"directory_id"`
-	DirectoryPath   string               `json:"directory_path"`
-	Recursive       bool                 `json:"recursive"`
-	IntervalSeconds int                  `json:"interval_seconds"`
-	QuietSeconds    int                  `json:"quiet_seconds"`
-	FeedURL         string               `json:"feed_url"`
-	IntervalMinutes int                  `json:"interval_minutes"`
-	Mapping         RSSAutomationMapping `json:"mapping"`
+	Name            string                      `json:"name"`
+	Description     string                      `json:"description"`
+	Enabled         bool                        `json:"enabled"`
+	TriggerType     string                      `json:"trigger_type"`
+	CloudStorageID  uint                        `json:"cloud_storage_id"`
+	DirectoryID     string                      `json:"directory_id"`
+	DirectoryPath   string                      `json:"directory_path"`
+	Recursive       bool                        `json:"recursive"`
+	IntervalSeconds int                         `json:"interval_seconds"`
+	QuietSeconds    int                         `json:"quiet_seconds"`
+	FeedURL         string                      `json:"feed_url"`
+	IntervalMinutes int                         `json:"interval_minutes"`
+	Mapping         RSSAutomationMapping        `json:"mapping"`
+	LocalConfig     *model.LocalDirectoryConfig `json:"local_config,omitempty"`
 }
 
 type AutomationWorkflowInput struct {
@@ -126,6 +127,8 @@ func (s *AutomationService) CreateAutomation(input AutomationCreateInput) (Autom
 	if len(definition.Nodes) == 0 {
 		if sourceInput.TriggerType == model.AutomationTriggerRSS {
 			definition = DefaultRSSAutomationDefinition()
+		} else if sourceInput.TriggerType == model.AutomationTriggerLocalDirectory {
+			definition = DefaultLocalDirectoryAutomationDefinition()
 		} else {
 			definition = DefaultAutomationDefinition()
 		}
@@ -149,6 +152,7 @@ func (s *AutomationService) CreateAutomation(input AutomationCreateInput) (Autom
 			Recursive: sourceInput.Recursive, IntervalSeconds: sourceInput.IntervalSeconds,
 			QuietSeconds: sourceInput.QuietSeconds, FeedURL: sourceInput.FeedURL,
 			IntervalMinutes: sourceInput.IntervalMinutes, MappingJSON: mappingJSON,
+			LocalConfigJSON: automationLocalConfigJSON(sourceInput),
 		}
 		if err := tx.Create(&result.Source).Error; err != nil {
 			return err
@@ -237,7 +241,7 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 			"directory_path": sourceInput.DirectoryPath, "recursive": sourceInput.Recursive,
 			"interval_seconds": sourceInput.IntervalSeconds, "quiet_seconds": sourceInput.QuietSeconds,
 			"feed_url": sourceInput.FeedURL, "interval_minutes": sourceInput.IntervalMinutes,
-			"mapping_json": mappingJSON,
+			"mapping_json": mappingJSON, "local_config_json": automationLocalConfigJSON(sourceInput),
 		}
 		if reset {
 			sourceUpdates["initialized"] = false
@@ -246,6 +250,11 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 			sourceUpdates["last_error"] = ""
 			if sourceInput.TriggerType == model.AutomationTrigger115Directory {
 				if err := deleteAutomation115MonitorState(tx, id); err != nil {
+					return err
+				}
+			} else if sourceInput.TriggerType == model.AutomationTriggerLocalDirectory {
+				sourceUpdates["local_status_json"] = ""
+				if err := invalidateAutomationLocalMonitorState(tx, id); err != nil {
 					return err
 				}
 			} else {
@@ -281,6 +290,9 @@ func (s *AutomationService) UpdateAutomation(id uint, input AutomationCreateInpu
 	}
 	if err := s.db.First(&result.Workflow, result.Workflow.ID).Error; err != nil {
 		return result, err
+	}
+	if sourceInput.TriggerType == model.AutomationTriggerLocalDirectory {
+		s.forgetLocalMonitor(id)
 	}
 	s.Wake()
 	return result, nil
@@ -331,7 +343,7 @@ func (s *AutomationService) UpdateSource(id uint, input AutomationSourceInput) (
 			"directory_path": input.DirectoryPath, "recursive": input.Recursive,
 			"interval_seconds": input.IntervalSeconds, "quiet_seconds": input.QuietSeconds,
 			"feed_url": input.FeedURL, "interval_minutes": input.IntervalMinutes,
-			"mapping_json": mappingJSON,
+			"mapping_json": mappingJSON, "local_config_json": automationLocalConfigJSON(input),
 		}
 		if reset {
 			updates["initialized"] = false
@@ -340,6 +352,11 @@ func (s *AutomationService) UpdateSource(id uint, input AutomationSourceInput) (
 			updates["last_error"] = ""
 			if input.TriggerType == model.AutomationTrigger115Directory {
 				if err := deleteAutomation115MonitorState(tx, source.ID); err != nil {
+					return err
+				}
+			} else if input.TriggerType == model.AutomationTriggerLocalDirectory {
+				updates["local_status_json"] = ""
+				if err := invalidateAutomationLocalMonitorState(tx, source.ID); err != nil {
 					return err
 				}
 			} else {
@@ -369,6 +386,9 @@ func (s *AutomationService) UpdateSource(id uint, input AutomationSourceInput) (
 	if err := s.db.First(&source, id).Error; err != nil {
 		return source, err
 	}
+	if input.TriggerType == model.AutomationTriggerLocalDirectory {
+		s.forgetLocalMonitor(id)
+	}
 	s.Wake()
 	return source, nil
 }
@@ -381,7 +401,7 @@ func (s *AutomationService) DeleteAutomation(id uint) error {
 		return ErrAutomationScanRunning
 	}
 	defer s.endAutomationScan(id)
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		var source model.AutomationSource
 		if err := tx.First(&source, id).Error; err != nil {
 			return err
@@ -392,6 +412,11 @@ func (s *AutomationService) DeleteAutomation(id uint) error {
 		}
 		if err := deleteAutomation115MonitorState(tx, id); err != nil {
 			return err
+		}
+		if source.TriggerType == model.AutomationTriggerLocalDirectory {
+			if err := deleteAutomationLocalMonitorState(tx, id); err != nil {
+				return err
+			}
 		}
 		runIDs := tx.Model(&model.AutomationRun{}).Select("id").Where("workflow_id = ?", workflow.ID)
 		if err := deleteAutomationGuardStateForRuns(tx, runIDs); err != nil {
@@ -422,10 +447,23 @@ func (s *AutomationService) DeleteAutomation(id uint) error {
 		}
 		return tx.Delete(&source).Error
 	})
+	if err == nil {
+		s.forgetLocalMonitor(id)
+	}
+	return err
 }
 
 func (s *AutomationService) SetAutomationEnabled(id uint, enabled bool) (AutomationEnabledResult, error) {
 	result := AutomationEnabledResult{}
+	if err := s.db.First(&result.Source, id).Error; err != nil {
+		return result, err
+	}
+	if result.Source.TriggerType == model.AutomationTriggerLocalDirectory {
+		if !s.beginAutomationScan(id) {
+			return result, ErrAutomationScanRunning
+		}
+		defer s.endAutomationScan(id)
+	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.First(&result.Source, id).Error; err != nil {
 			return err
@@ -443,6 +481,9 @@ func (s *AutomationService) SetAutomationEnabled(id uint, enabled bool) (Automat
 	}
 	result.Source.Enabled = enabled
 	result.Workflow.Enabled = enabled
+	if result.Source.TriggerType == model.AutomationTriggerLocalDirectory {
+		s.forgetLocalMonitor(id)
+	}
 	s.Wake()
 	return result, nil
 }
@@ -499,6 +540,9 @@ func (s *AutomationService) UpdateWorkflow(id uint, input AutomationWorkflowInpu
 		return workflow, validation, err
 	}
 	_ = s.db.First(&workflow, id).Error
+	if source.TriggerType == model.AutomationTriggerLocalDirectory {
+		s.forgetLocalMonitor(workflow.SourceID)
+	}
 	s.Wake()
 	return workflow, validation, nil
 }

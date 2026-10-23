@@ -48,22 +48,23 @@ func (l *defaultAutomation115MonitorLister) ListDirectory(
 
 type AutomationScanResult struct {
 	RSSCacheMetadata
-	SourceID       uint      `json:"source_id"`
-	SourceName     string    `json:"source_name"`
-	TriggerType    string    `json:"trigger_type"`
-	Baseline       bool      `json:"baseline"`
-	NotModified    bool      `json:"not_modified,omitempty"`
-	Fetched        int       `json:"fetched,omitempty"`
-	NewEntries     int       `json:"new_entries,omitempty"`
-	ParseWarnings  int       `json:"parse_warnings,omitempty"`
-	ScannedFolders int       `json:"scanned_folders"`
-	ScannedItems   int       `json:"scanned_items"`
-	BaselineItems  int       `json:"baseline_items"`
-	NewCandidates  int       `json:"new_candidates"`
-	CreatedEntries int       `json:"created_entries"`
-	CreatedRuns    int       `json:"created_runs"`
-	PendingStable  int       `json:"pending_stable"`
-	CompletedAt    time.Time `json:"completed_at"`
+	SourceID       uint                          `json:"source_id"`
+	SourceName     string                        `json:"source_name"`
+	TriggerType    string                        `json:"trigger_type"`
+	Baseline       bool                          `json:"baseline"`
+	NotModified    bool                          `json:"not_modified,omitempty"`
+	Fetched        int                           `json:"fetched,omitempty"`
+	NewEntries     int                           `json:"new_entries,omitempty"`
+	ParseWarnings  int                           `json:"parse_warnings,omitempty"`
+	ScannedFolders int                           `json:"scanned_folders"`
+	ScannedItems   int                           `json:"scanned_items"`
+	BaselineItems  int                           `json:"baseline_items"`
+	NewCandidates  int                           `json:"new_candidates"`
+	CreatedEntries int                           `json:"created_entries"`
+	CreatedRuns    int                           `json:"created_runs"`
+	PendingStable  int                           `json:"pending_stable"`
+	CompletedAt    time.Time                     `json:"completed_at"`
+	LocalMonitor   *AutomationLocalMonitorStatus `json:"local_monitor,omitempty"`
 }
 
 type automation115ScanQueueItem struct {
@@ -107,6 +108,8 @@ func (s *AutomationService) checkAutomationSource(ctx context.Context, source mo
 		return s.scanAutomation115(ctx, source)
 	case model.AutomationTriggerRSS:
 		return s.scanAutomationRSS(ctx, source)
+	case model.AutomationTriggerLocalDirectory:
+		return s.scanAutomationLocal(ctx, source)
 	default:
 		return AutomationScanResult{}, fmt.Errorf("不支持的触发源类型 %q", source.TriggerType)
 	}

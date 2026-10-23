@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"film-fusion/app/database"
+	"film-fusion/app/directorymonitor"
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 
@@ -56,6 +57,9 @@ type AutomationService struct {
 	scanMu            sync.Mutex
 	scanning          map[uint]struct{}
 	manualRunMu       sync.Mutex
+	localMonitorMu    sync.Mutex
+	localMonitor      *directorymonitor.Monitor
+	sourceCursorID    uint
 }
 
 func NewAutomationService(log *logger.Logger, notifier NotificationPublisher, moviePilot *MoviePilotService) *AutomationService {
@@ -110,6 +114,7 @@ func (s *AutomationService) Stop() {
 	s.cancel()
 	s.wg.Wait()
 	s.scanWorkerWG.Wait()
+	s.closeLocalMonitor()
 	s.workerWG.Wait()
 	if s.log != nil {
 		s.log.Info("自动化触发器调度器已停止")

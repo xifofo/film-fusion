@@ -3,9 +3,10 @@ package model
 import "time"
 
 const (
-	AutomationTrigger115Directory = "115_directory"
-	AutomationTriggerRSS          = "rss"
-	AutomationTargetQBittorrent   = "qbittorrent"
+	AutomationTrigger115Directory   = "115_directory"
+	AutomationTriggerLocalDirectory = "local_directory"
+	AutomationTriggerRSS            = "rss"
+	AutomationTargetQBittorrent     = "qbittorrent"
 
 	AutomationRunPending       = "pending"
 	AutomationRunRunning       = "running"
@@ -42,6 +43,8 @@ type AutomationSource struct {
 	FeedURL         string     `gorm:"type:text" json:"feed_url,omitempty"`
 	IntervalMinutes int        `gorm:"not null;default:0" json:"interval_minutes,omitempty"`
 	MappingJSON     string     `gorm:"type:text" json:"mapping_json,omitempty"`
+	LocalConfigJSON string     `gorm:"type:text" json:"local_config_json,omitempty"`
+	LocalStatusJSON string     `gorm:"type:text" json:"local_status_json,omitempty"`
 	ETag            string     `gorm:"column:etag;size:512" json:"-"`
 	LastModified    string     `gorm:"size:255" json:"-"`
 	Initialized     bool       `gorm:"not null;default:false" json:"initialized"`

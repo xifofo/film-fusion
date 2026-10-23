@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"film-fusion/app/directorymonitor"
 	"film-fusion/app/model"
 
 	"gorm.io/driver/sqlite"
@@ -349,6 +350,9 @@ func newAutomationTestDB(t *testing.T) *gorm.DB {
 		&model.Automation115DirectoryCursor{}, &model.Automation115SeenItem{}, &model.Automation115Candidate{},
 		&model.CloudStorage{},
 	); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(directorymonitor.Models()...); err != nil {
 		t.Fatal(err)
 	}
 	return db

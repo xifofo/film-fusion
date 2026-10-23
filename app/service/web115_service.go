@@ -168,7 +168,16 @@ func (s *Web115Service) ResolveFilePathWithOpenAPI(ctx context.Context, accessTo
 	if err != nil {
 		return Web115File{}, false, err
 	}
-	size, _ := strconv.ParseInt(strings.TrimSpace(info.Size), 10, 64)
+	// size 是展示文本，秒传必须优先使用 size_byte 的精确字节数。
+	// 兼容仅返回整数字节数的旧响应；缺失时由秒传入口补齐并校验。
+	size := info.SizeByte
+	if size <= 0 {
+		var sizeErr error
+		size, sizeErr = strconv.ParseInt(strings.TrimSpace(info.Size), 10, 64)
+		if sizeErr != nil || size < 0 {
+			size = 0
+		}
+	}
 	fileName := strings.TrimSpace(info.FileName)
 	if fileName == "" {
 		fileName = path.Base(normalizedPath)
@@ -411,7 +420,7 @@ func (s *Web115Service) NewClientWithContext(ctx context.Context, cookie string,
 	return s.newClientWithContext(ctx, cookie, timeout)
 }
 
-func (s *Web115Service) newClientWithContext(ctx context.Context, cookie string, timeout time.Duration) (*driver.Pan115Client, error) {
+func (s *Web115Service) newClientWithContext(ctx context.Context, cookie string, timeout time.Duration, httpClients ...*http.Client) (*driver.Pan115Client, error) {
 	cookie = normalizeCookie(cookie)
 	credential, err := parse115Credential(cookie)
 	if err != nil {
@@ -419,6 +428,10 @@ func (s *Web115Service) newClientWithContext(ctx context.Context, cookie string,
 	}
 
 	client := driver.New(driver.UA(web115BrowserUA))
+	if len(httpClients) > 0 && httpClients[0] != nil {
+		// 秒传源读取在 CookieCheck 之前统一 Transport，包含初始化检查。
+		client.SetHttpClient(httpClients[0]).SetUserAgent(web115BrowserUA)
+	}
 	if timeout > 0 {
 		client.Client.SetTimeout(timeout)
 	}

@@ -24,7 +24,7 @@ func (h *Handler) TestUpgradePolicy(c *gin.Context) {
 		IncomingSizeMB int64                      `json:"incoming_size_mb"`
 		ExistingSizeMB int64                      `json:"existing_size_mb"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := bindUpgradeJSON(c, &req); err != nil {
 		h.error(c, 400, 400, err.Error())
 		return
 	}
@@ -36,6 +36,12 @@ func (h *Handler) TestUpgradePolicy(c *gin.Context) {
 		h.error(c, 400, 400, err.Error())
 		return
 	}
+	resolved, err := service.ResolveMediaUpgradePolicy(h.store().WithContext(h.requestContext()), c.GetUint("user_id"), planJSON(req.Policy))
+	if err != nil {
+		h.error(c, 400, 400, err.Error())
+		return
+	}
+	req.Policy = resolved
 	newFacts := service.ParseMediaUpgradeFacts(req.Incoming, req.IncomingSizeMB*1024*1024)
 	oldFacts := service.ParseMediaUpgradeFacts(req.Existing, req.ExistingSizeMB*1024*1024)
 	action, reason := service.CompareMediaUpgrade(req.Policy, newFacts, oldFacts)

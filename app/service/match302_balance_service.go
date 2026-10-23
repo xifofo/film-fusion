@@ -76,6 +76,11 @@ func (s *BalanceAssignmentService) FindMatch(filePath string) (*model.Match302, 
 }
 
 func (s *BalanceAssignmentService) ResolveSourceFileInfo(ctx context.Context, match *model.Match302, sourcePath, matchedPath string) (BalanceSourceFile, error) {
+	return s.resolveSourceFileInfo(ctx, match, sourcePath, matchedPath, false)
+}
+
+// 秒传必须取得完整元数据；播放定位仍只要求 pickcode，避免额外查询拖慢播放。
+func (s *BalanceAssignmentService) resolveSourceFileInfo(ctx context.Context, match *model.Match302, sourcePath, matchedPath string, forTransfer bool) (BalanceSourceFile, error) {
 	if match == nil {
 		return BalanceSourceFile{}, fmt.Errorf("Match302 规则为空")
 	}
@@ -102,10 +107,14 @@ func (s *BalanceAssignmentService) ResolveSourceFileInfo(ctx context.Context, ma
 	resolver := s.sourceFileResolver()
 	var attemptErrors []error
 	for _, method := range model.Match302AccessOrder(mode) {
+		if err := ctx.Err(); err != nil {
+			return BalanceSourceFile{}, err
+		}
 		var (
-			file  Web115File
-			found bool
-			err   error
+			file      Web115File
+			found     bool
+			err       error
+			webClient *driver.Pan115Client
 		)
 		switch method {
 		case model.Match302AccessMethodOpenAPI:
@@ -119,7 +128,6 @@ func (s *BalanceAssignmentService) ResolveSourceFileInfo(ctx context.Context, ma
 				attemptErrors = append(attemptErrors, fmt.Errorf("Cookie 缺失"))
 				continue
 			}
-			var webClient *driver.Pan115Client
 			webClient, err = resolver.NewClient(storage.Cookie)
 			if err == nil {
 				file, found, err = resolver.ResolveFilePathWithClient(webClient, matchedPath)
@@ -133,18 +141,39 @@ func (s *BalanceAssignmentService) ResolveSourceFileInfo(ctx context.Context, ma
 			attemptErrors = append(attemptErrors, fmt.Errorf("%s 未找到源文件", method))
 			continue
 		}
-		if strings.TrimSpace(file.PickCode) == "" {
+		if !forTransfer && strings.TrimSpace(file.PickCode) == "" {
 			attemptErrors = append(attemptErrors, fmt.Errorf("%s 返回的 pickcode 为空", method))
 			continue
-		}
-		if len(attemptErrors) > 0 && s.logger != nil {
-			s.logger.Warnf("[match302-balance] 源文件解析已降级到 %s mode=%s", method, mode)
 		}
 		fileName := strings.TrimSpace(file.Name)
 		if fileName == "" {
 			fileName = path.Base(pathhelper.EnsureLeadingSlash(matchedPath))
 		}
-		return buildBalanceSourceFile(sourcePath, matchedPath, match.TargetPath, fileName, file.PickCode, file.FileID, file.SHA1, file.Size), nil
+		info := buildBalanceSourceFile(sourcePath, matchedPath, match.TargetPath, fileName, file.PickCode, file.FileID, file.SHA1, file.Size)
+		if forTransfer {
+			// 使用本轮实际成功的协议，不能仅凭配置里存在 Token 跳过 Cookie 补齐。
+			if method == model.Match302AccessMethodCookie {
+				err = s.enrichSourceFileFromSupervision(webClient, &info)
+			} else if metadataErr := validateTransferSourceInfo(info); metadataErr != nil {
+				err = s.web115Svc.completeOpenAPITransferSource(ctx, storage.AccessToken, &info)
+				if err != nil {
+					err = fmt.Errorf("%v；按父目录补齐失败: %w", metadataErr, err)
+				}
+			}
+			if err == nil {
+				err = validateTransferSourceInfo(info)
+			}
+			if err != nil {
+				attemptErrors = append(attemptErrors, fmt.Errorf("%s 源文件元数据校验失败: %w", method, err))
+				continue
+			}
+			info.SHA1 = strings.ToUpper(strings.TrimSpace(info.SHA1))
+			info.PickCode = strings.TrimSpace(info.PickCode)
+		}
+		if len(attemptErrors) > 0 && s.logger != nil {
+			s.logger.Warnf("[match302-balance] 源文件解析已降级到 %s mode=%s", method, mode)
+		}
+		return info, nil
 	}
 	return BalanceSourceFile{}, fmt.Errorf("源文件信息解析失败 mode=%s: %w", mode, errors.Join(attemptErrors...))
 }

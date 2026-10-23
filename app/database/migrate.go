@@ -1,6 +1,7 @@
 package database
 
 import (
+	"film-fusion/app/directorymonitor"
 	"film-fusion/app/model"
 	"fmt"
 )
@@ -37,12 +38,17 @@ func AutoMigrate() error {
 
 	// 自动迁移表结构
 	if err := DB.AutoMigrate(
+		&model.PlutoFishCursor{},
+		&model.PlutoFishEvent{},
+		&model.PlutoFishReceipt{},
+		&model.PlutoFishBusinessPlan{},
 		&model.SystemConfig{},
 		&model.User{},
 		&model.APIToken{},
 		&model.CloudStorage{},
 		&model.CloudPath{},
 		&model.CloudDirectory{},
+		&model.MediaUpgradeRuleGroup{},
 		&model.OrganizeSourceFolderDeletionTask{},
 		&model.Download115Queue{},
 		&model.PickcodeCache{},
@@ -86,6 +92,9 @@ func AutoMigrate() error {
 		&model.AutomationNodeRun{},
 	); err != nil {
 		return err
+	}
+	if err := DB.AutoMigrate(directorymonitor.Models()...); err != nil {
+		return fmt.Errorf("迁移本地目录监控状态失败: %w", err)
 	}
 	if err := migrateAutomationRunExecutionIndex(); err != nil {
 		return fmt.Errorf("迁移自动化重复运行索引失败: %v", err)

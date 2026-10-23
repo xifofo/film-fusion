@@ -47,6 +47,7 @@ type Server struct {
 	notificationService     *service.NotificationService
 	automationService       *service.AutomationService
 	rssService              *service.RSSService
+	plutoFishService        *service.PlutoFishService
 	taskQueue               *service.PersistentTaskQueue
 }
 
@@ -119,6 +120,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 		taskQueue:               taskQueue,
 	}
 	s.rssService = service.NewRSSService(log)
+	s.plutoFishService = service.NewPlutoFishService(database.GetDB())
 	s.automationService = service.NewAutomationService(log, s.notificationService, s.moviePilotService)
 	s.automationService.SetRSSService(s.rssService)
 	s.automationService.SetLocalMediaRecognition(s.mediaRecognitionService)
@@ -151,6 +153,9 @@ func newApplicationRouter() *gin.Engine {
 // Start 启动服务器
 func (s *Server) Start() error {
 	s.Logger.Infof("在端口 %s 启动服务器", s.http.Addr)
+	if err := s.plutoFishService.Start(); err != nil {
+		s.Logger.Errorf("PlutoFish 通知客户端未启动: %v", err)
+	}
 
 	// 启动令牌刷新服务
 	s.tokenRefreshService.Start()
@@ -226,6 +231,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	// Stop producers before downstream downloads, playback and provider clients.
+	if s.plutoFishService != nil {
+		s.plutoFishService.Stop()
+	}
 	if s.rssService != nil {
 		s.rssService.Stop()
 	}

@@ -16,6 +16,7 @@ import (
 	"film-fusion/app/model"
 	"film-fusion/app/service"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
+	"gorm.io/gorm"
 )
 
 func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115CookieRequest) (Organize115CookieResult, error) {
@@ -244,6 +245,9 @@ func (h *Service) applyOrganizePlan(userID uint, req Organize115CookieRequest) (
 	if organizeDirectoryConditions(dir) != row.DirectoryJSON {
 		return result, errors.New("媒体库根目录或整理条件已改变，请重新预览")
 	}
+	if err := service.ValidateMediaUpgradeRuleGroupSnapshot(h.store().WithContext(h.requestContext()), userID, result.UpgradePolicy); err != nil {
+		return result, err
+	}
 	var err error
 	result, err = selectOrganizePlan(result, req)
 	if err != nil {
@@ -285,12 +289,20 @@ func (h *Service) applyOrganizePlan(userID uint, req Organize115CookieRequest) (
 	worker.dirCache = service.NewWeb115DirCache(web115DirCacheTTL)
 	h = &worker
 	if result.UpgradePolicy != nil && result.UpgradePolicy.Enabled {
-		claimed := h.store().Model(&model.OrganizePlan{}).Where("id = ? AND status = ?", row.ID, "ready").Update("status", "executing")
-		if claimed.Error != nil {
-			return result, claimed.Error
-		}
-		if claimed.RowsAffected != 1 {
-			return result, errors.New("计划已被其它请求执行")
+		if err := h.store().WithContext(h.requestContext()).Transaction(func(tx *gorm.DB) error {
+			if err := service.LockMediaUpgradeRuleGroupSnapshot(tx, userID, result.UpgradePolicy); err != nil {
+				return err
+			}
+			claimed := tx.Model(&model.OrganizePlan{}).Where("id = ? AND status = ?", row.ID, "ready").Update("status", "executing")
+			if claimed.Error != nil {
+				return claimed.Error
+			}
+			if claimed.RowsAffected != 1 {
+				return errors.New("计划已被其它请求执行")
+			}
+			return nil
+		}); err != nil {
+			return result, err
 		}
 		result, err = h.startUpgradeJob(dir, storage, client, result)
 		if result.UpgradeJob != nil {

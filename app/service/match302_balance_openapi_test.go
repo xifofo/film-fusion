@@ -57,13 +57,13 @@ func TestOpenAPITransferWithoutCookiesThroughRangeAndCleanup(t *testing.T) {
 	client := &http.Client{Transport: balanceOpenAPITransport(func(req *http.Request) (*http.Response, error) {
 		if req.URL.Host == "cdn.test" {
 			ranges++
-			if req.Header.Get("Cookie") != "download=grant" || req.UserAgent() != web115BrowserUA || req.Header.Get("Range") != "bytes=2-5" {
+			if req.Header.Get("Cookie") != "download=grant" || req.UserAgent() != web115TransferUA || req.Header.Get("Range") != "bytes=2-5" {
 				t.Fatalf("incorrect Range headers: %v", req.Header)
 			}
 			if req.Header.Get("Authorization") != "" {
 				t.Fatal("token leaked to CDN")
 			}
-			return &http.Response{StatusCode: 206, Header: http.Header{"Content-Range": {"bytes 2-5/16"}}, Body: io.NopCloser(strings.NewReader("2345")), Request: req}, nil
+			return &http.Response{StatusCode: 206, ContentLength: 4, Header: http.Header{"Content-Range": {"bytes 2-5/16"}}, Body: io.NopCloser(strings.NewReader("2345")), Request: req}, nil
 		}
 		if req.URL.Host != "proapi.115.com" || !strings.HasPrefix(req.URL.Path, "/open/") {
 			t.Fatalf("unexpected non-OpenAPI request: %s", req.URL)
@@ -89,7 +89,7 @@ func TestOpenAPITransferWithoutCookiesThroughRangeAndCleanup(t *testing.T) {
 			if req.Form.Get("path") != "/library/Test.mkv" {
 				t.Fatalf("source path: %s", req.Form.Get("path"))
 			}
-			return respond(map[string]any{"file_id": "source-id", "pick_code": "source-pick", "file_name": "Test.mkv", "sha1": fullSHA, "size": "16"}), nil
+			return respond(map[string]any{"file_id": "source-id", "pick_code": "source-pick", "file_name": "Test.mkv", "sha1": fullSHA, "size": "16 B", "size_byte": 16}), nil
 		case "/open/ufile/files":
 			files := []map[string]any{}
 			if req.Form.Get("cid") == "0" && mkdirs > 0 {
@@ -118,10 +118,10 @@ func TestOpenAPITransferWithoutCookiesThroughRangeAndCleanup(t *testing.T) {
 			ready = true
 			return respond(map[string]any{"status": 2, "pick_code": "target-pick", "file_id": nil}), nil
 		case "/open/ufile/downurl":
-			if req.UserAgent() != web115BrowserUA || req.Form.Get("pick_code") != "source-pick" {
+			if req.UserAgent() != web115TransferUA || req.Form.Get("pick_code") != "source-pick" {
 				t.Fatal("incorrect downurl request")
 			}
-			resp := respond(map[string]any{"source-id": map[string]any{"pick_code": "source-pick", "file_size": 16, "url": map[string]string{"url": "https://cdn.test/file"}}})
+			resp := respond(map[string]any{"source-id": map[string]any{"pick_code": "source-pick", "sha1": fullSHA, "file_size": 16, "url": map[string]string{"url": "https://cdn.test/file"}}})
 			resp.Header.Set("Set-Cookie", "download=grant; Path=/; HttpOnly")
 			return resp, nil
 		case "/open/ufile/delete":

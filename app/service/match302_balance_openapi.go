@@ -21,29 +21,13 @@ func useOpenAPITransfer(storage *model.CloudStorage) bool {
 }
 
 func (s *BalanceAssignmentService) prepareTransferSource(ctx context.Context, assignment *model.Match302BalanceAssignment) (BalanceSourceFile, error) {
-	source := assignment.Match302.CloudStorage
 	matchedPath := assignment.Match302.GetMatchedPath(assignment.SourceFilePath)
-	info, err := s.ResolveSourceFileInfo(ctx, assignment.Match302, assignment.SourceFilePath, matchedPath)
+	info, err := s.resolveSourceFileInfo(ctx, assignment.Match302, assignment.SourceFilePath, matchedPath, true)
 	if err != nil {
 		return info, err
 	}
-	// OpenAPI already supplies SHA1, size and pickcode. Supervision is a Cookie
-	// endpoint and must never be required for a token-only source account.
-	if !useOpenAPITransfer(source) {
-		client, err := s.web115Svc.NewClient(source.Cookie)
-		if err != nil {
-			return info, err
-		}
-		if err := s.enrichSourceFileFromSupervision(client, &info); err != nil {
-			return info, err
-		}
-	}
 	if info.Size >= 115*1024*1024 && isCollectLike(info) {
 		return info, fmt.Errorf("特殊资源或合集资源暂不支持秒传")
-	}
-	hash, hashErr := hex.DecodeString(info.SHA1)
-	if hashErr != nil || len(hash) != 20 || info.Size <= 0 || strings.TrimSpace(info.PickCode) == "" {
-		return info, fmt.Errorf("源文件 SHA1、大小或 pickcode 无效，无法秒传")
 	}
 	if err := s.updateAssignmentSourceInfo(assignment, info); err != nil {
 		return info, err
@@ -183,7 +167,7 @@ func checkedOpenAPITransferResult(file Web115File, source BalanceSourceFile, tar
 
 func (s *Web115Service) readTransferRangeHash(ctx context.Context, source *model.CloudStorage, info BalanceSourceFile, signCheck string) (string, error) {
 	start, end, err := parseWeb115Range(signCheck)
-	if err != nil || info.Size <= 0 || end >= info.Size {
+	if err != nil || info.Size <= 0 || end >= info.Size || end-start >= maxTransferRangeBytes {
 		return "", fmt.Errorf("秒传校验范围无效: %q", signCheck)
 	}
 	var attemptErrors []error
@@ -193,22 +177,17 @@ func (s *Web115Service) readTransferRangeHash(ctx context.Context, source *model
 		}
 		var download *driver.DownloadInfo
 		if method == model.Match302AccessMethodOpenAPI {
-			download, err = s.DownloadWithOpenAPIForRange(ctx, source.AccessToken, info.PickCode, web115BrowserUA)
+			download, err = s.downloadWithOpenAPIForRange(ctx, source.AccessToken, info.PickCode, web115TransferUA, &info)
 		} else {
 			var client *driver.Pan115Client
-			client, err = s.NewClientWithContext(ctx, source.Cookie, 0)
+			client, err = s.newClientWithContext(ctx, source.Cookie, 0, s.transferHTTPClient())
 			if err == nil {
 				download, err = s.DownloadForP115Transfer(ctx, model.Match302AccessModeCookieOnly, "", client, info)
 			}
 		}
 		if err == nil {
-			reader := newHTTPRangeReadSeeker(download.Url.Url, download.Header, info.Size)
-			reader.ctx = ctx
-			if s.httpClient != nil {
-				reader.client = s.httpClient
-			}
 			var digest string
-			digest, err = hashWeb115RangeSHA1(reader, fmt.Sprintf("%d-%d", start, end))
+			digest, err = hashTransferHTTPRange(ctx, s.transferHTTPClient(), download.Url.Url, download.Header, info.Size, start, end)
 			if err == nil {
 				return digest, nil
 			}

@@ -46,6 +46,7 @@ func (s *Server) setupRoutes() {
 	automationHandler := handler.NewAutomationHandler(s.automationService)
 	rssRelayHandler := handler.NewRSSRelayHandler(s.rssService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
+	cloudFolderMoveHandler := handler.NewCloudFolderMoveHandler(service.NewCloudFolderMoveService(database.GetDB(), service.NewWeb115Service(s.Logger)))
 	cloudPathHandler := handler.NewCloudPathHandler()
 	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService, s.moviePilotService)
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
@@ -67,6 +68,7 @@ func (s *Server) setupRoutes() {
 	embyCoverHandler := handler.NewEmbyCoverHandler(s.Logger, s.embyCoverService)
 	embySortNameHandler := handler.NewEmbySortNameHandler(s.Logger, s.embySortNameService)
 	embyStatsHandler := handler.NewEmbyStatsHandler(s.Logger, s.embyStatsService)
+	embyLibraryCheckHandler := handler.NewEmbyLibraryCheckHandler(service.NewEmbyLibraryCheckService(s.embyClient))
 	embyProxyLogHandler := handler.NewEmbyProxyLogHandler(s.embyLoginProtection)
 	embyBindingHandler := handler.NewEmbyBindingHandler(s.Logger, s.embyClient)
 	embyAccountHandler := handler.NewEmbyAccountHandler(s.embyAccountService)
@@ -128,6 +130,17 @@ func (s *Server) setupRoutes() {
 		protected.GET("/system-info", systemInfoHandler.Get)
 
 		// 系统配置相关路由
+		plutoFishHandler := handler.NewPlutoFishHandler(s.plutoFishService)
+		plutoFish := protected.Group("/plutofish")
+		{
+			plutoFish.GET("/config", plutoFishHandler.Config)
+			plutoFish.PUT("/config", plutoFishHandler.Save)
+			plutoFish.GET("/status", plutoFishHandler.Status)
+			plutoFish.GET("/events", plutoFishHandler.Events)
+			plutoFish.POST("/events/:id/retry", plutoFishHandler.Retry)
+			plutoFish.POST("/start", plutoFishHandler.Start)
+			plutoFish.POST("/stop", plutoFishHandler.Stop)
+		}
 		// 应用配置（config.yaml 在线编辑 + 热重载）
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
@@ -214,6 +227,8 @@ func (s *Server) setupRoutes() {
 			// 额外功能
 			storage.POST("/:id/refresh", cloudStorageHandler.RefreshToken)
 			storage.POST("/:id/test", cloudStorageHandler.TestConnection)
+			storage.GET("/:id/files", cloudFolderMoveHandler.Browse)
+			storage.POST("/:id/folder-move", cloudFolderMoveHandler.Move)
 			storage.GET("/types", cloudStorageHandler.GetStorageTypes)
 		}
 
@@ -329,6 +344,10 @@ func (s *Server) setupRoutes() {
 			organize.POST("/115", organizeHandler.Organize115)
 			organize.POST("/115-cookie", organizeHandler.Organize115Cookie)
 			organize.GET("/upgrade/presets", organizeHandler.UpgradePresets)
+			organize.GET("/upgrade/rule-groups", organizeHandler.ListUpgradeRuleGroups)
+			organize.POST("/upgrade/rule-groups", organizeHandler.SaveUpgradeRuleGroup)
+			organize.PUT("/upgrade/rule-groups/:id", organizeHandler.SaveUpgradeRuleGroup)
+			organize.DELETE("/upgrade/rule-groups/:id", organizeHandler.DeleteUpgradeRuleGroup)
 			organize.POST("/upgrade/test", organizeHandler.TestUpgradePolicy)
 			organize.GET("/upgrade/jobs", organizeHandler.ListUpgradeJobs)
 			organize.POST("/upgrade/jobs/:id/retry", organizeHandler.RetryUpgradeJob)
@@ -400,6 +419,9 @@ func (s *Server) setupRoutes() {
 			embySortName.POST("/backfill", embySortNameHandler.Backfill)
 			embySortName.POST("/items/:id", embySortNameHandler.ProcessItem)
 		}
+
+		// 批量按名称检查 Emby 入库状态（只读）。
+		protected.POST("/emby-library-check", embyLibraryCheckHandler.Check)
 
 		// Emby 媒体库电影 / 电视剧数量统计
 		embyStats := protected.Group("/emby-stats")

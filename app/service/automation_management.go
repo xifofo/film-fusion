@@ -99,7 +99,7 @@ func (s *AutomationService) SaveAutomationTemplate(id uint, input AutomationTemp
 		return item, errors.New("模板名称必须为 1 到 120 个字符")
 	}
 	trigger := input.Configuration.Source.TriggerType
-	if trigger != model.AutomationTriggerRSS && trigger != model.AutomationTrigger115Directory {
+	if trigger != model.AutomationTriggerRSS && trigger != model.AutomationTrigger115Directory && trigger != model.AutomationTriggerLocalDirectory {
 		return item, errors.New("模板触发器类型无效")
 	}
 	definition := input.Configuration.Workflow.Definition
@@ -180,6 +180,28 @@ func (s *AutomationService) BatchAutomations(input AutomationBatchInput) error {
 	if len([]rune(input.GroupName)) > 80 {
 		return errors.New("分组名称不能超过 80 个字符")
 	}
+	// Reserve local sources before the transaction so a scan cannot publish an
+	// event while its monitor is being enabled or disabled.
+	localIDs := []uint{}
+	if input.Action != "group" {
+		if err := s.db.Model(&model.AutomationSource{}).
+			Where("id IN ? AND trigger_type = ?", input.SourceIDs, model.AutomationTriggerLocalDirectory).
+			Pluck("id", &localIDs).Error; err != nil {
+			return err
+		}
+		locked := []uint{}
+		defer func() {
+			for _, id := range locked {
+				s.endAutomationScan(id)
+			}
+		}()
+		for _, id := range localIDs {
+			if !s.beginAutomationScan(id) {
+				return ErrAutomationScanRunning
+			}
+			locked = append(locked, id)
+		}
+	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		seen := map[uint]bool{}
 		validator := &AutomationService{db: tx}
@@ -242,6 +264,9 @@ func (s *AutomationService) BatchAutomations(input AutomationBatchInput) error {
 		return nil
 	})
 	if err == nil {
+		for _, id := range localIDs {
+			s.forgetLocalMonitor(id)
+		}
 		s.Wake()
 	}
 	return err

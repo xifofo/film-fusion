@@ -1,103 +1,114 @@
+// 秒传校验沿用 P0001 的单次精确 Range 读取，只计算挑战片段，不下载整个文件。
 package service
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
-type httpRangeReadSeeker struct {
-	ctx     context.Context
-	url     string
-	headers http.Header
-	client  *http.Client
-	offset  int64
-	size    int64
-}
+const maxTransferRangeBytes int64 = 8 << 20
 
-func newHTTPRangeReadSeeker(rawURL string, headers http.Header, size int64) *httpRangeReadSeeker {
-	cloned := make(http.Header, len(headers))
-	for key, values := range headers {
-		for _, value := range values {
-			cloned.Add(key, value)
+// 签发直链与读取 CDN 共用直连 Transport，避免环境代理按域名分流改变出口。
+var transferRangeTransport = func() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	return transport
+}()
+
+func (s *Web115Service) transferHTTPClient() *http.Client {
+	client := http.Client{Transport: transferRangeTransport, Timeout: 30 * time.Second}
+	if s.httpClient != nil {
+		client = *s.httpClient
+		if client.Timeout <= 0 {
+			client.Timeout = 30 * time.Second
 		}
 	}
-	return &httpRangeReadSeeker{
-		ctx:     context.Background(),
-		url:     rawURL,
-		headers: cloned,
-		client:  &http.Client{Timeout: 30 * time.Second},
-		size:    size,
-	}
+	// 不混入 CookieJar 的登录凭据，也不把签发 Cookie 带到重定向地址。
+	client.Jar = nil
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &client
 }
 
-func (r *httpRangeReadSeeker) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
+func hashTransferHTTPRange(ctx context.Context, client *http.Client, rawURL string, headers http.Header, size, start, end int64) (string, error) {
+	if start < 0 || end < start || end >= size || end-start >= maxTransferRangeBytes {
+		return "", fmt.Errorf("秒传校验范围无效或超过 8 MiB")
 	}
-	if r.size > 0 && r.offset >= r.size {
-		return 0, io.EOF
-	}
-	end := r.offset + int64(len(p)) - 1
-	if r.size > 0 && end >= r.size {
-		end = r.size - 1
-	}
-	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, r.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, err
+		return "", fmt.Errorf("源直链地址无效")
 	}
-	for key, values := range r.headers {
-		for _, value := range values {
-			req.Header.Add(key, value)
-		}
+	// 空 UA 也必须显式设置，防止 Go 自动发送另一种 UA。
+	req.Header.Set("User-Agent", headers.Get("User-Agent"))
+	if cookie := headers.Get("Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
 	}
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", r.offset, end))
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	req.Header.Set("Accept-Encoding", "identity")
-	resp, err := r.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		// url.Error 含带签名的下载地址，不写入任务错误。
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", fmt.Errorf("源直链片段请求失败，请检查网络连接")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusPartialContent {
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-			return 0, fmt.Errorf("源直链拒绝片段读取: HTTP %d，需检查直链有效期、下载请求头及出口 IP；range=bytes=%d-%d", resp.StatusCode, r.offset, end)
+			return "", fmt.Errorf("源直链拒绝片段读取: HTTP %d，CDN 原因=%s，已携带下载 Cookie=%t；range=bytes=%d-%d", resp.StatusCode,
+				transferRangeRejectionReason(resp), req.Header.Get("Cookie") != "", start, end)
 		}
-		return 0, fmt.Errorf("源直链未返回分段内容: HTTP %d range=bytes=%d-%d", resp.StatusCode, r.offset, end)
+		return "", fmt.Errorf("源直链未返回分段内容: HTTP %d range=bytes=%d-%d", resp.StatusCode, start, end)
 	}
-	wantRange := fmt.Sprintf("bytes %d-%d/%d", r.offset, end, r.size)
+	wantRange := fmt.Sprintf("bytes %d-%d/%d", start, end, size)
 	if got := resp.Header.Get("Content-Range"); got != wantRange {
-		return 0, fmt.Errorf("源直链 Content-Range 不匹配: got=%q want=%q", got, wantRange)
+		return "", fmt.Errorf("源直链 Content-Range 不匹配: got=%q want=%q", got, wantRange)
 	}
-	length := end - r.offset + 1
-	body, err := io.ReadAll(io.LimitReader(resp.Body, length+1))
+	if encoding := resp.Header.Get("Content-Encoding"); (encoding != "" && encoding != "identity") || resp.Uncompressed {
+		return "", fmt.Errorf("源直链返回了压缩内容，无法计算原始片段校验")
+	}
+	length := end - start + 1
+	if resp.ContentLength >= 0 && resp.ContentLength != length {
+		return "", fmt.Errorf("源直链片段长度不匹配: got=%d want=%d", resp.ContentLength, length)
+	}
+	hash := sha1.New()
+	read, err := io.Copy(hash, io.LimitReader(resp.Body, length+1))
 	if err != nil {
-		return 0, err
+		return "", fmt.Errorf("源直链片段读取失败")
 	}
-	if int64(len(body)) != length {
-		return 0, fmt.Errorf("源直链片段长度不匹配: got=%d want=%d", len(body), length)
+	if read != length {
+		return "", fmt.Errorf("源直链片段长度不匹配: got=%d want=%d", read, length)
 	}
-	n := copy(p, body)
-	r.offset += int64(n)
-	return n, nil
+	return fmt.Sprintf("%X", hash.Sum(nil)), nil
 }
 
-func (r *httpRangeReadSeeker) Seek(offset int64, whence int) (int64, error) {
-	var next int64
-	switch whence {
-	case io.SeekStart:
-		next = offset
-	case io.SeekCurrent:
-		next = r.offset + offset
-	case io.SeekEnd:
-		next = r.size + offset
+// 只读取拒绝响应的少量 JSON，并输出已知固定错误文案；未知正文可能带签名、
+// Cookie 或文件名，不进入任务错误。此诊断不增加请求或重试。
+func transferRangeRejectionReason(resp *http.Response) string {
+	if resp.Body == nil || resp.Uncompressed || (resp.Header.Get("Content-Encoding") != "" && resp.Header.Get("Content-Encoding") != "identity") {
+		return "未识别"
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4097))
+	if err != nil || len(raw) > 4096 {
+		return "未识别"
+	}
+	var result struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &result) != nil {
+		return "未识别"
+	}
+	switch reason := strings.ToLower(strings.TrimSpace(result.Message)); reason {
+	case "no cookie value", "invalid cookie", "cookie expired", "ip not match", "ip mismatch",
+		"user agent not match", "user-agent mismatch", "url expired", "signature expired", "invalid signature", "access denied", "forbidden":
+		return reason
 	default:
-		return 0, fmt.Errorf("invalid whence: %d", whence)
+		return "未识别"
 	}
-	if next < 0 {
-		return 0, fmt.Errorf("negative offset")
-	}
-	r.offset = next
-	return r.offset, nil
 }

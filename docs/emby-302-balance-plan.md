@@ -202,6 +202,16 @@ Go 中不保留 Python 的 `async` 参数，使用：
 - `status=7` 时用源账号直链 Range 读取并提交 `sign_val`。
 - 上传响应解密和结果解析。
 
+源片段校验已按 P0001 的实现对齐：OpenAPI DownURL 直接解析 JSON（兼容非标准 Content-Type 和字符串文件大小），保留真实 HTTP 状态，并核对源文件 ID、大小和 SHA1。直链签发与 CDN 读取复用直连 Transport；Cookie 接口和 CDN 显式使用相同 UA，只转发此次响应签发的下载 Cookie。
+
+秒传的 OpenAPI、Web 和 Android 下载接口统一使用不带 `115Browser` 标识的普通浏览器 UA，覆盖 Cookie 登录客户端的 UA，再将相同 UA 传给 CDN。[上游记录](https://github.com/OpenListTeam/OpenList/issues/2502)表明 `115Browser` UA 即使携带 Cookie 也可能触发 403。拒绝响应仅读取最多 4 KiB JSON 和一个用于检测超限的字节，显示已知固定错误原因与是否携带下载 Cookie，不保存未知正文、账号 Cookie 或签名直链；不因此追加重试。
+
+每次挑战只发送一个完整的 `Range: bytes=<sign_check>` 请求，最多 8 MiB。响应必须是未压缩的 HTTP 206，且 `Content-Range` 和实际字节数完全匹配；拒绝整文件响应和重定向。此链路沿用账号的 OpenAPI/Cookie 模式顺序，不自动重试目标上传。相关回归使用本地 HTTP 服务和内存 Transport，不代表真实 115 联调已通过。
+
+115 SDK 已更新为 `115-sdk-go v0.2.6` 和 `115driver v1.3.5`。OpenAPI 路径查询优先读取 `size_byte` 的精确字节数，兼容对象和数组响应；仅旧响应缺失该字段时尝试解析整数 `size`，不将带单位的展示文本换算成秒传文件大小。
+
+播放路径定位成功只表示取得了 pickcode。秒传前若 OpenAPI 路径结果缺少有效 SHA1、精确文件大小或 pickcode，会按精确父目录分页查找同名、同 ID 的文件补齐；仍不完整时返回具体缺失字段。自动模式按本轮实际使用的协议处理补齐，降级到 Cookie 后仍执行 supervision，不能因为配置中存在 Token 而跳过。仅 OpenAPI 模式不会调用 Cookie 接口。
+
 ### 5.5 秒传结果
 
 结果类型保持 p115client 语义：

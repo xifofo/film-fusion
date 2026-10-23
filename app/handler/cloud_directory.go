@@ -80,6 +80,10 @@ func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 		return
 	}
 	uid := userID.(uint)
+	if _, err := service.ResolveMediaUpgradePolicy(database.DB.WithContext(c.Request.Context()), uid, req.UpgradePolicy); err != nil {
+		h.error(c, 400, 400, err.Error())
+		return
+	}
 
 	// 验证必填字段
 	if req.CloudStorageID == 0 {
@@ -141,7 +145,12 @@ func (h *CloudDirectoryHandler) CreateCloudDirectory(c *gin.Context) {
 		RecognitionSource:    req.RecognitionSource,
 	}
 
-	if err := database.DB.Create(&newDir).Error; err != nil {
+	if err := database.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if err := service.LockMediaUpgradeRuleGroupReference(tx, uid, req.UpgradePolicy); err != nil {
+			return err
+		}
+		return tx.Create(&newDir).Error
+	}); err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "创建目录配置失败")
 		return
 	}
@@ -318,7 +327,7 @@ func (h *CloudDirectoryHandler) UpdateCloudDirectory(c *gin.Context) {
 		"updated_at": time.Now(),
 	}
 	if req.UpgradePolicy != nil {
-		if _, err := service.ParseMediaUpgradePolicy(*req.UpgradePolicy); err != nil {
+		if _, err := service.ResolveMediaUpgradePolicy(database.DB.WithContext(c.Request.Context()), userID.(uint), *req.UpgradePolicy); err != nil {
 			h.error(c, 400, 400, err.Error())
 			return
 		}
@@ -367,7 +376,14 @@ func (h *CloudDirectoryHandler) UpdateCloudDirectory(c *gin.Context) {
 		updates["classify_by_category"] = *req.ClassifyByCategory
 	}
 
-	if err := database.DB.Model(&dir).Updates(updates).Error; err != nil {
+	if err := database.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		if req.UpgradePolicy != nil {
+			if err := service.LockMediaUpgradeRuleGroupReference(tx, userID.(uint), *req.UpgradePolicy); err != nil {
+				return err
+			}
+		}
+		return tx.Model(&dir).Updates(updates).Error
+	}); err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "更新目录配置失败")
 		return
 	}

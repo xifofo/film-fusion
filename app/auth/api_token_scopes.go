@@ -25,7 +25,7 @@ func APITokenScopes() []APITokenScope {
 		{"automations", "自动化中心", "管理并执行自动化流程，包含下载器连接配置", []string{"/api/automations"}},
 		{"match-302", "Match302 重定向", "管理重定向规则、负载均衡及缓存分配", []string{"/api/match-302"}},
 		{"pickcode-cache", "Pickcode 缓存", "查询、修改和清空文件缓存映射", []string{"/api/pickcode-cache"}},
-		{"emby-library", "Emby 媒体库工具", "封面生成及排序名称回填", []string{"/api/emby-cover", "/api/emby-sortname"}},
+		{"emby-library", "Emby 媒体库工具", "批量入库检查、封面生成及排序名称回填", []string{"/api/emby-cover", "/api/emby-sortname", "/api/emby-library-check"}},
 		{"emby-stats", "Emby 媒体统计", "读取媒体统计和图片", []string{"/api/emby-stats"}},
 		{"emby-watch", "Emby 观看记录", "查看、回填、删除观看记录及修改统计配置", []string{"/api/emby-watch"}},
 		{"emby-accounts", "Emby 账户管理", "查询账户并设置到期时间", []string{"/api/emby-accounts"}},

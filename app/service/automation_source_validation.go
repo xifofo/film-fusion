@@ -22,7 +22,11 @@ func (s *AutomationService) validateAutomationSourceInput(input AutomationSource
 		return input, "", errors.New("自动化名称不能为空且不能超过 120 个字符")
 	}
 	switch input.TriggerType {
+	case model.AutomationTriggerLocalDirectory:
+		input, err := validateAutomationLocalSourceInput(input)
+		return input, "", err
 	case model.AutomationTriggerRSS:
+		input.LocalConfig = nil
 		input.FeedURL = strings.TrimSpace(input.FeedURL)
 		parsed, err := url.ParseRequestURI(input.FeedURL)
 		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
@@ -53,6 +57,7 @@ func (s *AutomationService) validateAutomationSourceInput(input AutomationSource
 		return input, string(mappingJSON), nil
 
 	case model.AutomationTrigger115Directory:
+		input.LocalConfig = nil
 		input.FeedURL = ""
 		input.IntervalMinutes = 0
 		input.Mapping = RSSAutomationMapping{}
@@ -110,12 +115,22 @@ func automationSourceInputFromModel(source model.AutomationSource) AutomationSou
 			input.Mapping = mapping
 		}
 	}
+	if source.TriggerType == model.AutomationTriggerLocalDirectory {
+		config, err := ParseLocalDirectoryConfig(source.LocalConfigJSON)
+		if err == nil {
+			input.LocalConfig = &config
+		}
+	}
 	return input
 }
 
 func automationSourceConfigurationChanged(source model.AutomationSource, input AutomationSourceInput, mappingJSON string) bool {
 	if source.TriggerType == model.AutomationTriggerRSS {
 		return source.FeedURL != input.FeedURL || source.MappingJSON != mappingJSON
+	}
+	if source.TriggerType == model.AutomationTriggerLocalDirectory {
+		return source.DirectoryPath != input.DirectoryPath || source.Recursive != input.Recursive ||
+			automationLocalDiscoveryConfigChanged(source.LocalConfigJSON, input.LocalConfig)
 	}
 	return source.CloudStorageID != input.CloudStorageID || source.DirectoryID != input.DirectoryID ||
 		source.DirectoryPath != input.DirectoryPath || source.Recursive != input.Recursive
@@ -142,6 +157,9 @@ func (s *AutomationService) validateAutomationSourceWorkflow(input AutomationSou
 		return err
 	}
 	definition = resolved
+	if input.TriggerType == model.AutomationTriggerLocalDirectory {
+		return validateAutomationLocalSourceWorkflow(definition)
+	}
 	if input.TriggerType != model.AutomationTrigger115Directory {
 		return nil
 	}

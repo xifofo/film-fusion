@@ -267,7 +267,7 @@ func planUpgradeLocalChanges(dir model.CloudDirectory, mappings []model.CloudPat
 }
 
 func (h *Service) prepareUpgradePreview(dir model.CloudDirectory, result *Organize115CookieResult) error {
-	policy, err := service.ParseMediaUpgradePolicy(dir.UpgradePolicy)
+	policy, err := service.ResolveMediaUpgradePolicy(h.store().WithContext(h.requestContext()), dir.UserID, dir.UpgradePolicy)
 	if err != nil || !policy.Enabled {
 		return err
 	}
@@ -373,7 +373,10 @@ func (h *Service) prepareUpgradePreview(dir model.CloudDirectory, result *Organi
 					tracked := false
 					for _, record := range records {
 						if record.FileID == file.FileID && record.PickCode == file.PickCode && record.Size == file.Size && record.CloudPath == oldPath {
-							if json.Unmarshal([]byte(record.FactsJSON), &facts) == nil {
+							var recordedFacts service.MediaUpgradeFacts
+							if json.Unmarshal([]byte(record.FactsJSON), &recordedFacts) == nil {
+								// Do not mix newly parsed renamed labels into an older evidence snapshot.
+								facts = recordedFacts
 								tracked = true
 							}
 						}

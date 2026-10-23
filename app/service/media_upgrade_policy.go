@@ -12,37 +12,52 @@ import (
 
 // Priority is ordinal. Bonus scores never cross a priority boundary.
 type MediaUpgradePolicy struct {
-	Enabled      bool               `json:"enabled"`
-	Name         string             `json:"name"`
-	Rules        []MediaUpgradeRule `json:"rules"`
-	Bonuses      []MediaUpgradeRule `json:"bonuses"`
-	Exclude      []string           `json:"exclude"`
-	MaxSizeMB    int64              `json:"max_size_mb"`
-	SameTier     bool               `json:"same_tier"`
-	MinScoreGain int                `json:"min_score_gain"`
+	Enabled          bool                   `json:"enabled"`
+	Name             string                 `json:"name"`
+	Rules            []MediaUpgradeRule     `json:"rules"`
+	Bonuses          []MediaUpgradeRule     `json:"bonuses"`
+	Exclude          []string               `json:"exclude"`
+	MaxSizeMB        int64                  `json:"max_size_mb"`
+	SameTier         bool                   `json:"same_tier"`
+	MinScoreGain     int                    `json:"min_score_gain"`
+	GroupID          uint                   `json:"group_id,omitempty"`
+	GroupRevision    uint                   `json:"group_revision,omitempty"`
+	ExcludeCondition *MediaUpgradeCondition `json:"exclude_condition,omitempty"`
 }
 
 type MediaUpgradeRule struct {
-	Name        string   `json:"name"`
-	Resolutions []string `json:"resolutions,omitempty"`
-	Sources     []string `json:"sources,omitempty"`
-	Codecs      []string `json:"codecs,omitempty"`
-	Effects     []string `json:"effects,omitempty"`
-	Groups      []string `json:"groups,omitempty"`
-	Include     string   `json:"include,omitempty"`
-	Score       int      `json:"score,omitempty"`
+	Name           string                 `json:"name"`
+	Resolutions    []string               `json:"resolutions,omitempty"`
+	Sources        []string               `json:"sources,omitempty"`
+	Codecs         []string               `json:"codecs,omitempty"`
+	Effects        []string               `json:"effects,omitempty"`
+	Groups         []string               `json:"groups,omitempty"`
+	Include        string                 `json:"include,omitempty"`
+	Score          int                    `json:"score,omitempty"`
+	AudioCodecs    []string               `json:"audio_codecs,omitempty"`
+	AudioChannels  []string               `json:"audio_channels,omitempty"`
+	AudioLanguages []string               `json:"audio_languages,omitempty"`
+	Subtitles      []string               `json:"subtitles,omitempty"`
+	Exclude        string                 `json:"exclude,omitempty"`
+	IncludeRegex   string                 `json:"include_regex,omitempty"`
+	ExcludeRegex   string                 `json:"exclude_regex,omitempty"`
+	Condition      *MediaUpgradeCondition `json:"condition,omitempty"`
 }
 
 type MediaUpgradeFacts struct {
-	Original   string   `json:"original"`
-	Resolution string   `json:"resolution,omitempty"`
-	Source     string   `json:"source,omitempty"`
-	Codec      string   `json:"codec,omitempty"`
-	Effects    []string `json:"effects,omitempty"`
-	Group      string   `json:"group,omitempty"`
-	Size       int64    `json:"size"`
-	Part       int      `json:"part,omitempty"`
-	Cut        string   `json:"cut,omitempty"`
+	Original       string   `json:"original"`
+	Resolution     string   `json:"resolution,omitempty"`
+	Source         string   `json:"source,omitempty"`
+	Codec          string   `json:"codec,omitempty"`
+	Effects        []string `json:"effects,omitempty"`
+	Group          string   `json:"group,omitempty"`
+	Size           int64    `json:"size"`
+	Part           int      `json:"part,omitempty"`
+	Cut            string   `json:"cut,omitempty"`
+	AudioCodec     string   `json:"audio_codec,omitempty"`
+	AudioChannels  string   `json:"audio_channels,omitempty"`
+	AudioLanguages []string `json:"audio_languages,omitempty"`
+	Subtitles      []string `json:"subtitles,omitempty"`
 }
 
 type MediaUpgradeRank struct {
@@ -57,7 +72,8 @@ var upgradeCutPattern = regexp.MustCompile(`(?i)(?:^|[ ._\-\[\(])((?:director'?s
 
 func ParseMediaUpgradeFacts(name string, size int64) MediaUpgradeFacts {
 	parsed := medianame.Parse(name)
-	facts := MediaUpgradeFacts{Original: name, Resolution: parsed.Resolution, Source: parsed.Source, Codec: parsed.VideoCodec, Effects: parsed.Effects, Group: parsed.ReleaseGroup, Size: size, Part: parsed.Part}
+	facts := MediaUpgradeFacts{Original: name, Resolution: parsed.Resolution, Source: parsed.Source, Codec: parsed.VideoCodec, Effects: parsed.Effects, Group: parsed.ReleaseGroup, Size: size, Part: parsed.Part, AudioCodec: parsed.AudioCodec, AudioChannels: parsed.AudioChannels}
+	facts.AudioLanguages, facts.Subtitles = parseUpgradeLanguageTags(name)
 	if match := upgradeCutPattern.FindStringSubmatch(name); len(match) > 1 {
 		cut := strings.ToLower(strings.NewReplacer(".", "", "_", "", "-", "", " ", "", "'", "").Replace(match[1]))
 		switch cut {
@@ -119,28 +135,51 @@ func ParseMediaUpgradePolicy(raw string) (MediaUpgradePolicy, error) {
 }
 
 func ValidateMediaUpgradePolicy(policy MediaUpgradePolicy) error {
-	if policy.Enabled && len(policy.Rules) == 0 {
+	if policy.GroupRevision > 0 && policy.GroupID == 0 {
+		return errors.New("规则组快照缺少规则组 ID")
+	}
+	if policy.GroupRevision > 0 && len(policy.Rules) == 0 {
+		return errors.New("规则组快照缺少优先级规则")
+	}
+	if policy.GroupID > 0 && policy.GroupRevision == 0 && (len(policy.Rules) > 0 || len(policy.Bonuses) > 0 || len(policy.Exclude) > 0 || policy.ExcludeCondition != nil || policy.MaxSizeMB != 0 || policy.SameTier || policy.MinScoreGain != 0) {
+		return errors.New("规则组引用不能混用内联规则；请使用规则组或目录独立策略")
+	}
+	if policy.Enabled && len(policy.Rules) == 0 && !(policy.GroupID > 0 && policy.GroupRevision == 0) {
 		return errors.New("开启洗版必须配置至少一个优先级档位")
 	}
-	if len(policy.Name) > 120 || len(policy.Rules) > 50 || len(policy.Bonuses) > 30 || len(policy.Exclude) > 30 || policy.MinScoreGain < 0 || policy.MinScoreGain > 10000 || policy.MaxSizeMB < 0 || policy.MaxSizeMB > 100*1024*1024 {
+	if len([]rune(policy.Name)) > 120 || len(policy.Rules) > 50 || len(policy.Bonuses) > 30 || len(policy.Exclude) > 30 || policy.MinScoreGain < 0 || policy.MinScoreGain > 10000 || policy.MaxSizeMB < 0 || policy.MaxSizeMB > 100*1024*1024 {
 		return errors.New("洗版策略数量或数值超出范围")
+	}
+	if err := validateUpgradeCondition(policy.ExcludeCondition); err != nil {
+		return fmt.Errorf("全局排除条件: %w", err)
+	}
+	if err := validateUpgradeValues(policy.Exclude, 120); err != nil {
+		return fmt.Errorf("全局排除: %w", err)
 	}
 	for _, rule := range append(append([]MediaUpgradeRule{}, policy.Rules...), policy.Bonuses...) {
 		if strings.TrimSpace(rule.Name) == "" || len(rule.Name) > 120 || len(rule.Include) > 200 || rule.Score < -1000 || rule.Score > 1000 {
 			return errors.New("洗版规则需要名称，权重范围为 -1000 到 1000")
 		}
-		if len(rule.Resolutions)+len(rule.Sources)+len(rule.Codecs)+len(rule.Effects)+len(rule.Groups) == 0 && strings.TrimSpace(rule.Include) == "" {
+		if len(rule.Resolutions)+len(rule.Sources)+len(rule.Codecs)+len(rule.Effects)+len(rule.Groups)+len(rule.AudioCodecs)+len(rule.AudioChannels)+len(rule.AudioLanguages)+len(rule.Subtitles) == 0 && strings.TrimSpace(rule.Include) == "" && rule.Exclude == "" && rule.IncludeRegex == "" && rule.ExcludeRegex == "" && rule.Condition == nil {
 			return fmt.Errorf("规则 %s 没有匹配条件", rule.Name)
 		}
-		for _, values := range [][]string{rule.Resolutions, rule.Sources, rule.Codecs, rule.Effects, rule.Groups, policy.Exclude} {
-			if len(values) > 30 {
-				return errors.New("单个匹配条件最多 30 项")
+		for _, values := range [][]string{rule.Resolutions, rule.Sources, rule.Codecs, rule.Effects, rule.Groups, rule.AudioCodecs, rule.AudioChannels, rule.AudioLanguages, rule.Subtitles} {
+			if err := validateUpgradeValues(values, 120); err != nil {
+				return err
 			}
-			for _, value := range values {
-				if strings.TrimSpace(value) == "" || len(value) > 120 {
-					return errors.New("匹配条件不能为空或超过 120 字节")
+		}
+		if len(rule.Exclude) > 200 || len(rule.IncludeRegex) > 200 || len(rule.ExcludeRegex) > 200 {
+			return errors.New("名称包含、排除和正则最多 200 字节")
+		}
+		for _, pattern := range []string{rule.IncludeRegex, rule.ExcludeRegex} {
+			if pattern != "" {
+				if _, err := regexp.Compile(pattern); err != nil {
+					return fmt.Errorf("规则 %s 的正则无效: %w", rule.Name, err)
 				}
 			}
+		}
+		if err := validateUpgradeCondition(rule.Condition); err != nil {
+			return fmt.Errorf("规则 %s: %w", rule.Name, err)
 		}
 	}
 	return nil
@@ -156,6 +195,10 @@ func upgradeContains(values []string, value string) bool {
 }
 
 func upgradeRuleMatches(rule MediaUpgradeRule, facts MediaUpgradeFacts) bool {
+	return upgradeRuleMatchResult(rule, facts) == upgradeMatchTrue
+}
+
+func upgradeLegacyRuleMatches(rule MediaUpgradeRule, facts MediaUpgradeFacts) bool {
 	for _, field := range []struct {
 		choices []string
 		value   string
@@ -177,7 +220,14 @@ func upgradeRuleMatches(rule MediaUpgradeRule, facts MediaUpgradeFacts) bool {
 }
 
 func RankMediaUpgrade(policy MediaUpgradePolicy, facts MediaUpgradeFacts) MediaUpgradeRank {
+	if upgradePolicyNeedsExtendedFacts(policy) {
+		facts = EnrichMediaUpgradeFacts(facts)
+	}
 	rank := MediaUpgradeRank{Reasons: []string{}}
+	if policy.GroupID > 0 && policy.GroupRevision == 0 {
+		rank.Label = "规则组尚未解析，请重新预览"
+		return rank
+	}
 	if policy.MaxSizeMB > 0 && facts.Size <= 0 {
 		rank.Label = "文件大小未知，无法核验大小限制"
 		return rank
@@ -192,8 +242,23 @@ func RankMediaUpgrade(policy MediaUpgradePolicy, facts MediaUpgradeFacts) MediaU
 			return rank
 		}
 	}
+	if policy.ExcludeCondition != nil {
+		switch evaluateUpgradeCondition(policy.ExcludeCondition, facts) {
+		case upgradeMatchTrue:
+			rank.Rejected, rank.Label = true, "命中全局组合排除条件"
+			return rank
+		case upgradeMatchUnknown:
+			rank.Label = "全局排除条件所需标签未知，待确认"
+			return rank
+		}
+	}
 	for i, rule := range policy.Rules {
-		if upgradeRuleMatches(rule, facts) {
+		matched := upgradeRuleMatchResult(rule, facts)
+		if matched == upgradeMatchUnknown {
+			rank.Label = "档位 " + rule.Name + " 所需标签未知，待确认"
+			return rank
+		}
+		if matched == upgradeMatchTrue {
 			rank.Tier, rank.Label = i+1, rule.Name
 			break
 		}
@@ -203,7 +268,12 @@ func RankMediaUpgrade(policy MediaUpgradePolicy, facts MediaUpgradeFacts) MediaU
 		return rank
 	}
 	for _, rule := range policy.Bonuses {
-		if upgradeRuleMatches(rule, facts) {
+		matched := upgradeRuleMatchResult(rule, facts)
+		if matched == upgradeMatchUnknown && policy.SameTier {
+			rank.Tier, rank.Label = 0, "同档偏好 "+rule.Name+" 所需标签未知，待确认"
+			return rank
+		}
+		if matched == upgradeMatchTrue {
 			rank.Score += rule.Score
 			rank.Reasons = append(rank.Reasons, fmt.Sprintf("%s %+d", rule.Name, rule.Score))
 		}

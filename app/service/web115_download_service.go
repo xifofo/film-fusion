@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"film-fusion/app/model"
@@ -14,6 +16,11 @@ import (
 	m115 "github.com/SheltonZhu/115driver/pkg/crypto/m115"
 	driver "github.com/SheltonZhu/115driver/pkg/driver"
 )
+
+// 秒传下载使用普通浏览器 UA。115Browser 标识可能触发 CDN 特殊 Cookie 校验，
+// 即使签发与读取的 UA 一致也会返回 403；登录客户端的 UA 不参与直链读取。
+// 参考 https://github.com/OpenListTeam/OpenList/issues/2502。
+const web115TransferUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 
 func (s *Web115Service) DownloadForP115Transfer(ctx context.Context, accessMode, accessToken string, client *driver.Pan115Client, sourceInfo BalanceSourceFile) (*driver.DownloadInfo, error) {
 	return resolveMatch302DownloadInfo(
@@ -65,6 +72,12 @@ func resolveMatch302DownloadInfo(
 }
 
 func (s *Web115Service) DownloadWithOpenAPIForRange(ctx context.Context, accessToken, pickCode, userAgent string) (*driver.DownloadInfo, error) {
+	return s.downloadWithOpenAPIForRange(ctx, accessToken, pickCode, userAgent, nil)
+}
+
+// downloadWithOpenAPIForRange 按 P0001 的流程直接解析响应；SDK 的 MIME 自动解析
+// 会把 text/plain JSON 或 HTTP 错误误报为 code=0、空 message。
+func (s *Web115Service) downloadWithOpenAPIForRange(ctx context.Context, accessToken, pickCode, userAgent string, expected *BalanceSourceFile) (*driver.DownloadInfo, error) {
 	accessToken = strings.TrimSpace(accessToken)
 	if accessToken == "" {
 		return nil, fmt.Errorf("115 OpenAPI AccessToken 为空")
@@ -76,26 +89,69 @@ func (s *Web115Service) DownloadWithOpenAPIForRange(ctx context.Context, accessT
 
 	// Keep the same UA for URL issuance and the subsequent CDN Range request.
 	if strings.TrimSpace(userAgent) == "" {
-		userAgent = web115BrowserUA
+		userAgent = web115TransferUA
 	}
-	client := s.newOpenAPIClient(accessToken)
-	var downURLResp sdk115.DownURLResp
-	response, err := client.AuthRequest(ctx, sdk115.ApiFsDownURL, http.MethodPost, &downURLResp,
-		sdk115.ReqWithForm(sdk115.Form{"pick_code": pickCode}), sdk115.ReqWithUA(userAgent))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, sdk115.ApiFsDownURL,
+		strings.NewReader(url.Values{"pick_code": {pickCode}}.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	response, err := s.transferHTTPClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("调用 115 OpenAPI DownURL 失败: %w", err)
 	}
-	for _, urlInfo := range downURLResp {
-		rawURL := strings.TrimSpace(urlInfo.URL.URL)
-		if rawURL == "" {
-			continue
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("调用 115 OpenAPI DownURL 失败: HTTP %d", response.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(raw) > 1<<20 {
+		return nil, fmt.Errorf("115 OpenAPI DownURL 响应读取失败或超过 1 MiB")
+	}
+	var result struct {
+		State   json.RawMessage `json:"state"`
+		Code    json.RawMessage `json:"code"`
+		Errno   json.RawMessage `json:"errno"`
+		Message string          `json:"message"`
+		Msg     string          `json:"msg"`
+		Error   string          `json:"error"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("115 OpenAPI DownURL 响应不是有效的下载信息")
+	}
+	if string(result.State) != "true" && string(result.State) != "1" {
+		if string(result.State) != "false" && string(result.State) != "0" {
+			return nil, fmt.Errorf("115 OpenAPI DownURL 响应缺少有效 state")
+		}
+		return nil, fmt.Errorf("115 OpenAPI DownURL 拒绝请求: code=%s errno=%s message=%s",
+			result.Code, result.Errno, firstNonEmptyString(result.Message, result.Msg, result.Error))
+	}
+	var files map[string]struct {
+		driver.DownloadInfo
+		SHA1 string `json:"sha1"`
+	}
+	if err := json.Unmarshal(result.Data, &files); err != nil || len(files) != 1 {
+		return nil, fmt.Errorf("115 OpenAPI DownURL 未返回唯一源文件")
+	}
+	for fileID, urlInfo := range files {
+		rawURL := strings.TrimSpace(urlInfo.Url.Url)
+		parsed, err := url.Parse(rawURL)
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" {
+			return nil, fmt.Errorf("115 OpenAPI DownURL 返回的下载地址无效")
+		}
+		if expected != nil && ((expected.FileID != "" && fileID != expected.FileID) ||
+			int64(urlInfo.FileSize) != expected.Size || (expected.SHA1 != "" && !strings.EqualFold(urlInfo.SHA1, expected.SHA1)) ||
+			(urlInfo.PickCode != "" && urlInfo.PickCode != pickCode)) {
+			return nil, fmt.Errorf("115 OpenAPI DownURL 源文件 ID、大小、SHA1 或 pickcode 不匹配")
 		}
 		headers := http.Header{}
 		headers.Set("User-Agent", userAgent)
-		if response != nil {
-			if cookie := web115CookieHeaderFromSetCookie(response.Header().Values("Set-Cookie")); cookie != "" {
-				headers.Set("Cookie", cookie)
-			}
+		if cookie := web115CookieHeaderFromSetCookie(response.Header.Values("Set-Cookie")); cookie != "" {
+			headers.Set("Cookie", cookie)
 		}
 		return &driver.DownloadInfo{
 			FileName: urlInfo.FileName,
@@ -130,7 +186,8 @@ func (s *Web115Service) DownloadWithWebAPIForRange(client *driver.Pan115Client, 
 
 	resp, err := client.NewRequest().
 		SetQueryParam("pickcode", pickCode).
-		SetHeaderVerbatim("User-Agent", "").
+		SetHeader("User-Agent", web115TransferUA).
+		ForceContentType("application/json").
 		SetResult(&result).
 		Get("https://webapi.115.com/files/download")
 	if err != nil {
@@ -146,7 +203,8 @@ func (s *Web115Service) DownloadWithWebAPIForRange(client *driver.Pan115Client, 
 	}
 
 	headers := http.Header{}
-	headers.Set("User-Agent", "")
+	// 明确覆盖登录客户端的 115Browser UA，并在 CDN 请求中使用同一个 UA。
+	headers.Set("User-Agent", web115TransferUA)
 	if resp != nil {
 		if cookie := web115CookieHeaderFromSetCookie(resp.Header().Values("Set-Cookie")); cookie != "" {
 			headers.Set("Cookie", cookie)
@@ -178,7 +236,7 @@ func (s *Web115Service) DownloadWithAndroidAPIForRange(client *driver.Pan115Clie
 		SetQueryParam("t", driver.Now().String()).
 		SetFormData(map[string]string{"data": m115.Encode(params, key)}).
 		ForceContentType("application/json").
-		SetHeaderVerbatim("User-Agent", "").
+		SetHeader("User-Agent", web115TransferUA).
 		SetResult(&result)
 	resp, err := req.Post(driver.AndroidApiDownloadGetUrl)
 	if err != nil {
@@ -213,15 +271,11 @@ func (s *Web115Service) DownloadWithAndroidAPIForRange(client *driver.Pan115Clie
 		PickCode: pickCode,
 		Header:   http.Header{},
 	}
-	info.Header.Set("User-Agent", "")
-	if resp != nil && resp.Request != nil {
-		for key, values := range resp.Request.Header {
-			if strings.EqualFold(key, "User-Agent") {
-				continue
-			}
-			for _, value := range values {
-				info.Header.Add(key, value)
-			}
+	info.Header.Set("User-Agent", web115TransferUA)
+	// CDN 只接收本次签发的下载 Cookie，不能复制账号 Cookie、Origin 等 API 请求头。
+	if resp != nil {
+		if cookie := web115CookieHeaderFromSetCookie(resp.Header().Values("Set-Cookie")); cookie != "" {
+			info.Header.Set("Cookie", cookie)
 		}
 	}
 	return info, nil

@@ -12,6 +12,7 @@
 - 🖼️ **登录页定制** - 支持上传并持久化登录页背景、配置品牌及备案信息
 - 🔐 **JWT 认证** - 安全的用户认证系统
 - 🔄 **Webhook 支持** - 支持 CloudDrive2 和 MoviePilot2 的 Webhook 通知
+- 🐟 **[PlutoFish 通知](docs/plutofish-notifications.md)** - 主动补收与 SSE 订阅转存结果，持久化恢复及本地 STRM 处理，无需公网回调
 
 ## 🚀 快速部署
 
