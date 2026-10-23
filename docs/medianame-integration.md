@@ -1,8 +1,14 @@
 # medianame 并行引擎接入
 
+## 2026-10-23 片名与完结范围更新
+
+当前依赖为 `github.com/xifofo/medianame v0.1.3`，通过 Go Module 获取正式版本，无本机 `replace`。识别响应、默认配置和新整理计划中的包版本同步为 `v0.1.3`。
+
+新版支持将独立的中文、英文片名拆成分别可查询的名称，例如 `凡人修仙传.The.Immortal.Ascension.2020.S01E05.mkv`；支持 `01-26Fin`、`01-26 End`、`01-26完结` 等完结范围，在没有明确集号时补充第 1–26 集。已有分类、命名模板和默认引擎配置继续保留，已有整理计划仍使用其保存的路径；要采用新版解析结果需重新预览。
+
 ## 2026-10-10 命名字段更新
 
-当前依赖升级为 `github.com/xifofo/medianame v0.1.2`。`edition`、`effect`、`audioCodec`、`resource_term` 由包直接生成点号分隔的命名文本，Dolby Vision 在命名时缩写为 DV。独立的 HDR、HDR10、HDR10+ 标签保留，不根据 DV 推断或补充 HDR。Atmos 保留在 `effect` / `edition`，音轨不再重复附加。原始解析数据仍使用标准名称。
+该次依赖升级为 `github.com/xifofo/medianame v0.1.2`。`edition`、`effect`、`audioCodec`、`resource_term` 由包直接生成点号分隔的命名文本，Dolby Vision 在命名时缩写为 DV。独立的 HDR、HDR10、HDR10+ 标签保留，不根据 DV 推断或补充 HDR。Atmos 保留在 `effect` / `edition`，音轨不再重复附加。原始解析数据仍使用标准名称。
 
 例如 `Kingdom.of.Heaven.2005.2160p.Directors.Cut.Roadshow.Version.UHD.BluRay.REMUX.HEVC.DV.HDR.TrueHD.Atmos.7.1-HDHIVE.mkv` 的默认命名为 `Kingdom of Heaven.2005.REMUX.DV.HDR.Atmos.2160p.H.265.TrueHD.7.1-HDHIVE.mkv`。
 
