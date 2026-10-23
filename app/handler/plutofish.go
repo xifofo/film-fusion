@@ -24,6 +24,29 @@ func (h *PlutoFishHandler) Config(c *gin.Context) {
 	data, err := h.service.Config(c.Request.Context())
 	h.respond(c, data, err)
 }
+
+// Accounts 代理只读发现；密钥只能放在请求体，不回传客户端或写入查询参数。
+func (h *PlutoFishHandler) Accounts(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8<<10)
+	var input struct {
+		BaseURL string `json:"baseURL"`
+		APIKey  string `json:"apiKey"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(400, ApiResponse{Code: 400, Message: "接收网盘查询参数无效"})
+		return
+	}
+	uid, ok := c.Get("user_id")
+	userID, valid := uid.(uint)
+	if !ok || !valid || userID == 0 {
+		c.JSON(401, ApiResponse{Code: 401, Message: "请先登录"})
+		return
+	}
+	data, err := h.service.Accounts(c.Request.Context(), input.BaseURL, input.APIKey, userID)
+	h.respond(c, data, err)
+}
+
 func (h *PlutoFishHandler) Save(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	var cfg service.PlutoFishConfig

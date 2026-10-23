@@ -41,6 +41,13 @@ func main() {
 		return true
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/events/accounts", func(w http.ResponseWriter, r *http.Request) {
+		if !auth(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"ownerUID":"mock-user","items":[{"id":"mock-account","name":"模拟接收网盘","provider":"115","enabled":true}],"nextAfter":"mock-account","hasMore":false}`)
+	})
 	mux.HandleFunc("GET /api/v1/events", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(w, r) {
 			return

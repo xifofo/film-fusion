@@ -135,6 +135,7 @@ func (s *Server) setupRoutes() {
 		{
 			plutoFish.GET("/config", plutoFishHandler.Config)
 			plutoFish.PUT("/config", plutoFishHandler.Save)
+			plutoFish.POST("/accounts/query", plutoFishHandler.Accounts)
 			plutoFish.GET("/status", plutoFishHandler.Status)
 			plutoFish.GET("/events", plutoFishHandler.Events)
 			plutoFish.POST("/events/:id/retry", plutoFishHandler.Retry)

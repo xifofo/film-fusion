@@ -1,14 +1,14 @@
 # PlutoFish 转存结果通知
 
-FilmFusion 后端主动用 HTTP 补收 + SSE 订阅通知，不需要 NAS 公网入口、Webhook 或端口映射。也支持显式 HTTP 轮询。通知请求仅访问配置服务的 `/api/v1/events` 和 `/api/v1/events/stream`，使用独立的 `events:read` Bearer API Key。
+FilmFusion 后端主动用 HTTP 补收 + SSE 订阅通知，不需要 NAS 公网入口、Webhook 或端口映射。也支持显式 HTTP 轮询。通知与网盘发现请求仅访问配置服务的 `/api/v1/events`、`/api/v1/events/stream` 和 `/api/v1/events/accounts`，使用独立的 `events:read` Bearer API Key。
 
 ## 配置与运行
 
 1. 在 PlutoFish「我的 → 通知接入」创建 API Key。在 FilmFusion 管理页 **PlutoFish 通知** 本地填写；不要把真实密钥写入示例或提交到 Git。
 2. 服务地址默认 `https://plutofish.shop`，填写服务根地址，不要粘贴完整 `/api/v1/events` 地址。生产只接受 HTTPS，HTTP 仅允许 loopback 模拟服务器。
-3. 填写密钥所属的 **PlutoFish 平台 UID**。协议没有提供独立的鉴权身份接口，客户端不能从不透明游标中拆出 UID，因此此项由管理员确认。更换用户必须修改 UID 并填写该用户的新密钥；旧服务/用户进度保留。相同 UID 更换密钥沿用原游标，若服务返回 422 会停止并保留进度，不会自动清空。
+3. 点击 **获取接收网盘**：后端使用 API Key 获取本人网盘列表，并自动识别所属平台 UID，无需手填用户或网盘 ID。已保存配置会自动读取列表；更新密钥或服务地址后需重新获取。更换服务或用户会清空当前表单的网盘映射，旧服务/用户的消费进度仍保留；相同 UID 换钥匙沿用原游标。
 4. 默认 SSE；不适合长连接的环境选 HTTP 轮询，间隔至少 10 秒并有随机抖动。启用并保存后立即开始消费；服务启动时恢复已启用的配置。**停止**取消当前运行；要跨重启停用，请关闭启用开关并保存。
-5. 可选：将事件中的 `targetAccountId` 显式映射到本地已有的「云路径映射」。映射需要属于当前 FilmFusion 管理员，并指向正确的实际接收账号与路径。不同系统的账号 ID 不会自动猜测对应关系。
+5. 可选：在 **PlutoFish 接收网盘** 下拉框按名称选择，再选择对应的本地「云路径映射」。客户端自动保存 `targetAccountId`，不需要从通知中复制。停用网盘不能新选；原映射的网盘被移除时会提示重新选择。云路径仍需对应同一个实际接收账号与路径，不能仅靠同名猜测。
 
 配置复用现有 `system_configs` SQLite 运行配置机制，私有键为 `plutofish.settings`。API Key 仅写入本机数据库，GET 配置只返回 `keyConfigured`，空密钥表示保留原值；不保存到浏览器 localStorage。日志不含请求头、密钥或远端错误响应正文。请像现有网盘/Emby 凭据一样限制 `data/film-fusion.db` 及备份的读取权限。该版本没有额外的静态加密密钥服务。
 
@@ -18,11 +18,11 @@ FilmFusion 后端主动用 HTTP 补收 + SSE 订阅通知，不需要 NAS 公网
 {
   "enabled": false,
   "baseURL": "https://plutofish.shop",
-  "ownerUID": "填写密钥所属平台UID",
+  "ownerUID": "由网盘列表接口自动返回",
   "mode": "sse",
   "pollSeconds": 15,
   "apiKey": "仅在本机填写",
-  "mappings": [{"targetAccountID": "本人接收网盘ID", "cloudPathID": 1}]
+  "mappings": [{"targetAccountID": "下拉选择自动保存的网盘ID", "cloudPathID": 1}]
 }
 ```
 
@@ -60,7 +60,7 @@ go test -race ./app/service ./app/handler -run PlutoFish
 go run ./tools/plutofish-mock
 ```
 
-模拟服务只监听 `127.0.0.1:18765`。页面填服务地址 `http://127.0.0.1:18765`、UID `mock-user`、假密钥 `local-mock-key`。它会发送多页、空页进度、先失败后成功、缺定位的成功、unknown、SSE 分块重复投递与心跳；成功事件应留待处理，不生成假 STRM。
+模拟服务只监听 `127.0.0.1:18765`。页面填服务地址 `http://127.0.0.1:18765`、假密钥 `local-mock-key`，点击获取接收网盘即可看到「模拟接收网盘」，所属 UID 自动识别为 `mock-user`。它会发送多页、空页进度、先失败后成功、缺定位的成功、unknown、SSE 分块重复投递与心跳；成功事件应留待处理，不生成假 STRM。
 
 专用限时诊断仅读取通知，不启动 FilmFusion 的其他后台业务，不生成 STRM、不操作网盘。诊断进度只在内存，不作为生产消费进度；输出仅聚合计数和脱敏连接状态：
 
@@ -75,6 +75,8 @@ read -rs 'pf_test_key?PlutoFish API Key: '
 printf '%s' "$pf_test_key" | go run ./tools/plutofish-probe -base-url https://plutofish.shop -duration 20s
 unset pf_test_key
 ```
+
+网盘发现使用 `POST /api/plutofish/accounts/query`，请求体为 `{ "baseURL": "服务根地址", "apiKey": "新密钥或省略以使用已保存密钥" }`；返回 `ownerUID` 和安全网盘摘要。请求不保存密钥、不启动消费，只查 PlutoFish 本地记录；不读取 115。已保存密钥只用于原服务地址和原本地管理员，禁止跟随重定向；失败不返回部分列表。PlutoFish 返回 404 时明确提示升级服务端。
 
 管理 API 均在已有后台管理员认证内，路径 `/api/plutofish/{config,status,events,start,stop}` 与 `/api/plutofish/events/:id/retry`。配置和状态 GET；配置 PUT；启动、停止、重处理 POST。该配置模块不授予已有外部 API Token scope，使用后台登录 JWT。
 
