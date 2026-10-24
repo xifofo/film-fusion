@@ -24,7 +24,7 @@ func openPlutoFishTestDB(t *testing.T, path string) *gorm.DB {
 	pool, _ := db.DB()
 	pool.SetMaxOpenConns(1)
 	t.Cleanup(func() { pool.Close() })
-	if err := db.AutoMigrate(&model.PlutoFishEvent{}, &model.PlutoFishCursor{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.SystemConfig{}, &model.CloudStorage{}, &model.CloudPath{}); err != nil {
+	if err := db.AutoMigrate(&model.PlutoFishEvent{}, &model.PlutoFishCursor{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.PlutoFishSTRMRepair{}, &model.SystemConfig{}, &model.CloudStorage{}, &model.CloudPath{}); err != nil {
 		t.Fatal(err)
 	}
 	return db

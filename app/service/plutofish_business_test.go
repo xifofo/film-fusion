@@ -42,9 +42,11 @@ func TestPlutoFishBusinessCreatesRealMappedSTRMAndReplaysAfterRestart(t *testing
 		t.Run(map[bool]string{false: "MP2", true: "CD2"}[cd2], func(t *testing.T) {
 			b, mapping, event := plutoFishBusinessFixture(t)
 			mount := ""
+			localDir := filepath.Join(mapping.LocalPath, "Movies", "Title")
 			if cd2 {
 				mapping.SourceType, mapping.SourcePath = model.SourceTypeCloudDrive2, "/115挂载/Movies"
 				mount = "/115%E6%8C%82%E8%BD%BD"
+				localDir = filepath.Join(mapping.LocalPath, "115挂载", "Movies", "Title")
 				if err := b.db.Save(&mapping).Error; err != nil {
 					t.Fatal(err)
 				}
@@ -58,7 +60,7 @@ func TestPlutoFishBusinessCreatesRealMappedSTRMAndReplaysAfterRestart(t *testing
 			if err != nil || string(data) != want {
 				t.Fatalf("content=%q want=%q err=%v", data, want, err)
 			}
-			if filepath.Base(first.LocalPath) != "影片 #1.strm" || !strings.HasPrefix(first.LocalPath, filepath.Join(mapping.LocalPath, "PlutoFish")+string(filepath.Separator)) {
+			if first.LocalPath != filepath.Join(localDir, "影片 #1.strm") {
 				t.Fatalf("unexpected path %q", first.LocalPath)
 			}
 			// An independent adapter instance models process restart before inbox commit.
@@ -66,7 +68,7 @@ func TestPlutoFishBusinessCreatesRealMappedSTRMAndReplaysAfterRestart(t *testing
 			if err != nil || first != second {
 				t.Fatalf("replay=%+v err=%v", second, err)
 			}
-			if entries, err := os.ReadDir(filepath.Dir(first.LocalPath)); err != nil || len(entries) != 2 {
+			if entries, err := os.ReadDir(filepath.Dir(first.LocalPath)); err != nil || len(entries) != 1 || entries[0].Name() != "影片 #1.strm" {
 				t.Fatalf("unexpected outputs %v %v", entries, err)
 			}
 		})
@@ -205,8 +207,12 @@ func TestPlutoFishBusinessIdempotencyNamespaceAndConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	other, err := b.Handle(context.Background(), "service|owner-2", event)
-	if err != nil || other.LocalPath == first.LocalPath {
-		t.Fatalf("scope isolation lost: %+v %v", other, err)
+	if err != nil || other.LocalPath != first.LocalPath {
+		t.Fatalf("same mapping must reuse the same file: %+v %v", other, err)
+	}
+	var plans int64
+	if err := b.db.Model(&model.PlutoFishBusinessPlan{}).Count(&plans).Error; err != nil || plans != 2 {
+		t.Fatalf("scope isolation lost in database plans: count=%d err=%v", plans, err)
 	}
 	changed := event
 	changed.FileName = "changed.mkv"

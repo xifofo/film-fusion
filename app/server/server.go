@@ -41,6 +41,7 @@ type Server struct {
 	embyClient              *embyhelper.EmbyClient
 	organizeLogCleaner      *service.OrganizeLogCleaner
 	organizePreviewQueue    *service.OrganizePreviewQueue
+	cloudBrowserService     *service.CloudBrowserService
 	embyProxyServer         *EmbyProxyServer
 	embyLoginProtection     *service.EmbyLoginProtection
 	appLoginProtection      *service.EmbyLoginProtection
@@ -242,6 +243,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 	if s.organizePreviewQueue != nil {
 		s.organizePreviewQueue.Stop()
+	}
+	if s.cloudBrowserService != nil {
+		s.cloudBrowserService.Stop()
 	}
 	if s.embyAccountService != nil {
 		s.embyAccountService.Stop()

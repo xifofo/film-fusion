@@ -34,14 +34,15 @@ type plutoFishSavedConfig struct {
 }
 
 type PlutoFishService struct {
-	db        *gorm.DB
-	opMu      sync.Mutex // serializes save/start/stop, including waiting for old loops
-	mu        sync.Mutex
-	client    *plutofish.Client
-	cancel    context.CancelFunc
-	done      chan struct{}
-	state     string
-	lastError string
+	db         *gorm.DB
+	opMu       sync.Mutex // serializes save/start/stop, including waiting for old loops
+	businessMu sync.Mutex // 本地消费与历史修复互斥；修复按 opMu -> businessMu 加锁
+	mu         sync.Mutex
+	client     *plutofish.Client
+	cancel     context.CancelFunc
+	done       chan struct{}
+	state      string
+	lastError  string
 }
 
 func NewPlutoFishService(db *gorm.DB) *PlutoFishService {
@@ -225,7 +226,9 @@ func (s *PlutoFishService) startLocked() error {
 
 func (s *PlutoFishService) work(ctx context.Context, store *PlutoFishStore, business *PlutoFishBusiness) {
 	for ctx.Err() == nil {
+		s.businessMu.Lock()
 		processed, err := store.processOne(ctx, business.Handle)
+		s.businessMu.Unlock()
 		if err != nil && ctx.Err() == nil {
 			s.mu.Lock()
 			s.lastError = "本地业务提交失败；待处理任务已保留"

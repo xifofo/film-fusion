@@ -1,9 +1,9 @@
+// PlutoFish 成功通知按已有云路径映射生成本地 STRM，处理计划与去重信息仅存数据库。
 package service
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -53,12 +53,10 @@ func NewPlutoFishBusiness(db *gorm.DB, options PlutoFishBusinessOptions) *PlutoF
 	return &PlutoFishBusiness{db: db, options: options}
 }
 
-// Handle returns an error whenever the durable inbox must remain pending.
-// Success proves a local file is durable, not playback or an Emby refresh.
-// scope must include the normalized service address and the owner.
-func (b *PlutoFishBusiness) Handle(ctx context.Context, scope string, event plutofish.Event) (PlutoFishBusinessResult, error) {
-	result := PlutoFishBusinessResult{}
-	fail := func(message string) (PlutoFishBusinessResult, error) { return result, errors.New(message) }
+// plan 只读取本地配置，供正常生成和历史修复共用路径校验与内容规则。
+func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutofish.Event) (model.PlutoFishBusinessPlan, error) {
+	result := model.PlutoFishBusinessPlan{}
+	fail := func(message string) (model.PlutoFishBusinessPlan, error) { return result, errors.New(message) }
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -135,6 +133,14 @@ func (b *PlutoFishBusiness) Handle(ctx context.Context, scope string, event plut
 		return fail("云路径未配置有效的本地绝对路径")
 	}
 	rootPath = filepath.Clean(rootPath)
+	// 本地目录与普通 STRM 使用同一份映射路径；URI 编码只影响播放内容。
+	// SafeRelativePath 保留 CD2 挂载名和云盘目录层级，并限制写入在本地根目录内。
+	relative, err := pathhelper.SafeRelativePath(eventPath)
+	if err != nil {
+		return fail("目标文件无法安全映射到本地 STRM 路径")
+	}
+	relative = strings.TrimSuffix(relative, filepath.Ext(relative)) + ".strm"
+
 	prefix := strings.TrimSpace(mapping.ContentPrefix)
 	if !plutoFishContentPrefix(prefix) {
 		return fail("云路径未配置有效的播放内容前缀；请使用已有的绝对路径或 HTTP(S) 地址")
@@ -154,33 +160,29 @@ func (b *PlutoFishBusiness) Handle(ctx context.Context, scope string, event plut
 	if !plutoFishText(content) {
 		return fail("生成的 STRM 内容无效，已保留待处理")
 	}
-	name := strings.TrimSuffix(event.FileName, filepath.Ext(event.FileName)) + ".strm"
-	relativeDir := filepath.Join("PlutoFish", plutoFishDigest(scope), plutoFishDigest(event.TransferID))
-	relative := filepath.Join(relativeDir, name)
-	result.LocalPath = filepath.Join(rootPath, relative)
-	// Pin a validated plan independently of the current mapping before touching
-	// disk. Without this, a changed LocalPath between a crash and receipt commit
-	// could generate a second file outside the original manifest's directory.
-	plan := model.PlutoFishBusinessPlan{Scope: scope, TransferID: event.TransferID, RootPath: rootPath, RelativePath: relative, Content: content}
+
+	return model.PlutoFishBusinessPlan{Scope: scope, TransferID: event.TransferID, RootPath: rootPath, RelativePath: relative, Content: content}, nil
+}
+
+// Handle 按持久化计划生成本地文件；成功不代表网盘播放或 Emby 刷新成功。
+func (b *PlutoFishBusiness) Handle(ctx context.Context, scope string, event plutofish.Event) (PlutoFishBusinessResult, error) {
+	plan, err := b.plan(ctx, scope, event)
+	result := PlutoFishBusinessResult{LocalPath: filepath.Join(plan.RootPath, plan.RelativePath)}
+	if err != nil {
+		return PlutoFishBusinessResult{}, err
+	}
+	fail := func(message string) (PlutoFishBusinessResult, error) { return result, errors.New(message) }
+
+	// 写文件前在数据库固定路径与内容，崩溃恢复时仍校验原计划；
+	// 不再创建哈希任务目录或 .transfer.json，也不能因映射变化生成第二份文件。
 	if err := b.claimPlan(ctx, plan); err != nil {
 		if errors.Is(err, errPlutoFishPlanConflict) {
-			return fail("此转存任务已绑定不同的本地输出路径或内容；已保留原计划，请恢复原映射后重试或人工核对")
+			return fail("此转存任务已绑定不同的本地输出路径或内容；已保留原计划，请核对历史文件和映射配置后再处理")
 		}
 		return fail("无法可靠保存本地 STRM 处理计划，未写入文件，请稍后重试")
 	}
-	// A stable manifest prevents a changed filename after a crash from creating
-	// another output for the same transfer before inbox deduplication commits.
-	manifest, _ := json.Marshal(struct {
-		FileName string `json:"fileName"`
-		Content  string `json:"content"`
-	}{name, content})
-	if err := plutoFishWriteOnce(ctx, rootPath, filepath.Join(relativeDir, ".transfer.json"), string(manifest)); err != nil {
-		if errors.Is(err, errPlutoFishSTRMConflict) {
-			return fail("此转存任务已有不同的本地 STRM 记录，已保留原文件并暂停处理")
-		}
-		return fail("无法可靠写入本地 STRM 任务记录，请检查目录权限后重试")
-	}
-	if err := plutoFishWriteOnce(ctx, rootPath, relative, content); err != nil {
+
+	if err := plutoFishWriteOnce(ctx, plan.RootPath, plan.RelativePath, plan.Content); err != nil {
 		if errors.Is(err, errPlutoFishSTRMConflict) {
 			return fail("本地 STRM 已存在且内容不同，已保留原文件")
 		}
@@ -206,11 +208,6 @@ func (b *PlutoFishBusiness) claimPlan(ctx context.Context, plan model.PlutoFishB
 		}
 		return nil
 	})
-}
-
-func plutoFishDigest(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:])
 }
 
 func plutoFishText(value string) bool {

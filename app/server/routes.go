@@ -50,6 +50,8 @@ func (s *Server) setupRoutes() {
 	cloudPathHandler := handler.NewCloudPathHandler()
 	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService, s.moviePilotService)
 	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
+	s.cloudBrowserService = service.NewCloudBrowserService(database.GetDB(), service.NewWeb115Service(s.Logger))
+	cloudBrowserHandler := handler.NewCloudBrowserHandler(s.cloudBrowserService)
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
 	auth115Handler := handler.NewAuth115Handler(s.Config, s.Logger)
 	webhookHandler := handler.NewWebhookHandler(s.Logger, s.Config, s.download115Service, s.embySortNameService, embyWatchService)
@@ -139,6 +141,8 @@ func (s *Server) setupRoutes() {
 			plutoFish.GET("/status", plutoFishHandler.Status)
 			plutoFish.GET("/events", plutoFishHandler.Events)
 			plutoFish.POST("/events/:id/retry", plutoFishHandler.Retry)
+			plutoFish.POST("/strm-repairs/preview", plutoFishHandler.PreviewSTRMRepairs)
+			plutoFish.POST("/strm-repairs/apply", plutoFishHandler.RepairSTRMs)
 			plutoFish.POST("/start", plutoFishHandler.Start)
 			plutoFish.POST("/stop", plutoFishHandler.Stop)
 		}
@@ -285,6 +289,11 @@ func (s *Server) setupRoutes() {
 			directories.GET("/:id", cloudDirectoryHandler.GetCloudDirectory)
 			directories.PUT("/:id", cloudDirectoryHandler.UpdateCloudDirectory)
 			directories.DELETE("/:id", cloudDirectoryHandler.DeleteCloudDirectory)
+			directories.GET("/:id/browser", cloudBrowserHandler.Browse)
+			directories.POST("/:id/browser/strm", cloudBrowserHandler.GenerateSTRM)
+			directories.GET("/:id/browser/jobs", cloudBrowserHandler.ActiveJob)
+			directories.GET("/:id/browser/jobs/:job_id", cloudBrowserHandler.JobStatus)
+			directories.DELETE("/:id/browser/jobs/:job_id", cloudBrowserHandler.CancelJob)
 		}
 
 		// 115 Cookie 相关接口

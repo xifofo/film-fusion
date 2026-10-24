@@ -51,3 +51,21 @@ type PlutoFishBusinessPlan struct {
 	Content      string `gorm:"type:text"`
 	CreatedAt    time.Time
 }
+
+// PlutoFishSTRMRepair 固定一次历史迁移的两端，供写入、记账和清理中断后续办。
+// 不保存凭据；snapshot 仅用于确认用户执行的是已预览的同一份计划。
+type PlutoFishSTRMRepair struct {
+	Scope       string `gorm:"primaryKey;size:64"`
+	TransferID  string `gorm:"primaryKey"`
+	EventID     uint
+	Snapshot    string
+	OldRoot     string
+	OldRelative string
+	OldContent  string `gorm:"type:text"`
+	NewRoot     string
+	NewRelative string
+	NewContent  string `gorm:"type:text"`
+	State       string // prepared -> cleanup -> completed
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}

@@ -42,6 +42,7 @@ func AutoMigrate() error {
 		&model.PlutoFishEvent{},
 		&model.PlutoFishReceipt{},
 		&model.PlutoFishBusinessPlan{},
+		&model.PlutoFishSTRMRepair{},
 		&model.SystemConfig{},
 		&model.User{},
 		&model.APIToken{},
