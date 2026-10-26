@@ -363,6 +363,7 @@ func (s *Server) setupRoutes() {
 			organize.POST("/upgrade/jobs/:id/retry", organizeHandler.RetryUpgradeJob)
 			organize.POST("/upgrade/jobs/:id/refresh", organizeHandler.RefreshUpgradeLibrary)
 			organize.GET("/category-config", organizeHandler.GetCategoryConfig)
+			organize.POST("/medianame-candidate", organizeHandler.SelectMedianameCandidate)
 			organize.POST("/media-search", organizeHandler.SearchMedia)
 			organize.POST("/media-local-status", organizeHandler.CheckMediaLocalStatus)
 			previewTasks := organize.Group("/preview-tasks")

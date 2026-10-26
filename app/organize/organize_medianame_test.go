@@ -30,6 +30,7 @@ type planTestEnv struct {
 	req              Organize115CookieRequest
 	db               *gorm.DB
 	sourceName       string
+	additionalFiles  []map[string]any
 	calls, mutations int
 	tmdbFail         bool
 	mutationsBody    []string
@@ -113,7 +114,8 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 		body := ""
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/files":
-			data := map[string]any{"state": true, "count": 1, "data": []any{map[string]any{"fid": "101", "cid": "100", "n": e.sourceName, "ico": "mkv", "s": "1000", "pc": "pick-101"}}}
+			files := append([]map[string]any{{"fid": "101", "cid": "100", "n": e.sourceName, "ico": "mkv", "s": "1000", "pc": "pick-101"}}, e.additionalFiles...)
+			data := map[string]any{"state": true, "count": len(files), "data": files}
 			encoded, _ := json.Marshal(data)
 			body = string(encoded)
 		case r.Method == http.MethodGet && r.URL.Path == "/files/getid":

@@ -109,14 +109,19 @@ func (s *PlutoFishService) Save(ctx context.Context, cfg PlutoFishConfig, userID
 		return errors.New("请在本地填写 PlutoFish 通知 API Key")
 	}
 	if len(cfg.Mappings) > 100 {
-		return errors.New("最多配置 100 个接收账号映射")
+		return errors.New("最多配置 100 条接收网盘与云路径映射")
 	}
-	seen := map[string]bool{}
-	for _, mapping := range cfg.Mappings {
-		if strings.TrimSpace(mapping.TargetAccountID) == "" || seen[mapping.TargetAccountID] || mapping.CloudPathID == 0 {
-			return errors.New("接收账号映射不能为空或重复")
+	seen := map[PlutoFishAccountMapping]bool{}
+	for i := range cfg.Mappings {
+		mapping := &cfg.Mappings[i]
+		mapping.TargetAccountID = strings.TrimSpace(mapping.TargetAccountID)
+		if mapping.TargetAccountID == "" || mapping.CloudPathID == 0 {
+			return errors.New("接收网盘和云路径不能为空")
 		}
-		seen[mapping.TargetAccountID] = true
+		if seen[*mapping] {
+			return errors.New("同一接收网盘不能重复绑定同一云路径")
+		}
+		seen[*mapping] = true
 		var count int64
 		if err := s.db.WithContext(ctx).Model(&model.CloudPath{}).Where("id = ? AND user_id = ?", mapping.CloudPathID, userID).Count(&count).Error; err != nil {
 			return errors.New("无法校验云路径映射")

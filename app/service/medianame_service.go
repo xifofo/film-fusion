@@ -270,6 +270,15 @@ func (s *MediaRecognitionService) RecognizeMedianame(ctx context.Context, input 
 	if err != nil {
 		return fail(err)
 	}
+	return s.classifyMedianame(out)
+}
+
+func (s *MediaRecognitionService) classifyMedianame(out MedianameRecognition) MedianameRecognition {
+	fail := func(err error) MedianameRecognition {
+		out.Error = err.Error()
+		out.Result.Status = mtmdb.StatusRequestError
+		return out
+	}
 	cfg, err := s.LoadMedianameConfig()
 	if err != nil {
 		return fail(err)
@@ -279,6 +288,7 @@ func (s *MediaRecognitionService) RecognizeMedianame(ctx context.Context, input 
 		return fail(err)
 	}
 	// Reclassify cached details against this task's policy without invalidating TMDB response caches.
+	result := out.Result
 	for _, candidate := range result.Candidates {
 		if candidate.MediaInfo != nil {
 			name, e := candidate.MediaInfo.Classify(policy)
@@ -490,6 +500,14 @@ func (s *MoviePilotService) MedianameTarget(ctx context.Context, r MedianameReco
 		return "", nil, errors.New("medianame 服务未初始化")
 	}
 	return s.local.MedianameTarget(ctx, r, root, classify, override)
+}
+
+func (s *MoviePilotService) ClassifyMedianame(r MedianameRecognition) MedianameRecognition {
+	if s == nil || s.local == nil || r.Result == nil {
+		r.Error = "medianame 服务或识别结果不可用"
+		return r
+	}
+	return s.local.classifyMedianame(r)
 }
 
 func MedianameMoviePilotInfo(r MedianameRecognition) (MoviePilotMediaInfo, error) {

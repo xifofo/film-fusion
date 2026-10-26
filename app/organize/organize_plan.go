@@ -29,6 +29,17 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 	if !req.DryRun {
 		return Organize115CookieResult{}, errors.New("缺少已确认的整理计划；历史预览不兼容，请重新预览")
 	}
+	if req.CandidatePlanID != "" && req.medianameOverrides == nil {
+		_, previous, err := h.loadMedianameCandidatePlan(userID, req.CandidatePlanID)
+		if err != nil {
+			return Organize115CookieResult{}, err
+		}
+		if previous.CloudDirectoryID != req.CloudDirectoryID {
+			return Organize115CookieResult{}, errors.New("候选计划与当前目录不一致")
+		}
+		req.medianameOverrides = manualMedianameOverrides(previous)
+		req.medianameSnapshot = previous.Pipeline
+	}
 	// Capture destination conditions before any remote reads; changes during preview invalidate it.
 	var dir model.CloudDirectory
 	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).First(&dir).Error; err != nil {
@@ -40,6 +51,9 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 	frozen, snapshot, err := h.moviePilotSvc.FreezeMediaPipeline(req.RecognitionSource)
 	if err != nil {
 		return Organize115CookieResult{}, err
+	}
+	if len(req.medianameOverrides) > 0 && req.medianameSnapshot != nil && (req.medianameSnapshot.PackageVersion != snapshot.PackageVersion || planJSON(req.medianameSnapshot.Words) != planJSON(snapshot.Words)) {
+		return Organize115CookieResult{}, errors.New("识别词或 Medianame 版本已变化，请重新预览并选择候选")
 	}
 	worker := *h
 	worker.moviePilotSvc = frozen

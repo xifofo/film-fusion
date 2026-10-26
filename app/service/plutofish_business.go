@@ -69,29 +69,6 @@ func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutof
 	if event.Provider != "115" {
 		return fail("现有 STRM 业务仅支持显式映射的 115 网盘通知")
 	}
-	var mappingID uint
-	for _, mapping := range b.options.Mappings {
-		if mapping.TargetAccountID != "" && mapping.TargetAccountID == event.TargetAccountID {
-			if mappingID != 0 || mapping.CloudPathID == 0 {
-				return fail("接收网盘映射重复或无效，请保留唯一的云路径映射")
-			}
-			mappingID = mapping.CloudPathID
-		}
-	}
-	if mappingID == 0 {
-		return fail("接收网盘尚未绑定 FilmFusion 云路径映射")
-	}
-	var mapping model.CloudPath
-	if err := b.db.WithContext(ctx).Where("id = ? AND user_id = ?", mappingID, b.options.UserID).First(&mapping).Error; err != nil {
-		return fail("无法读取当前用户的云路径映射，请检查映射是否存在")
-	}
-	var storage model.CloudStorage
-	if err := b.db.WithContext(ctx).Select("id", "user_id", "storage_type", "status").Where("id = ? AND user_id = ?", mapping.CloudStorageID, b.options.UserID).First(&storage).Error; err != nil {
-		return fail("云路径关联的网盘不存在或不属于当前用户")
-	}
-	if storage.StorageType != model.StorageType115Open || storage.Status != model.StatusActive || mapping.LinkType != model.LinkTypeStrm {
-		return fail("云路径必须使用当前用户的启用状态 115 网盘及 STRM 类型")
-	}
 	if !plutoFishFileComponent(event.FileName) || !plutoFishText(event.TargetDirectoryPath) || !strings.HasPrefix(event.TargetDirectoryPath, "/") || strings.ContainsRune(event.TargetDirectoryPath, '\\') {
 		return fail("缺少有效的目标目录完整路径或文件名；未查询网盘，未猜测播放地址")
 	}
@@ -100,25 +77,16 @@ func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutof
 		return fail("目标目录路径包含不安全的路径片段")
 	}
 	cloudFile := path.Join(directory, event.FileName)
-	source, err := pathhelper.NormalizeUntrustedPath(mapping.SourcePath)
+	mapping, eventPath, err := b.selectMapping(ctx, event.TargetAccountID, cloudFile)
 	if err != nil {
-		return fail("云路径的源目录配置无效")
+		return result, err
 	}
-	actualSource, eventPath := source, cloudFile
-	switch mapping.SourceType {
-	case model.SourceTypeCloudDrive2:
-		if source == "/" {
-			return fail("CloudDrive2 源目录必须包含明确的挂载名称")
-		}
-		mount := strings.Split(strings.TrimPrefix(source, "/"), "/")[0]
-		actualSource = pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(source))
-		eventPath = path.Join("/", mount, cloudFile)
-	case model.SourceTypeMoviePilot2:
-	default:
-		return fail("云路径的源类型不受现有 STRM 业务支持")
+	var storage model.CloudStorage
+	if err := b.db.WithContext(ctx).Select("id", "user_id", "storage_type", "status").Where("id = ? AND user_id = ?", mapping.CloudStorageID, b.options.UserID).First(&storage).Error; err != nil {
+		return fail("云路径关联的网盘不存在或不属于当前用户")
 	}
-	if !pathhelper.IsSubPath(cloudFile, actualSource) {
-		return fail("转存文件不在所绑定的云路径源目录范围内")
+	if storage.StorageType != model.StorageType115Open || storage.Status != model.StatusActive || mapping.LinkType != model.LinkTypeStrm {
+		return fail("云路径必须使用当前用户的启用状态 115 网盘及 STRM 类型")
 	}
 	var rules model.FilterRule
 	filter := strings.TrimSpace(mapping.FilterRules)
@@ -162,6 +130,71 @@ func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutof
 	}
 
 	return model.PlutoFishBusinessPlan{Scope: scope, TransferID: event.TransferID, RootPath: rootPath, RelativePath: relative, Content: content}, nil
+}
+
+// One receiving account may cover several libraries. Select the most specific
+// matching source directory before applying its filters and output settings.
+// Equal matches remain for review; configuration order must never decide a write.
+func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudFile string) (model.CloudPath, string, error) {
+	fail := func(message string) (model.CloudPath, string, error) {
+		return model.CloudPath{}, "", errors.New(message)
+	}
+	ids := []uint{}
+	seen := map[uint]bool{}
+	for _, entry := range b.options.Mappings {
+		if entry.TargetAccountID == "" || entry.TargetAccountID != accountID {
+			continue
+		}
+		if entry.CloudPathID == 0 || seen[entry.CloudPathID] {
+			return fail("接收网盘映射重复或无效，请移除重复的云路径映射")
+		}
+		seen[entry.CloudPathID] = true
+		ids = append(ids, entry.CloudPathID)
+	}
+	if len(ids) == 0 {
+		return fail("接收网盘尚未绑定 FilmFusion 云路径映射")
+	}
+	var mappings []model.CloudPath
+	if err := b.db.WithContext(ctx).Where("id IN ? AND user_id = ?", ids, b.options.UserID).Find(&mappings).Error; err != nil || len(mappings) != len(ids) {
+		return fail("无法读取当前用户的云路径映射，请检查映射是否存在")
+	}
+	var selected model.CloudPath
+	var eventPath string
+	bestLength, matches := -1, 0
+	for _, mapping := range mappings {
+		source, err := pathhelper.NormalizeUntrustedPath(mapping.SourcePath)
+		if err != nil {
+			return fail("云路径的源目录配置无效")
+		}
+		actualSource, mappedPath := source, cloudFile
+		switch mapping.SourceType {
+		case model.SourceTypeCloudDrive2:
+			if source == "/" {
+				return fail("CloudDrive2 源目录必须包含明确的挂载名称")
+			}
+			mount := strings.Split(strings.TrimPrefix(source, "/"), "/")[0]
+			actualSource = pathhelper.EnsureLeadingSlash(pathhelper.RemoveFirstDir(source))
+			mappedPath = path.Join("/", mount, cloudFile)
+		case model.SourceTypeMoviePilot2:
+		default:
+			return fail("云路径的源类型不受现有 STRM 业务支持")
+		}
+		if !pathhelper.IsSubPath(cloudFile, actualSource) {
+			continue
+		}
+		if len(actualSource) > bestLength {
+			selected, eventPath, bestLength, matches = mapping, mappedPath, len(actualSource), 1
+		} else if len(actualSource) == bestLength {
+			matches++
+		}
+	}
+	if matches == 0 {
+		return fail("转存文件不在所绑定的云路径源目录范围内")
+	}
+	if matches > 1 {
+		return fail("转存目录同时匹配多条同等优先级的云路径映射，请调整源目录范围后重试")
+	}
+	return selected, eventPath, nil
 }
 
 // Handle 按持久化计划生成本地文件；成功不代表网盘播放或 Emby 刷新成功。

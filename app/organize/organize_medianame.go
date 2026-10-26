@@ -27,7 +27,16 @@ func medianameOrganizeInput(args processOrganizeArgs, name string) string {
 func (h *Service) planMedianameOrganizeItem(args processOrganizeArgs, file service.Web115File) Organize115ItemResult {
 	input := medianameOrganizeInput(args, file.Name)
 	item := Organize115ItemResult{FileID: file.FileID, FileName: file.Name, FileSize: file.Size, PickCode: file.PickCode, RecognizeName: args.filename.applyRegex(file.Name), RecognizeInput: input, Engine: service.MediaRecognitionSourceMedianame}
-	recognized := h.moviePilotSvc.RecognizeMedianame(h.requestContext(), input, service.MediaRecognitionOptions{Mode: args.recognitionMode, LookupTMDB: true})
+	var recognized service.MedianameRecognition
+	if selected, ok := args.medianameOverrides[file.FileID]; ok {
+		if selected.FileName != file.Name || selected.FileSize != file.Size || selected.PickCode != file.PickCode || selected.RecognizeInput != input {
+			item.Error = "候选对应的源文件或识别输入已变化，请重新预览并选择候选"
+			return item
+		}
+		recognized = h.moviePilotSvc.ClassifyMedianame(*selected.Medianame)
+	} else {
+		recognized = h.moviePilotSvc.RecognizeMedianame(h.requestContext(), input, service.MediaRecognitionOptions{Mode: args.recognitionMode, LookupTMDB: true})
+	}
 	item.Medianame = &recognized
 	info, err := service.MedianameMoviePilotInfo(recognized)
 	if err != nil {

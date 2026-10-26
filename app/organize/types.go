@@ -15,6 +15,9 @@ type Organize115Request struct {
 }
 
 type Organize115CookieRequest struct {
+	CandidatePlanID          string `json:"candidate_plan_id,omitempty"`
+	medianameOverrides       map[string]Organize115ItemResult
+	medianameSnapshot        *service.MediaPipelineSnapshot
 	PlanID                   string                     `json:"plan_id,omitempty"`
 	CloudDirectoryID         uint                       `json:"cloud_directory_id" binding:"required"`
 	FolderID                 string                     `json:"folder_id"`
@@ -308,6 +311,7 @@ type buildPreviewChildTaskArgs struct {
 }
 
 type processOrganizeArgs struct {
+	medianameOverrides     map[string]Organize115ItemResult
 	recognitionMode        string
 	dir                    model.CloudDirectory
 	storage                *model.CloudStorage

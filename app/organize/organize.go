@@ -124,6 +124,7 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 
 		group := h.processOrganize115CookieFolder(
 			processOrganizeArgs{
+				medianameOverrides:     req.medianameOverrides,
 				dir:                    dir,
 				storage:                storage,
 				webClient:              webClient,

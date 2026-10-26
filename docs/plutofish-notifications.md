@@ -32,6 +32,8 @@ FilmFusion 后端主动用 HTTP 补收 + SSE 订阅通知，不需要 NAS 公网
 
 成功事件可靠入队后，`PlutoFishBusiness.Handle` 接入项目现有的 CloudPath STRM 内容前缀、路径与编码规则，生成**本地 STRM**。它不调用通用 STRM 入口中的网盘查询/下载分支，不扫描或操作 115，也不虚构播放接口。
 
+同一 PlutoFish 接收网盘支持绑定多条云路径，例如电影和剧集分别配置；仅禁止重复添加同一“接收网盘 + 云路径”组合。事件按真实云盘路径匹配该账号的源目录，父子范围重叠时优先选择更具体的源目录。CloudDrive2 匹配前去掉挂载名，生成本地路径和播放内容时仍保留挂载名。同等优先级匹配多条路径或无匹配时保留待核对；最具体映射的过滤或配置不通过时也不会回退到父目录写入。普通事件处理和历史 STRM 修复共用此规则。
+
 先用 `targetDirectoryPath + fileName` 得到真实云盘文件路径，再按源类型转换为映射路径：MoviePilot2 直接使用云盘路径；CloudDrive2 在前面补上 `SourcePath` 的第一段挂载名。本地文件使用 `LocalPath + 映射路径` 并将扩展名改为 `.strm`，保留作品、季等目录层级；播放内容仍使用 `ContentPrefix + 映射路径`，仅播放内容按 `ContentEncodeURI` 设置编码。本地不生成 `PlutoFish/<哈希>/` 目录或 `.transfer.json`。`SourcePath` 用于范围校验，不会从输出路径中裁掉。`targetPickCode` 不替代目录或文件名。
 
 例如 CloudDrive2 源路径 `/115LongTerm/影视中心`、本地目录 `/MediaSTRM`、内容前缀 `/CloudNAS/CloudDrive`，收到目录 `/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01` 和文件名 `S01E03.mkv`，本地输出为 `/MediaSTRM/115LongTerm/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01/S01E03.strm`，关闭 URI 编码时内容为 `/CloudNAS/CloudDrive/115LongTerm/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01/S01E03.mkv`。
