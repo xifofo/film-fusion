@@ -12,22 +12,24 @@ type PlutoFishCursor struct {
 
 // PlutoFishEvent is both the event-id dedup ledger and durable business inbox.
 type PlutoFishEvent struct {
-	ID            uint      `gorm:"primaryKey" json:"id"`
-	Scope         string    `gorm:"uniqueIndex:idx_pf_event;index;size:64" json:"-"`
-	EventID       string    `gorm:"uniqueIndex:idx_pf_event" json:"eventID"`
-	TransferID    string    `gorm:"index" json:"transferID"`
-	Type          string    `json:"type"`
-	SchemaVersion int       `json:"schemaVersion"`
-	Status        string    `json:"status"`
-	WorkTitle     string    `json:"workTitle"`
-	FileName      string    `json:"fileName"`
-	OccurredAt    string    `json:"occurredAt"`
-	Payload       string    `gorm:"type:text" json:"-"`
-	State         string    `gorm:"index" json:"state"`
-	Reason        string    `json:"reason"`
-	OutputPath    string    `json:"outputPath,omitempty"`
-	CreatedAt     time.Time `json:"receivedAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID            uint       `gorm:"primaryKey" json:"id"`
+	Scope         string     `gorm:"uniqueIndex:idx_pf_event;index;size:64" json:"-"`
+	EventID       string     `gorm:"uniqueIndex:idx_pf_event" json:"eventID"`
+	TransferID    string     `gorm:"index" json:"transferID"`
+	Type          string     `json:"type"`
+	SchemaVersion int        `json:"schemaVersion"`
+	Status        string     `json:"status"`
+	WorkTitle     string     `json:"workTitle"`
+	FileName      string     `json:"fileName"`
+	OccurredAt    string     `json:"occurredAt"`
+	Payload       string     `gorm:"type:text" json:"-"`
+	State         string     `gorm:"index" json:"state"`
+	Reason        string     `json:"reason"`
+	OutputPath    string     `json:"outputPath,omitempty"`
+	ReviewedAt    *time.Time `json:"reviewedAt,omitempty"`
+	ReviewedBy    uint       `json:"reviewedBy,omitempty"`
+	CreatedAt     time.Time  `json:"receivedAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 // Only successfully completed business creates a receipt. A failed/unknown event

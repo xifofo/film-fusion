@@ -141,6 +141,7 @@ func (s *Server) setupRoutes() {
 			plutoFish.GET("/status", plutoFishHandler.Status)
 			plutoFish.GET("/events", plutoFishHandler.Events)
 			plutoFish.POST("/events/:id/retry", plutoFishHandler.Retry)
+			plutoFish.POST("/events/:id/review", plutoFishHandler.Review)
 			plutoFish.POST("/strm-repairs/preview", plutoFishHandler.PreviewSTRMRepairs)
 			plutoFish.POST("/strm-repairs/apply", plutoFishHandler.RepairSTRMs)
 			plutoFish.POST("/start", plutoFishHandler.Start)
