@@ -58,6 +58,19 @@ docker compose pull film-fusion
 docker compose up -d --no-build
 ```
 
+### 新旧前端共存
+
+包含双前端的镜像使用同一个 `9000` 端口：
+
+| 地址 | 界面 |
+| --- | --- |
+| `http://localhost:9000/` | 原版管理界面 |
+| `http://localhost:9000/v2/` | AdminBase 新版管理界面 |
+
+两套界面共用现有 API、账号和数据库，登录会话与界面偏好分别保存。新版使用同一管理员账号登录；业务配置与数据修改在两套界面间共享。`/v2` 自动跳转 `/v2/`，新版深层页面可直接打开与刷新。反向代理应保留 `/v2/` 前缀并转发到同一服务。
+
+源码发布时，在本仓库运行 `./build-frontends.sh` 生成两套静态资源；`./build.sh <版本号>` 会自动完成这一步再构建并推送镜像。需要同时准备兄弟目录 `film-fusion-frontend` 和 `film-fusion-admin`，详见 [源码构建说明](DEPLOY.md#源码构建主服务可选)。
+
 ## ⚙️ 配置说明
 
 ### 基础配置

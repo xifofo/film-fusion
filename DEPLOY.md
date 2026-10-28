@@ -224,7 +224,7 @@ docker compose logs --tail=200 film-fusion
 
 ### 本地构建主服务时提示找不到 `dist`
 
-发布镜像已经包含 Web 前端；普通部署请使用本文的 `pull` + `up --no-build` 流程。源码构建则需要先在兄弟目录 `film-fusion-frontend` 中执行 `pnpm build`，再把前端 `dist/` 内容复制到后端仓库的 `dist/` 后构建镜像。
+发布镜像已经包含 Web 前端；普通部署请使用本文的 `pull` + `up --no-build` 流程。源码构建需要准备旧版 `film-fusion-frontend` 与新版 `film-fusion-admin`，在后端运行 `./build-frontends.sh` 生成完整 `dist/` 后再构建镜像，详见下方说明。
 
 ### 修改配置后没有生效
 
@@ -244,19 +244,27 @@ docker compose restart film-fusion
 
 ## 源码构建主服务（可选）
 
-只有需要部署尚未发布的代码时才需要这一步。服务器还需安装 Node.js 20.19+ 或 22.12+ 与 pnpm：
+只有需要部署尚未发布的代码时才需要这一步。构建机器还需安装 Node.js 22.12+ 与 pnpm 10+，并准备三个兄弟目录：
+
+```text
+FilmFusion/
+├── film-fusion/           # 本仓库
+├── film-fusion-frontend/  # 旧版前端源码
+└── film-fusion-admin/     # AdminBase 新版前端源码
+```
+
+在后端仓库执行：
 
 ```bash
-cd ..
-git clone --depth 1 https://github.com/xifofo/film-fusion-frontend.git
-cd film-fusion-frontend
-pnpm install --frozen-lockfile
-pnpm build
-mkdir -p ../film-fusion/dist
-cp -R dist/. ../film-fusion/dist/
-cd ../film-fusion
+./build-frontends.sh
 docker compose build --pull film-fusion
 docker compose up -d
 ```
 
-后端 Go 编译在 Dockerfile 的 builder 阶段完成，宿主机不需要安装 Go。
+`build-frontends.sh` 会在依赖缺失时安装依赖，分别构建两套前端，将旧版产物写入 `dist/`、新版写入 `dist/v2/`。两套构建和拷贝均成功后才替换旧产物；它不构建镜像、不推送、不启动后端。源码在其他位置时，用 `FRONTEND_DIR` 和 `ADMIN_FRONTEND_DIR` 指定绝对路径。
+
+原有镜像发布命令 `./build.sh <版本号>` 已接入双前端构建，默认构建并推送版本标签和 `latest`；加 `--no-push` 仅构建镜像。Dockerfile 会把整个 `dist/` 放入镜像，Go 编译仍在 builder 阶段完成，宿主机不需要安装 Go。
+
+升级到此版本后，原地址 `/` 继续打开旧版，新地址 `/v2/` 打开新版；两套界面共用 `/api`、数据库及配置，不需要第二个端口。新版首次登录使用现有管理员账号。必须一起发布后端路由改动和新前端产物；旧版本后端尚不能正确处理新版 SPA 深层路由。
+
+使用本指南的 Caddy 整站反向代理即可同时访问两套界面。已有 Nginx 等代理也应把 `/v2/` 原样转发到 `9000`，不要剥掉前缀或在代理上回退到旧版 `index.html`。升级后检查 `/`、`/v2/`、`/v2/login` 及任一新版业务页面刷新均能正确加载。
