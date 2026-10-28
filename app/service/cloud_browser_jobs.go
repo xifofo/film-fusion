@@ -249,12 +249,12 @@ func (s *CloudBrowserService) runBrowserJob(ctx context.Context, selected cloudB
 		}
 		current := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		page, listErr := p.List(ctx, current.cid, current.offset, 100)
+		page, listErr := p.List(ctx, current.cid, current.offset, CloudBrowserMaxPageSize)
 		if listErr != nil {
 			runErr = cloudBrowserProviderError(ctx, listErr)
 			return
 		}
-		if page == nil || page.CID != current.cid || page.Offset != current.offset || !cloudBrowserValidAncestry(page.Breadcrumbs, current.cid) || len(page.Items) > 100 || (page.HasMore && len(page.Items) == 0) {
+		if page == nil || page.CID != current.cid || page.Offset != current.offset || !cloudBrowserValidAncestry(page.Breadcrumbs, current.cid) || len(page.Items) > CloudBrowserMaxPageSize || (page.HasMore && len(page.Items) == 0) {
 			runErr = cloudMoveError(502, "115 返回的目录范围或分页无效，任务已停止")
 			return
 		}

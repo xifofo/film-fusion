@@ -48,9 +48,9 @@ func (h *CloudBrowserHandler) Browse(c *gin.Context) {
 	}
 	method, cid := c.Query("access_method"), c.Query("cid")
 	offset, offsetErr := strconv.Atoi(c.DefaultQuery("offset", "0"))
-	limit, limitErr := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	if !cloudFolderMoveMethodValid(method) || (cid != "" && !cloudFolderMoveIDValid(cid, true)) || offsetErr != nil || offset < 0 || offset > 10000000 || limitErr != nil || limit < 1 || limit > 200 {
-		c.JSON(http.StatusBadRequest, NewErrorResponse("目录参数无效，请指定 Cookie 或 OpenAPI，分页范围为 1 至 200 项", ""))
+	limit, limitErr := strconv.Atoi(c.DefaultQuery("limit", strconv.Itoa(service.CloudBrowserMaxPageSize)))
+	if !cloudFolderMoveMethodValid(method) || (cid != "" && !cloudFolderMoveIDValid(cid, true)) || offsetErr != nil || offset < 0 || offset > 10000000 || limitErr != nil || limit < 1 || limit > service.CloudBrowserMaxPageSize {
+		c.JSON(http.StatusBadRequest, NewErrorResponse("目录参数无效，请指定 Cookie 或 OpenAPI，分页范围为 1 至 1150 项", ""))
 		return
 	}
 	result, err := h.svc.Browse(c.Request.Context(), userID, directoryID, method, cid, offset, limit)

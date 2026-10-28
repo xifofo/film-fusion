@@ -17,6 +17,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const CloudBrowserMaxPageSize = 1150
+
 // Browser requests are deliberately independent of the background token manager:
 // no authentication probe, refresh, retry, fallback, or pagination is implicit.
 type CloudBrowserBreadcrumb struct {
@@ -129,8 +131,8 @@ func (s *CloudBrowserService) storage(ctx context.Context, userID, storageID uin
 }
 
 func (s *CloudBrowserService) Browse(ctx context.Context, userID, directoryID uint, method, cid string, offset, limit int) (*CloudBrowserPage, error) {
-	if (method != "cookie" && method != "openapi") || offset < 0 || offset > 10000000 || limit < 1 || limit > 200 || (cid != "" && !cloudMoveID(cid, true)) {
-		return nil, cloudMoveError(400, "请选择访问方式、有效目录和分页范围（每页最多 200 项）")
+	if (method != "cookie" && method != "openapi") || offset < 0 || offset > 10000000 || limit < 1 || limit > CloudBrowserMaxPageSize || (cid != "" && !cloudMoveID(cid, true)) {
+		return nil, cloudMoveError(400, "请选择访问方式、有效目录和分页范围（每页最多 1150 项）")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()

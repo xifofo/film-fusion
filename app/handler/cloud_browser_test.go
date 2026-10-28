@@ -95,7 +95,7 @@ func TestCloudBrowserHandlerRejectsBeforeService(t *testing.T) {
 	for _, query := range []string{
 		"", "access_method=auto", "access_method=cookie&cid=01", "access_method=cookie&cid=-1", "access_method=cookie&cid=18446744073709551616",
 		"access_method=cookie&offset=-1", "access_method=cookie&offset=10000001", "access_method=cookie&offset=x",
-		"access_method=openapi&limit=0", "access_method=openapi&limit=201", "access_method=openapi&limit=x",
+		"access_method=openapi&limit=0", "access_method=openapi&limit=1151", "access_method=openapi&limit=x",
 	} {
 		if w := cloudBrowserHandlerRequest(r, http.MethodGet, "/api/directories/2/browser?"+query, ""); w.Code != http.StatusBadRequest {
 			t.Fatalf("query %q accepted: %d", query, w.Code)
@@ -123,6 +123,19 @@ func TestCloudBrowserHandlerRejectsBeforeService(t *testing.T) {
 	}
 	if s.calls != 0 {
 		t.Fatalf("invalid input invoked service %d times", s.calls)
+	}
+}
+
+func TestCloudBrowserHandlerDefaultAndMaximumPageSize(t *testing.T) {
+	for _, method := range []string{"cookie", "openapi"} {
+		for _, limit := range []string{"", "&limit=1150"} {
+			s := &cloudBrowserHandlerStub{}
+			r := cloudBrowserHandlerRouter(s, uint(7))
+			w := cloudBrowserHandlerRequest(r, http.MethodGet, "/api/directories/2/browser?access_method="+method+limit, "")
+			if w.Code != http.StatusOK || s.limit != 1150 || s.browseCalls != 1 {
+				t.Fatalf("method=%s limit=%s status=%d forwarded=%d calls=%d", method, limit, w.Code, s.limit, s.browseCalls)
+			}
+		}
 	}
 }
 

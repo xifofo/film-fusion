@@ -21,6 +21,9 @@ import (
 // recursive jobs. A slot lasts through response-body consumption, not headers.
 var cloudBrowserRequests = newCloudBrowserLimiter(time.Second)
 
+// Allow a full 1150-entry page with provider metadata, bounded after decoding.
+const cloudBrowserMaxResponseBytes = 8 << 20
+
 type cloudBrowserLimiter struct {
 	slots    chan struct{}
 	start    chan struct{}
@@ -141,6 +144,8 @@ func (p *cloudBrowser115Provider) List(ctx context.Context, cid string, offset, 
 		"format": "json", "fc_mix": "0", "count_folders": "1", "record_open_time": "0", "aid": "1",
 	}
 	var response *http.Response
+	var body io.ReadCloser
+	var requestErr error
 	// Use the SDK request builders and response models. The convenient GetFiles
 	// auth wrapper refreshes on 401/99; bypassing that wrapper avoids hidden calls.
 	if p.method == "openapi" {
@@ -148,30 +153,38 @@ func (p *cloudBrowser115Provider) List(ctx context.Context, cid string, offset, 
 		client := sdk115.New().SetHttpClient(p.client)
 		resp, err := client.NewRequest(ctx).SetAuthToken(p.credential).
 			SetRetryCount(0).SetDoNotParseResponse(true).SetQueryParams(params).Get(sdk115.ApiFsGetFiles)
-		if err != nil {
-			return nil, err
+		requestErr = err
+		if resp != nil {
+			// Resty v3 decodes gzip/deflate into Body, even with parsing disabled.
+			// RawResponse.Body remains the original, partially consumed stream.
+			response, body = resp.RawResponse, resp.Body
 		}
-		response = resp.RawResponse
 	} else {
 		client := driver.New().SetHttpClient(p.client).SetUserAgent(web115BrowserUA)
 		client.Client.SetRetryCount(0).SetCookieJar(nil)
 		resp, err := client.NewRequest().SetContext(ctx).SetDoNotParseResponse(true).
 			SetHeader("Cookie", p.credential).SetHeader("Origin", "https://115.com").SetHeader("Referer", "https://115.com/").
 			SetQueryParams(params).Get(driver.ApiFileList)
-		if err != nil {
-			return nil, err
+		requestErr = err
+		if resp != nil {
+			response, body = resp.RawResponse, resp.RawBody()
 		}
-		response = resp.RawResponse
 	}
-	if response == nil || response.Body == nil {
+	// Decoding can fail after acquiring a request slot. Close that response too.
+	if body != nil {
+		defer body.Close()
+	}
+	if requestErr != nil {
+		return nil, requestErr
+	}
+	if response == nil || body == nil {
 		return nil, errors.New("missing directory response")
 	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return nil, errors.New("directory response rejected")
 	}
-	data, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
-	if err != nil || len(data) > 2<<20 || !utf8.Valid(data) {
+	data, err := io.ReadAll(io.LimitReader(body, cloudBrowserMaxResponseBytes+1))
+	if err != nil || len(data) > cloudBrowserMaxResponseBytes || !utf8.Valid(data) {
 		return nil, errors.New("invalid directory response size or encoding")
 	}
 	return cloudBrowserParsePage(data, p.method, cid, offset, limit)

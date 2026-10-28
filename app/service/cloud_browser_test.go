@@ -180,7 +180,11 @@ func TestCloudBrowserRecursiveJobManualStartAndCollision(t *testing.T) {
 	var calls atomic.Int32
 	svc.newProvider = func(model.CloudStorage, string) (cloudBrowserProvider, error) {
 		return cloudBrowserListFunc(func(_ context.Context, cid string, offset, limit int) (*CloudBrowserPage, error) {
-			calls.Add(1)
+			if calls.Add(1) > 1 && limit != CloudBrowserMaxPageSize {
+				return nil, fmt.Errorf("recursive page limit=%d, want %d", limit, CloudBrowserMaxPageSize)
+			}
+			// Upstream may return a short page even when 1150 items are requested.
+			limit = min(limit, 100)
 			if cid == "20" {
 				return cloudBrowserTestPage(cid, offset, limit, []CloudBrowserEntry{{FileID: "3000", ParentID: "20", Name: "Child.mkv", IsFile: true, Complete: true}}), nil
 			}
@@ -211,6 +215,35 @@ func TestCloudBrowserRecursiveJobManualStartAndCollision(t *testing.T) {
 	}
 	if calls.Load() != 4 {
 		t.Fatal("status read made provider request")
+	}
+}
+
+func TestCloudBrowserMaximumPageSize(t *testing.T) {
+	svc, directory := newCloudBrowserTestService(t)
+	calls := 0
+	rows := make([]CloudBrowserEntry, CloudBrowserMaxPageSize+1)
+	for i := range rows {
+		rows[i] = CloudBrowserEntry{FileID: fmt.Sprint(1000 + i), ParentID: "10", Name: fmt.Sprintf("Movie%d.mkv", i), IsFile: true, Complete: true}
+	}
+	svc.newProvider = func(model.CloudStorage, string) (cloudBrowserProvider, error) {
+		return cloudBrowserListFunc(func(_ context.Context, cid string, offset, limit int) (*CloudBrowserPage, error) {
+			calls++
+			if limit != 1150 {
+				t.Fatalf("limit=%d", limit)
+			}
+			return cloudBrowserTestPage(cid, offset, limit, rows), nil
+		}), nil
+	}
+	if _, err := svc.Browse(context.Background(), 7, directory.ID, "openapi", "10", 0, 1151); err == nil || calls != 0 {
+		t.Fatal("oversized page reached provider")
+	}
+	page, err := svc.Browse(context.Background(), 7, directory.ID, "openapi", "10", 0, 1150)
+	if err != nil || calls != 1 || len(page.Items) != 1150 || !page.HasMore {
+		t.Fatalf("first page err=%v calls=%d", err, calls)
+	}
+	page, err = svc.Browse(context.Background(), 7, directory.ID, "openapi", "10", 1150, 1150)
+	if err != nil || calls != 2 || len(page.Items) != 1 || page.HasMore || page.Offset != 1150 {
+		t.Fatalf("last page=%+v err=%v calls=%d", page, err, calls)
 	}
 }
 
