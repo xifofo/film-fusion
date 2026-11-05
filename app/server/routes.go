@@ -130,6 +130,7 @@ func (s *Server) setupRoutes() {
 		protected.GET("/app-config", appConfigHandler.Get)
 		protected.PUT("/app-config", appConfigHandler.Update)
 		protected.POST("/site-assets/login-background", appConfigHandler.UploadLoginBackground)
+		protected.POST("/site-assets/fonts", appConfigHandler.UploadFont)
 		protected.POST("/notifications/channels/:channel/test", notificationHandler.TestChannel)
 		// 旧版前端兼容入口。
 		protected.POST("/telegram/test", notificationHandler.TestTelegram)

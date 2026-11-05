@@ -89,6 +89,7 @@ jwt:
 ```
 
 JWT 签名密钥由程序自动生成并保存在数据目录中，无需手工配置。
+V2 系统设置的「Emby → 媒体库封面」可选择电脑上的 TTF/OTF 字体文件（单个不超过 32 MiB）。字体上传至持久化目录 `data/uploads/fonts/`，经渲染器解析校验后回填服务器路径；保存 Emby 设置后才会启用。上传接口 `POST /api/site-assets/fonts` 仅供管理员登录会话使用，不开放公开字体下载。
 115 默认 App 与浏览器 UA 首次从上述 YAML 导入，之后只保存在数据库并通过系统设置维护；UA 暂未接入请求。
 
 通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、自动化事件触发和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。

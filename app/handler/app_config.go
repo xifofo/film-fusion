@@ -25,6 +25,7 @@ type AppConfigHandler struct {
 	coverSvc      *service.EmbyCoverService
 	tmdbSvc       *service.TMDBService
 	siteAssetsDir string
+	fontAssetsDir string
 	db            *gorm.DB
 	backgrounds   *loginBackgroundCache
 }
@@ -37,6 +38,7 @@ func NewAppConfigHandler(log *logger.Logger, cfg *config.Config, emby *embyhelpe
 		emby:          emby,
 		coverSvc:      coverSvc,
 		siteAssetsDir: defaultSiteAssetsDir,
+		fontAssetsDir: defaultFontAssetsDir,
 		db:            database.GetDB(),
 		backgrounds:   &loginBackgroundCache{},
 	}
