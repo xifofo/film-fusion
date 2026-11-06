@@ -11,8 +11,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// frontendHandler 将未命中的页面路由分配给各自的 SPA，不接管 API 或 Webhook。
-// distDir 保存旧版产物，distDir/v2 保存新版产物；缺少新版时不能回退到旧版。
+// frontendHandler 从 distDir 提供唯一的管理前端，不接管 API 或 Webhook。
+// 历史 /v2/ 地址跳转到根路径下的对应地址，不再读取第二套前端产物。
 func frontendHandler(distDir string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
@@ -25,29 +25,33 @@ func frontendHandler(distDir string) gin.HandlerFunc {
 			return
 		}
 
-		if requestPath == "/v2" {
-			target := "/v2/"
-			if c.Request.URL.RawQuery != "" {
-				target += "?" + c.Request.URL.RawQuery
+		relative := strings.TrimPrefix(requestPath, "/")
+		relative = strings.TrimSuffix(relative, "/")
+
+		// 在重定向和拼接磁盘路径前校验，拒绝目录穿越及双斜线形成的站外跳转。
+		if relative != "" && (!fs.ValidPath(relative) || relative == "." || strings.Contains(relative, "\\")) {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+
+		if requestPath == "/v2" || strings.HasPrefix(requestPath, "/v2/") {
+			targetURL := *c.Request.URL
+			targetURL.Path = strings.TrimPrefix(requestPath, "/v2")
+			targetURL.RawPath = ""
+			if targetURL.Path == "" {
+				targetURL.Path = "/"
+			}
+
+			// 重新转义路径中的保留字符，查询参数保持原样。
+			target := targetURL.EscapedPath()
+			if targetURL.RawQuery != "" {
+				target += "?" + targetURL.RawQuery
 			}
 			c.Redirect(http.StatusPermanentRedirect, target)
 			return
 		}
 
-		root := distDir
-		relative := strings.TrimPrefix(requestPath, "/")
-		if strings.HasPrefix(requestPath, "/v2/") {
-			root = filepath.Join(distDir, "v2")
-			relative = strings.TrimPrefix(requestPath, "/v2/")
-		}
-		relative = strings.TrimSuffix(relative, "/")
-
-		// 在拼接磁盘路径前拒绝目录穿越，避免新旧资源跨目录读取。
-		if relative != "" && (!fs.ValidPath(relative) || relative == "." || strings.Contains(relative, "\\")) {
-			c.Status(http.StatusBadRequest)
-			return
-		}
-		if relative != "" && serveFrontendFile(c, filepath.Join(root, filepath.FromSlash(relative))) {
+		if relative != "" && serveFrontendFile(c, filepath.Join(distDir, filepath.FromSlash(relative))) {
 			return
 		}
 
@@ -56,7 +60,7 @@ func frontendHandler(distDir string) gin.HandlerFunc {
 			c.Status(http.StatusNotFound)
 			return
 		}
-		if !serveFrontendFile(c, filepath.Join(root, "index.html")) {
+		if !serveFrontendFile(c, filepath.Join(distDir, "index.html")) {
 			c.Status(http.StatusNotFound)
 		}
 	}

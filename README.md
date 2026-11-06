@@ -14,6 +14,8 @@
 - 🔄 **Webhook 支持** - 支持 CloudDrive2 和 MoviePilot2 的 Webhook 通知
 - 🐟 **[PlutoFish 通知](docs/plutofish-notifications.md)** - 主动补收与 SSE 订阅转存结果，持久化恢复及本地 STRM 处理，无需公网回调
 
+- 🗂️ **[媒体目录](docs/media-directories.md)** - 统一路径映射与媒体整理，自动迁移旧配置及关联
+
 ## 🚀 快速部署
 
 推荐使用 Docker Compose。完整的服务器准备、目录挂载、HTTPS、升级、备份与故障排查说明见 [自建服务器部署指南](DEPLOY.md)。
@@ -58,18 +60,18 @@ docker compose pull film-fusion
 docker compose up -d --no-build
 ```
 
-### 新旧前端共存
+### Web 管理界面
 
-包含双前端的镜像使用同一个 `9000` 端口：
+新版 AdminBase 前端是唯一发布界面，使用现有 `9000` 端口：
 
-| 地址 | 界面 |
+| 地址 | 用途 |
 | --- | --- |
-| `http://localhost:9000/` | 原版管理界面 |
-| `http://localhost:9000/v2/` | AdminBase 新版管理界面 |
+| `http://localhost:9000/` | 新版管理界面 |
+| `http://localhost:9000/login` | 新版登录页 |
 
-两套界面共用现有 API、账号和数据库，登录会话与界面偏好分别保存。新版使用同一管理员账号登录；业务配置与数据修改在两套界面间共享。`/v2` 自动跳转 `/v2/`，新版深层页面可直接打开与刷新。反向代理应保留 `/v2/` 前缀并转发到同一服务。
+继续使用现有 API、管理员账号、数据库及业务配置。旧 `/v2` 和 `/v2/…` 地址会跳转到对应根路径地址并保留查询参数；深层页面支持直接打开与刷新。反向代理应将整站请求原样转发到同一服务。
 
-源码发布时，在本仓库运行 `./build-frontends.sh` 生成两套静态资源；`./build.sh <版本号>` 会自动完成这一步再构建并推送镜像。需要同时准备兄弟目录 `film-fusion-frontend` 和 `film-fusion-admin`，详见 [源码构建说明](DEPLOY.md#源码构建主服务可选)。
+源码发布时，在本仓库运行 `./build-frontends.sh`，仅构建兄弟目录 `film-fusion-admin` 并完整替换 `dist/`；不再需要或打包 `film-fusion-frontend`，产物中不保留旧版文件或 `dist/v2/`。`./build.sh <版本号>` 会先完成这一步，再构建并推送镜像，详见 [源码构建说明](DEPLOY.md#源码构建主服务可选)。
 
 ## ⚙️ 配置说明
 
@@ -94,7 +96,7 @@ V2 系统设置的「Emby → 媒体库封面」可选择电脑上的 TTF/OTF �
 
 通知统一在「系统设置 → 通知」中管理。Telegram 与通用 JSON Webhook 可独立启用，Emby/FilmFusion 登录爆破、自动化事件触发和 115 Cookie 失效均可分别选择一个或多个投递渠道；旧版顶层 `telegram` 配置会自动导入。
 
-自动化中心支持监控 115 OpenAPI 目录。首次扫描只建立存量基线，之后按目录增量检查；新增媒体稳定后可执行 FilmFusion 或 MoviePilot 识别、媒体整理、STRM 生成和通知。
+自动化中心支持监控 115 OpenAPI 目录。首次扫描只建立存量基线，之后按目录增量检查；新增媒体稳定后可执行 medianame 媒体识别、媒体整理、STRM 生成和通知。
 
 ### Emby 集成配置
 ```yaml

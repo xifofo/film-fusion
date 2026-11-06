@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一键打包 film-fusion 镜像：
-#   1) 构建旧版 / 与新版 /v2/，组装到后端 dist
+#   1) 构建唯一的新版前端（/），组装到后端 dist
 #   2) docker build 多平台镜像（默认推送到 registry）
 #
 # 用法:
@@ -9,7 +9,6 @@
 #
 # 可通过环境变量覆盖默认行为:
 #   IMAGE_REPO=kumayi/film-fusion             # 镜像仓库
-#   FRONTEND_DIR=../film-fusion-frontend      # 旧版前端代码目录
 #   ADMIN_FRONTEND_DIR=../film-fusion-admin   # 新版前端代码目录
 #   PLATFORMS=linux/amd64,linux/arm64         # 目标平台
 #   DOCKER_BUILD_ARGS="--no-cache"            # 额外透传给 docker build
@@ -43,7 +42,7 @@ TAG_LATEST="${TAG_LATEST:-1}"
 BACKEND_DIR="$(cd "$(dirname "$0")" && pwd)"
 command -v docker >/dev/null 2>&1 || { echo "[build] 缺少 docker" >&2; exit 1; }
 
-echo "==> [1/2] 构建并组装新旧前端"
+echo "==> [1/2] 构建并组装新版前端"
 "$BACKEND_DIR/build-frontends.sh"
 
 TAG_ARGS=( -t "$IMAGE" )

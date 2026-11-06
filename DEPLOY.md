@@ -224,7 +224,7 @@ docker compose logs --tail=200 film-fusion
 
 ### 本地构建主服务时提示找不到 `dist`
 
-发布镜像已经包含 Web 前端；普通部署请使用本文的 `pull` + `up --no-build` 流程。源码构建需要准备旧版 `film-fusion-frontend` 与新版 `film-fusion-admin`，在后端运行 `./build-frontends.sh` 生成完整 `dist/` 后再构建镜像，详见下方说明。
+发布镜像已经包含 Web 前端；普通部署请使用本文的 `pull` + `up --no-build` 流程。源码构建只需准备新版 `film-fusion-admin`，在后端运行 `./build-frontends.sh` 生成完整 `dist/` 后再构建镜像，详见下方说明。
 
 ### 修改配置后没有生效
 
@@ -244,12 +244,11 @@ docker compose restart film-fusion
 
 ## 源码构建主服务（可选）
 
-只有需要部署尚未发布的代码时才需要这一步。构建机器还需安装 Node.js 22.12+ 与 pnpm 10+，并准备三个兄弟目录：
+只有需要部署尚未发布的代码时才需要这一步。构建机器还需安装 Node.js 22.12+ 与 pnpm 10+，并准备两个兄弟目录：
 
 ```text
 FilmFusion/
 ├── film-fusion/           # 本仓库
-├── film-fusion-frontend/  # 旧版前端源码
 └── film-fusion-admin/     # AdminBase 新版前端源码
 ```
 
@@ -261,10 +260,10 @@ docker compose build --pull film-fusion
 docker compose up -d
 ```
 
-`build-frontends.sh` 会在依赖缺失时安装依赖，分别构建两套前端，将旧版产物写入 `dist/`、新版写入 `dist/v2/`。两套构建和拷贝均成功后才替换旧产物；它不构建镜像、不推送、不启动后端。源码在其他位置时，用 `FRONTEND_DIR` 和 `ADMIN_FRONTEND_DIR` 指定绝对路径。
+`build-frontends.sh` 会在依赖缺失时安装依赖，只构建 `film-fusion-admin`，将其 `apps/web/dist/` 完整替换到后端 `dist/`，不保留旧版文件或 `dist/v2/`。构建和拷贝均成功后才替换旧产物；它不构建镜像、不推送、不启动后端。源码在其他位置时，用 `ADMIN_FRONTEND_DIR` 指定绝对路径，不再使用 `FRONTEND_DIR`。
 
-原有镜像发布命令 `./build.sh <版本号>` 已接入双前端构建，默认构建并推送版本标签和 `latest`；加 `--no-push` 仅构建镜像。Dockerfile 会把整个 `dist/` 放入镜像，Go 编译仍在 builder 阶段完成，宿主机不需要安装 Go。
+原有镜像发布命令 `./build.sh <版本号>` 已接入唯一新版前端构建，默认构建并推送版本标签和 `latest`；加 `--no-push` 仅构建镜像。Dockerfile 会把整个 `dist/` 放入镜像，Go 编译仍在 builder 阶段完成，宿主机不需要安装 Go。
 
-升级到此版本后，原地址 `/` 继续打开旧版，新地址 `/v2/` 打开新版；两套界面共用 `/api`、数据库及配置，不需要第二个端口。新版首次登录使用现有管理员账号。必须一起发布后端路由改动和新前端产物；旧版本后端尚不能正确处理新版 SPA 深层路由。
+升级到此版本后，根路径 `/` 直接打开新版，旧前端不再发布；API 仍为 `/api`，账号、数据库及配置继续沿用，不需要第二个端口。历史 `/v2` 和 `/v2/…` 地址跳转到对应根路径，并保留查询参数。必须一起发布后端路由改动和根路径构建的新前端产物。
 
-使用本指南的 Caddy 整站反向代理即可同时访问两套界面。已有 Nginx 等代理也应把 `/v2/` 原样转发到 `9000`，不要剥掉前缀或在代理上回退到旧版 `index.html`。升级后检查 `/`、`/v2/`、`/v2/login` 及任一新版业务页面刷新均能正确加载。
+使用本指南的 Caddy 整站反向代理即可访问新版。已有 Nginx 等代理也应把整站请求原样转发到 `9000`，由后端处理静态资源、页面回退及历史地址跳转。升级后检查 `/`、`/login`、任一业务页面刷新，以及 `/v2/`、`/v2/login` 的跳转均正确；缺失的 JS/CSS 应返回 404。
