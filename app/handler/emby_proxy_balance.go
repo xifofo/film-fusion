@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -47,34 +46,16 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	}()
 
 	itemInfoUri, itemId, etag, mediaSourceId, apiKey := embyhelper.GetItemPathInfo(c, h.config)
-	forcedStorageID, bindingErr := h.resolveBoundStorageID(c)
-	baseEntry.ItemID = itemId
-	baseEntry.MediaSourceID = mediaSourceId
-	baseEntry.AssignedStorageID = forcedStorageID
-	// 所有绑定失败都在此终止请求，不能交给 Emby 默认反代继续播放。
-	fail := func(reason string) (string, embyproxylog.Entry, bool, string) {
-		if forcedStorageID != 0 || bindingErr != nil {
-			h.failBoundPlayback(c, baseEntry, reason)
-		}
-		return "", baseEntry, true, reason
-	}
-	if bindingErr != nil {
-		return fail(bindingErr.Error())
-	}
 	embyRes, err := embyhelper.GetEmbyItemsContext(c.Request.Context(), itemInfoUri, itemId, etag, mediaSourceId, apiKey)
 
 	if err != nil {
 		h.logger.Errorf("获取 EmbyItems 错误: %v", err)
-		return fail("获取 Emby 媒体信息失败，请检查 Emby 服务和访问权限")
+		return "", baseEntry, true, "获取 EmbyItems 失败: " + err.Error()
 	}
 
 	h.logger.Infof("[EMBY PROXY] Request URI: %s", currentURI)
 
 	// EMBY 的播放地址, 兼容 Windows 的 Emby 路径
-	baseEntry.MediaPath = embyRes.Path
-	if forcedStorageID != 0 && (strings.HasPrefix(strings.ToLower(embyRes.Path), "http://") || strings.HasPrefix(strings.ToLower(embyRes.Path), "https://")) {
-		return fail("媒体路径是外部直链，无法保证使用绑定的 115 账号，请配置可匹配的媒体路径")
-	}
 	embyPlayPath := pathhelper.EnsureLeadingSlash(embyRes.Path)
 
 	h.logger.Infof("[EMBY PROXY] Emby 原地址: %s", embyPlayPath)
@@ -90,6 +71,8 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	}
 
 	// Emby 账号绑定：命中则强制走指定 115 存储，跳过通用就绪缓存命中(避免被路由到非绑定账号)。
+	forcedStorageID := h.resolveBoundStorageID(c, itemId)
+
 	if forcedStorageID == 0 {
 		if redirectURL, entry, ok := h.proxyReadyBalanceCache(c, baseEntry, embyPlayPath, itemId, mediaSourceId); ok {
 			return redirectURL, entry, false, ""
@@ -99,10 +82,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	match, matchedPath, err := h.balanceSvc.FindMatch(embyPlayPath)
 	if err != nil {
 		h.logger.Debugf("[EMBY PROXY] 路径 %s 未匹配任何 match302 规则", embyPlayPath)
-		if forcedStorageID != 0 {
-			return fail("媒体路径未匹配 Match302 规则，无法定位绑定账号资源")
-		}
-		return fail("路径未匹配任何 Match302 规则: " + embyPlayPath)
+		return "", baseEntry, true, "路径未匹配任何 match302 规则: " + embyPlayPath
 	}
 
 	playbackReq := service.BalancePlaybackRequest{
@@ -115,22 +95,13 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		RemoteIP:        c.ClientIP(),
 		ForcedStorageID: forcedStorageID,
 	}
-	decision, err := h.balanceSvc.ResolvePlayback(c.Request.Context(), playbackReq)
+	decision, err := h.balanceSvc.ResolvePlayback(context.Background(), playbackReq)
 	if err != nil {
 		h.logger.Errorf("[EMBY PROXY] Match302 负载均衡决策失败: %v", err)
-		return fail(err.Error())
-	}
-	if forcedStorageID != 0 && (decision.PlaybackStorage == nil || decision.PlaybackStorage.ID != forcedStorageID) {
-		return fail("播放账号与绑定账号不一致，已阻止播放")
+		return "", baseEntry, true, "Match302 负载均衡决策失败: " + err.Error()
 	}
 
 	redirectURL, fromCache, err := h.getDownloadURLForStorage(*decision.PlaybackStorage, decision.ActualPickCode, c.Request.UserAgent())
-	if err != nil && forcedStorageID != 0 {
-		if is115FileNotFound(err) && decision.Assignment != nil {
-			h.invalidateBalanceAssignment(decision.Assignment.Match302ID, decision.Assignment.ID)
-		}
-		return fail("获取绑定账号直链失败: " + err.Error())
-	}
 	if err != nil && decision.UseBalance && !decision.IsSourcePlayback {
 		if is115FileNotFound(err) && decision.Assignment != nil {
 			h.logger.Warnf("[EMBY PROXY] 子账号目标文件已删除(430004)，失效并重新秒传 assignment=%d", decision.Assignment.ID)
@@ -254,23 +225,3 @@ func (h *EmbyProxyHandler) invalidateBalanceAssignment(matchID, assignmentID uin
 		h.logger.Infof("[EMBY PROXY] 负载均衡目标文件已删除，已触发重新秒传 assignment=%d", assignmentID)
 	}()
 }
-
-// failBoundPlayback 同时返回 Emby 格式错误和可查询的失败日志，不记录为实际播放。
-func (h *EmbyProxyHandler) failBoundPlayback(c *gin.Context, entry embyproxylog.Entry, reason string) {
-	// 上游 HTTP 错误可能包含携带凭据的请求地址，不向播放器或失败原因字段回传。
-	reason = boundPlaybackURLRegex.ReplaceAllString(reason, "[请求地址已隐藏]")
-	entry.Source = "fallback"
-	entry.AccountType = "binding"
-	entry.BalanceStatus = "绑定账号播放失败"
-	entry.FallbackReason = reason
-	entry.Target = ""
-	h.log302Entry(entry)
-	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
-		"ResponseStatus": gin.H{
-			"ErrorCode": "BoundStoragePlaybackFailed",
-			"Message":   "绑定账号播放失败：" + reason,
-		},
-	})
-}
-
-var boundPlaybackURLRegex = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
