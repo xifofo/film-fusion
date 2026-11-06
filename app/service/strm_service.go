@@ -34,6 +34,12 @@ func NewStrmService(log *logger.Logger, download115Svc *Download115Service) *Str
 }
 
 func (s *StrmService) CreateFile(path string, cloudPath model.MediaDirectory) error {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return err
+	}
 	if cloudPath.SavePath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return nil
@@ -64,6 +70,12 @@ func (s *StrmService) CreateFile(path string, cloudPath model.MediaDirectory) er
 }
 
 func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.MediaDirectory, originalInside, destinationInside bool) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	if cloudPath.SavePath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
@@ -93,6 +105,12 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Medi
 }
 
 func (s *StrmService) CreateDir(path string, cloudPath model.MediaDirectory) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	if cloudPath.SavePath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
@@ -104,6 +122,12 @@ func (s *StrmService) CreateDir(path string, cloudPath model.MediaDirectory) {
 }
 
 func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.MediaDirectory, originalInside, destinationInside bool) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	if cloudPath.SavePath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
@@ -130,6 +154,12 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Media
 //   - dirPath: 要遍历的目录路径
 //   - cloudPath: 云盘路径配置信息，包含过滤规则等
 func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.MediaDirectory) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	// Keep this traversal and its recursive pages bound to the same account.
 	worker := *s
 	worker.sdk115Open = sdk115helper.WithAccessToken(s.sdk115Open, cloudPath.CloudStorage.AccessToken)
@@ -228,6 +258,12 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.MediaD
 }
 
 func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.MediaDirectory, pickcode string) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	if upgradeRecoveryEvent(path, cloudPath) {
 		return
 	}
@@ -369,6 +405,12 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 }
 
 func (s *StrmService) DeleteStrm(path string, cloudPath model.MediaDirectory, isDir bool) {
+	var err error
+	cloudPath, err = cloudPath.MappingRuntimeConfig()
+	if err != nil {
+		s.logger.Errorf("同步输出路径换算失败: %v", err)
+		return
+	}
 	if cloudPath.SavePath == "" {
 		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件删除", cloudPath.ID)
 		return

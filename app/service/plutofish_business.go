@@ -145,6 +145,11 @@ func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudF
 		if entry.TargetAccountID == "" || entry.TargetAccountID != accountID {
 			continue
 		}
+		resolvedID, err := model.ResolveMergedMediaDirectoryID(b.db.WithContext(ctx), b.options.UserID, entry.CloudPathID)
+		if err != nil {
+			return fail("无法读取合并后的云路径映射")
+		}
+		entry.CloudPathID = resolvedID
 		if entry.CloudPathID == 0 || seen[entry.CloudPathID] {
 			return fail("接收网盘映射重复或无效，请移除重复的云路径映射")
 		}
@@ -194,7 +199,11 @@ func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudF
 	if matches > 1 {
 		return fail("转存目录同时匹配多条同等优先级的云路径映射，请调整源目录范围后重试")
 	}
-	return selected, eventPath, nil
+	runtime, err := selected.MappingRuntimeConfig()
+	if err != nil {
+		return fail(err.Error())
+	}
+	return runtime, eventPath, nil
 }
 
 // Handle 按持久化计划生成本地文件；成功不代表网盘播放或 Emby 刷新成功。

@@ -65,6 +65,10 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 		return nil, err
 	}
 
+	paths, err = model.MappingRuntimeConfigs(paths)
+	if err != nil {
+		return nil, err
+	}
 	result := &ResolveSeriesResult{
 		SeriesID: seriesID,
 		EmbyPath: embyPath,

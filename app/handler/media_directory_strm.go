@@ -34,6 +34,12 @@ func (h *MediaDirectoryHandler) ReplaceStrmContent(c *gin.Context) {
 		return
 	}
 
+	runtime, err := path.MappingRuntimeConfig()
+	if err != nil {
+		h.error(c, 400, 400, err.Error())
+		return
+	}
+	path = runtime
 	if strings.TrimSpace(path.SavePath) == "" {
 		h.error(c, http.StatusBadRequest, 400, "该路径未配置本地路径，无法替换")
 		return

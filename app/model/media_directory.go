@@ -8,6 +8,11 @@ import (
 
 // MediaDirectory 是 STRM 同步与媒体整理唯一的配置模型。保存时从关键配置推导用途，公共 STRM 设置只保存一次。
 type MediaDirectory struct {
+	// MappingPathPrefix 是同步事件中已包含、且公共输出根末尾也已包含的挂载前缀。
+	MappingPathPrefix string `gorm:"size:500" json:"mapping_path_prefix,omitempty"`
+	// 合并来源保留为软删除记录，供运行中消费者解析旧引用，不恢复为第二套配置。
+	MergedIntoID uint `gorm:"index" json:"merged_into_id,omitempty"`
+
 	MappingEnabled  bool   `gorm:"not null;default:false;index" json:"mapping_enabled"`
 	OrganizeEnabled bool   `gorm:"not null;default:false;index" json:"organize_enabled"`
 	SourcePath      string `gorm:"size:500" json:"source_path"`

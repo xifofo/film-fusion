@@ -261,6 +261,8 @@ func (s *Server) setupRoutes() {
 			directories.POST("/", mediaDirectoryHandler.Save)
 			directories.GET("/:id", mediaDirectoryHandler.Get)
 			directories.PUT("/:id", mediaDirectoryHandler.Save)
+			directories.POST("/:id/merge-preview", mediaDirectoryHandler.MergePreview)
+			directories.POST("/:id/merge", mediaDirectoryHandler.Merge)
 			directories.DELETE("/:id", mediaDirectoryHandler.Delete)
 			directories.POST("/:id/strm/replace", mediaDirectoryHandler.ReplaceStrmContent)
 			directories.GET("/:id/browser", cloudBrowserHandler.Browse)

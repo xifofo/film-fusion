@@ -145,6 +145,11 @@ func upgradeBindings(dir model.MediaDirectory, mappings []model.MediaDirectory, 
 	}
 	add(dir.SavePath, dir.ContentPrefix, cloudPath, dir.ContentEncodeURI)
 	for _, mapping := range mappings {
+		runtime, err := mapping.MappingRuntimeConfig()
+		if err != nil {
+			continue
+		} // 配置保存和合并入口已校验；无效旧配置不得扩大写入范围。
+		mapping = runtime
 		filterType := "include"
 		if isSubtitleFile(cloudPath) {
 			filterType = "download"

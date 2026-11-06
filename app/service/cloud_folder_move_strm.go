@@ -71,6 +71,11 @@ func (s *CloudFolderMoveService) createMovedFileSTRM(ctx context.Context, provid
 		result.Status, result.Message = "skipped", "目标文件不在当前账号的 STRM 云路径映射范围内"
 		return result
 	}
+	runtime, err := mapping.MappingRuntimeConfig()
+	if err != nil {
+		return fail(err.Error())
+	}
+	mapping = &runtime
 	result.CloudPathID = mapping.ID
 	allowed, filterErr := cloudMovedSTRMFilter(cloudPath, mapping.FilterRules)
 	if filterErr != nil {

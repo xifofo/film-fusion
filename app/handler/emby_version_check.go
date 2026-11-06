@@ -366,7 +366,12 @@ func scanEmbyVersionCloudPathsWithProgress(paths []model.MediaDirectory, mediaTy
 	}
 
 	for i := range paths {
-		p := paths[i]
+		p, conversionErr := paths[i].MappingRuntimeConfig()
+		if conversionErr != nil {
+			result.Errors = append(result.Errors, conversionErr.Error())
+			result.SkippedCloudPathIDs = append(result.SkippedCloudPathIDs, paths[i].ID)
+			continue
+		}
 		localRoot := strings.TrimSpace(p.SavePath)
 		scanned := EmbyVersionScannedPath{
 			CloudPathID:    p.ID,

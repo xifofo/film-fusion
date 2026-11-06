@@ -135,7 +135,7 @@ func (h *MediaDirectoryHandler) Save(c *gin.Context) {
 	}
 	// 兼容旧客户端传入用途字段；服务端在合并配置后重新计算，不接受手动覆盖。
 	allowed := map[string]bool{}
-	for _, key := range strings.Fields("mapping_enabled organize_enabled cloud_storage_id directory_name directory_id source_path source_type save_path content_prefix content_encode_uri emby_path_prefix link_type strm_content_type filter_rules recognition_source upgrade_policy include_extensions exclude_extensions exclude_smaller_than_mb classify_by_category") {
+	for _, key := range strings.Fields("mapping_enabled organize_enabled cloud_storage_id directory_name directory_id source_path source_type mapping_path_prefix save_path content_prefix content_encode_uri emby_path_prefix link_type strm_content_type filter_rules recognition_source upgrade_policy include_extensions exclude_extensions exclude_smaller_than_mb classify_by_category") {
 		allowed[key] = true
 	}
 	for key, value := range fields {
@@ -274,6 +274,9 @@ func validateMediaDirectory(tx *gorm.DB, uid uint, row *model.MediaDirectory) er
 		if count > 0 {
 			return fmt.Errorf("该云端目录已存在整理配置")
 		}
+	}
+	if _, err := row.MappingRuntimeConfig(); err != nil {
+		return err
 	}
 	if row.OrganizeEnabled && row.RecognitionSource != "" {
 		source, err := config.NormalizeMediaRecognitionSource(row.RecognitionSource)
