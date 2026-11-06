@@ -31,7 +31,7 @@ type CloudBrowserSTRMItemResult struct {
 
 // The caller loads configurations for one authenticated user and storage. Match
 // real 115 IDs, not names, and prefer the deepest configured ancestor.
-func cloudBrowserMatchDirectory(configs []model.CloudDirectory, ancestry []CloudBrowserBreadcrumb) (*model.CloudDirectory, int, error) {
+func cloudBrowserMatchDirectory(configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb) (*model.MediaDirectory, int, error) {
 	seen := make(map[string]bool, len(ancestry))
 	for i, crumb := range ancestry {
 		if !cloudMoveID(crumb.ID, true) || seen[crumb.ID] || (i > 0 && crumb.ParentID != ancestry[i-1].ID) {
@@ -43,7 +43,7 @@ func cloudBrowserMatchDirectory(configs []model.CloudDirectory, ancestry []Cloud
 		seen[crumb.ID] = true
 	}
 	for depth := len(ancestry) - 1; depth >= 0; depth-- {
-		var matched *model.CloudDirectory
+		var matched *model.MediaDirectory
 		for i := range configs {
 			if configs[i].DirectoryID != ancestry[depth].ID {
 				continue
@@ -120,7 +120,7 @@ func cloudBrowserSubtitle(name string) bool {
 
 // Availability does not touch the provider or local filesystem. Directories use
 // only configuration checks; each discovered file gets its own filter check.
-func cloudBrowserSTRMUnavailable(config *model.CloudDirectory, item CloudBrowserEntry) string {
+func cloudBrowserSTRMUnavailable(config *model.MediaDirectory, item CloudBrowserEntry) string {
 	if config == nil {
 		return "未匹配当前账号的目录配置"
 	}
@@ -171,7 +171,7 @@ func cloudBrowserSTRMUnavailable(config *model.CloudDirectory, item CloudBrowser
 // The recursive job uses the exact same path calculation before writing to
 // detect two different cloud files (for example Film.mkv / Film.mp4) that would
 // otherwise overwrite the same STRM during one operation.
-func cloudBrowserSTRMTarget(configs []model.CloudDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) (string, error) {
+func cloudBrowserSTRMTarget(configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) (string, error) {
 	if !item.IsFile || len(ancestry) == 0 || item.ParentID != ancestry[len(ancestry)-1].ID {
 		return "", errors.New("文件不属于已确认的目录")
 	}
@@ -189,7 +189,7 @@ func cloudBrowserSTRMTarget(configs []model.CloudDirectory, ancestry []CloudBrow
 	return filepath.Join(root, relative), nil
 }
 
-func cloudBrowserSTRMPaths(config *model.CloudDirectory, depth int, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) ([]string, string, string, error) {
+func cloudBrowserSTRMPaths(config *model.MediaDirectory, depth int, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) ([]string, string, string, error) {
 	parts, err := cloudBrowserAliasParts(config.DirectoryName)
 	if err != nil {
 		return nil, "", "", err
@@ -208,7 +208,7 @@ func cloudBrowserSTRMPaths(config *model.CloudDirectory, depth int, ancestry []C
 
 // writeSTRM is deliberately local-only. The enclosing job holds the organize
 // storage lock; invoking StrmService here could perform hidden 115 lookups.
-func (s *CloudBrowserService) writeSTRM(ctx context.Context, configs []model.CloudDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) CloudBrowserSTRMItemResult {
+func (s *CloudBrowserService) writeSTRM(ctx context.Context, configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) CloudBrowserSTRMItemResult {
 	result := CloudBrowserSTRMItemResult{FileID: item.FileID, Name: item.Name, Status: "failed"}
 	fail := func(message string) CloudBrowserSTRMItemResult { result.Message = message; return result }
 	if err := ctx.Err(); err != nil {

@@ -72,8 +72,8 @@ func TestAppConfigHandlerGetUsesDatabase115Settings(t *testing.T) {
 	if got := response.Data.Config.Server.Cookie115DefaultApp; got != "wechatmini" {
 		t.Fatalf("cookie_115_default_app = %q, want database value wechatmini", got)
 	}
-	if got := response.Data.Config.MediaRecognition.Source; got != "local" {
-		t.Fatalf("media_recognition.source = %q, want database value local", got)
+	if got := response.Data.Config.MediaRecognition.Source; got != "medianame" {
+		t.Fatalf("media_recognition.source = %q, want medianame", got)
 	}
 }
 

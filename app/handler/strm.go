@@ -213,10 +213,10 @@ func (h *StrmHandler) RegenerateDirectory(c *gin.Context) {
 		return
 	}
 
-	var cloudPath model.CloudPath
+	var cloudPath model.MediaDirectory
 	if err := database.DB.Preload("CloudStorage").
 		Where("id = ? AND user_id = ?", payload.CloudPathID, userID).
-		First(&cloudPath).Error; err != nil {
+		Scopes(model.MappingDirectories).First(&cloudPath).Error; err != nil {
 		h.error(c, http.StatusBadRequest, 400, "云路径映射不存在或无权限")
 		return
 	}
@@ -233,13 +233,13 @@ func (h *StrmHandler) RegenerateDirectory(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "云存储不可用或令牌已过期")
 		return
 	}
-	if strings.TrimSpace(cloudPath.LocalPath) == "" {
+	if strings.TrimSpace(cloudPath.SavePath) == "" {
 		h.error(c, http.StatusBadRequest, 400, "该云路径映射未配置本地路径，无法生成 STRM")
 		return
 	}
 
 	strmSvc := service.NewStrmService(h.logger, h.download115Svc)
-	go func(dir string, cp model.CloudPath) {
+	go func(dir string, cp model.MediaDirectory) {
 		defer func() {
 			if r := recover(); r != nil {
 				h.logger.Errorf("[regenerate-strm] 重生成 STRM panic: %v", r)

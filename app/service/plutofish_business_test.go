@@ -15,20 +15,20 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func plutoFishBusinessFixture(t *testing.T) (*PlutoFishBusiness, model.CloudPath, plutofish.Event) {
+func plutoFishBusinessFixture(t *testing.T) (*PlutoFishBusiness, model.MediaDirectory, plutofish.Event) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "test.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.CloudStorage{}, &model.CloudPath{}, &model.PlutoFishBusinessPlan{}); err != nil {
+	if err := db.AutoMigrate(&model.CloudStorage{}, &model.MediaDirectory{}, &model.PlutoFishBusinessPlan{}); err != nil {
 		t.Fatal(err)
 	}
 	// No provider credentials: notification handling must never need them.
 	if err := db.Create(&model.CloudStorage{ID: 1, UserID: 7, StorageType: model.StorageType115Open, Status: model.StatusActive}).Error; err != nil {
 		t.Fatal(err)
 	}
-	mapping := model.CloudPath{ID: 2, UserID: 7, CloudStorageID: 1, SourcePath: "/Movies", SourceType: model.SourceTypeMoviePilot2, ContentPrefix: "https://existing-player.example/play", ContentEncodeURI: true, LocalPath: t.TempDir(), LinkType: model.LinkTypeStrm, FilterRules: `{"include":["mkv"],"download":["srt"]}`}
+	mapping := model.MediaDirectory{MappingEnabled: true, ID: 2, UserID: 7, CloudStorageID: 1, SourcePath: "/Movies", SourceType: model.SourceTypeMoviePilot2, ContentPrefix: "https://existing-player.example/play", ContentEncodeURI: true, SavePath: t.TempDir(), LinkType: model.LinkTypeStrm, FilterRules: `{"include":["mkv"],"download":["srt"]}`}
 	if err := db.Create(&mapping).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -42,11 +42,11 @@ func TestPlutoFishBusinessCreatesRealMappedSTRMAndReplaysAfterRestart(t *testing
 		t.Run(map[bool]string{false: "MP2", true: "CD2"}[cd2], func(t *testing.T) {
 			b, mapping, event := plutoFishBusinessFixture(t)
 			mount := ""
-			localDir := filepath.Join(mapping.LocalPath, "Movies", "Title")
+			localDir := filepath.Join(mapping.SavePath, "Movies", "Title")
 			if cd2 {
 				mapping.SourceType, mapping.SourcePath = model.SourceTypeCloudDrive2, "/115挂载/Movies"
 				mount = "/115%E6%8C%82%E8%BD%BD"
-				localDir = filepath.Join(mapping.LocalPath, "115挂载", "Movies", "Title")
+				localDir = filepath.Join(mapping.SavePath, "115挂载", "Movies", "Title")
 				if err := b.db.Save(&mapping).Error; err != nil {
 					t.Fatal(err)
 				}
@@ -56,19 +56,19 @@ func TestPlutoFishBusinessCreatesRealMappedSTRMAndReplaysAfterRestart(t *testing
 				t.Fatal(err)
 			}
 			want := "https://existing-player.example/play" + mount + "/Movies/Title/%E5%BD%B1%E7%89%87%20%231.mkv"
-			data, err := os.ReadFile(first.LocalPath)
+			data, err := os.ReadFile(first.SavePath)
 			if err != nil || string(data) != want {
 				t.Fatalf("content=%q want=%q err=%v", data, want, err)
 			}
-			if first.LocalPath != filepath.Join(localDir, "影片 #1.strm") {
-				t.Fatalf("unexpected path %q", first.LocalPath)
+			if first.SavePath != filepath.Join(localDir, "影片 #1.strm") {
+				t.Fatalf("unexpected path %q", first.SavePath)
 			}
 			// An independent adapter instance models process restart before inbox commit.
 			second, err := NewPlutoFishBusiness(b.db, b.options).Handle(context.Background(), "https://plutofish.example|owner", event)
 			if err != nil || first != second {
 				t.Fatalf("replay=%+v err=%v", second, err)
 			}
-			if entries, err := os.ReadDir(filepath.Dir(first.LocalPath)); err != nil || len(entries) != 1 || entries[0].Name() != "影片 #1.strm" {
+			if entries, err := os.ReadDir(filepath.Dir(first.SavePath)); err != nil || len(entries) != 1 || entries[0].Name() != "影片 #1.strm" {
 				t.Fatalf("unexpected outputs %v %v", entries, err)
 			}
 		})
@@ -114,7 +114,7 @@ func TestPlutoFishBusinessMissingMetadataAndFailedStatusesStayPending(t *testing
 			if result, err := b.Handle(context.Background(), "scope", event); err == nil {
 				t.Fatalf("expected pending, got %+v", result)
 			}
-			if entries, err := os.ReadDir(mapping.LocalPath); err != nil || len(entries) != 0 {
+			if entries, err := os.ReadDir(mapping.SavePath); err != nil || len(entries) != 0 {
 				t.Fatalf("unexpected local effect %v %v", entries, err)
 			}
 			var plans int64
@@ -133,8 +133,8 @@ func TestPlutoFishBusinessPlanPinsRootAcrossCrashAndMappingChange(t *testing.T) 
 	}
 	// Model a crash after file publication but before the inbox's success
 	// receipt, followed by an operator changing the CloudPath local directory.
-	originalRoot := mapping.LocalPath
-	mapping.LocalPath = t.TempDir()
+	originalRoot := mapping.SavePath
+	mapping.SavePath = t.TempDir()
 	if err := b.db.Save(&mapping).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -142,18 +142,18 @@ func TestPlutoFishBusinessPlanPinsRootAcrossCrashAndMappingChange(t *testing.T) 
 	if _, err := restarted.Handle(context.Background(), "service|owner", event); err == nil || !strings.Contains(err.Error(), "原计划") {
 		t.Fatalf("changed root did not remain for review: %v", err)
 	}
-	if entries, err := os.ReadDir(mapping.LocalPath); err != nil || len(entries) != 0 {
+	if entries, err := os.ReadDir(mapping.SavePath); err != nil || len(entries) != 0 {
 		t.Fatalf("same transfer published into a second root: %v %v", entries, err)
 	}
 	var plan model.PlutoFishBusinessPlan
 	if err := b.db.Where("scope = ? AND transfer_id = ?", "service|owner", event.TransferID).Take(&plan).Error; err != nil || plan.RootPath != originalRoot {
 		t.Fatalf("original plan was changed: %+v %v", plan, err)
 	}
-	mapping.LocalPath = originalRoot
+	mapping.SavePath = originalRoot
 	if err := b.db.Save(&mapping).Error; err != nil {
 		t.Fatal(err)
 	}
-	if replay, err := restarted.Handle(context.Background(), "service|owner", event); err != nil || replay.LocalPath != first.LocalPath {
+	if replay, err := restarted.Handle(context.Background(), "service|owner", event); err != nil || replay.SavePath != first.SavePath {
 		t.Fatalf("same plan cannot resume: %+v %v", replay, err)
 	}
 }
@@ -186,7 +186,7 @@ func TestPlutoFishBusinessOwnerAndMappingValidation(t *testing.T) {
 			case "secret URL":
 				mapping.ContentPrefix = "https://existing-player.example/?api_key=secret"
 			case "relative root":
-				mapping.LocalPath = "relative"
+				mapping.SavePath = "relative"
 			case "no encoding":
 				mapping.ContentEncodeURI = false
 			}
@@ -207,7 +207,7 @@ func TestPlutoFishBusinessIdempotencyNamespaceAndConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	other, err := b.Handle(context.Background(), "service|owner-2", event)
-	if err != nil || other.LocalPath != first.LocalPath {
+	if err != nil || other.SavePath != first.SavePath {
 		t.Fatalf("same mapping must reuse the same file: %+v %v", other, err)
 	}
 	var plans int64
@@ -219,16 +219,16 @@ func TestPlutoFishBusinessIdempotencyNamespaceAndConflicts(t *testing.T) {
 	if result, err := b.Handle(context.Background(), "service|owner-1", changed); err == nil {
 		t.Fatalf("renamed replay created a duplicate: %+v", result)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(first.LocalPath), "changed.strm")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(first.SavePath), "changed.strm")); !os.IsNotExist(err) {
 		t.Fatalf("duplicate path exists: %v", err)
 	}
-	if err := os.WriteFile(first.LocalPath, []byte("unrelated content"), 0644); err != nil {
+	if err := os.WriteFile(first.SavePath, []byte("unrelated content"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := b.Handle(context.Background(), "service|owner-1", event); err == nil {
 		t.Fatal("conflicting STRM accepted")
 	}
-	if data, err := os.ReadFile(first.LocalPath); err != nil || string(data) != "unrelated content" {
+	if data, err := os.ReadFile(first.SavePath); err != nil || string(data) != "unrelated content" {
 		t.Fatalf("overwrote unrelated content: %q %v", data, err)
 	}
 }
@@ -245,7 +245,7 @@ func TestPlutoFishBusinessFailedThenSucceededAndCancellation(t *testing.T) {
 	if _, err := b.Handle(cancelled, "scope", event); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel ignored: %v", err)
 	}
-	if entries, err := os.ReadDir(mapping.LocalPath); err != nil || len(entries) != 0 {
+	if entries, err := os.ReadDir(mapping.SavePath); err != nil || len(entries) != 0 {
 		t.Fatalf("cancelled operation wrote files: %v %v", entries, err)
 	}
 	if _, err := b.Handle(context.Background(), "scope", event); err != nil {

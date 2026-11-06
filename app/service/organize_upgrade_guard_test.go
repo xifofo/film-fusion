@@ -81,7 +81,7 @@ func TestUpgradeGuardProtectsCurrentStrmFromDelayedEvents(t *testing.T) {
 	if err != nil || string(data) != "current" {
 		t.Fatalf("late delete removed new STRM: %q %v", data, err)
 	}
-	mapping := model.CloudPath{LocalPath: root, ContentPrefix: "wrong prefix", SourceType: model.SourceTypeMoviePilot2, CloudStorage: &storage}
+	mapping := model.MediaDirectory{MappingEnabled: true, SavePath: root, ContentPrefix: "wrong prefix", SourceType: model.SourceTypeMoviePilot2, CloudStorage: &storage}
 	s.CreateStrmOrDownloadWith115OpenAPI("/media/title.mkv", mapping, "old-pick")
 	data, _ = os.ReadFile(target)
 	if string(data) != "current" {
@@ -109,10 +109,10 @@ func TestUpgradeGuardProtectsCurrentStrmFromDelayedEvents(t *testing.T) {
 }
 
 func TestUpgradeRecoveryAndRetiredCacheGuards(t *testing.T) {
-	if !upgradeRecoveryEvent("/挂载/FilmFusion-Recovery/job/file.mkv", model.CloudPath{SourceType: model.SourceTypeCloudDrive2}) {
+	if !upgradeRecoveryEvent("/挂载/FilmFusion-Recovery/job/file.mkv", model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeCloudDrive2}) {
 		t.Fatal("CD2 recovery event not excluded")
 	}
-	if upgradeRecoveryEvent("/挂载/FilmFusion-Recovery-other/file.mkv", model.CloudPath{SourceType: model.SourceTypeCloudDrive2}) {
+	if upgradeRecoveryEvent("/挂载/FilmFusion-Recovery-other/file.mkv", model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeCloudDrive2}) {
 		t.Fatal("unrelated recovery prefix excluded")
 	}
 	expires := time.Now().Add(time.Hour)

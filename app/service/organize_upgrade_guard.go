@@ -13,7 +13,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func upgradeRecoveryEvent(eventPath string, mapping model.CloudPath) bool {
+func upgradeRecoveryEvent(eventPath string, mapping model.MediaDirectory) bool {
 	if mapping.SourceType == model.SourceTypeCloudDrive2 {
 		eventPath = pathhelper.RemoveFirstDir(eventPath)
 	}

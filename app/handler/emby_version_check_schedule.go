@@ -198,16 +198,16 @@ func normalizeEmbyVersionCheckPathIDs(ids []uint) []uint {
 	return out
 }
 
-func (h *EmbyVersionCheckHandler) configuredEmbyVersionCheckPaths(userID uint, ids []uint) ([]model.CloudPath, error) {
+func (h *EmbyVersionCheckHandler) configuredEmbyVersionCheckPaths(userID uint, ids []uint) ([]model.MediaDirectory, error) {
 	if h.scheduler == nil || h.scheduler.db == nil {
 		return nil, fmt.Errorf("数据库未初始化")
 	}
-	query := h.scheduler.db.Preload("CloudStorage").
-		Where("user_id = ? AND local_path <> ''", userID)
+	query := h.scheduler.db.Scopes(model.MappingDirectories).Preload("CloudStorage").
+		Where("user_id = ? AND save_path <> ''", userID)
 	if len(ids) > 0 {
 		query = query.Where("id IN ?", ids)
 	}
-	var paths []model.CloudPath
+	var paths []model.MediaDirectory
 	if err := query.Order("id asc").Find(&paths).Error; err != nil {
 		return nil, err
 	}

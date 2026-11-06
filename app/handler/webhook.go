@@ -78,8 +78,8 @@ func (h *WebhookHandler) CloudDrive2FileNotify(c *gin.Context) {
 		Trigger: model.OrganizeTriggerCD2, Source: cd2Source, Target: cd2Target, Message: cd2Summary,
 	})
 
-	var cloudPaths []model.CloudPath
-	err := database.DB.Where("source_type = ?", model.SourceTypeCloudDrive2).Preload("CloudStorage").Find(&cloudPaths).Error
+	var cloudPaths []model.MediaDirectory
+	err := database.DB.Scopes(model.MappingDirectories).Where("source_type = ?", model.SourceTypeCloudDrive2).Preload("CloudStorage").Find(&cloudPaths).Error
 
 	if err != nil {
 		h.logger.Errorf("获取 CloudPath 记录失败: %v", err)
@@ -121,8 +121,8 @@ func (h *WebhookHandler) MoviePilotV2Webhook(c *gin.Context) {
 	jsonData, _ := json.Marshal(requestBody)
 	h.logger.Debugf("MoviePilot V2 Webhook 请求体: %s", string(jsonData))
 
-	var cloudPaths []model.CloudPath
-	err := database.DB.Where("source_type = ?", model.SourceTypeMoviePilot2).Preload("CloudStorage").Find(&cloudPaths).Error
+	var cloudPaths []model.MediaDirectory
+	err := database.DB.Scopes(model.MappingDirectories).Where("source_type = ?", model.SourceTypeMoviePilot2).Preload("CloudStorage").Find(&cloudPaths).Error
 
 	if err != nil {
 		h.logger.Errorf("获取 CloudPath 记录失败: %v", err)

@@ -20,7 +20,7 @@ type pfRepairFixture struct {
 	svc          *PlutoFishService
 	db           *gorm.DB
 	cfg          plutoFishSavedConfig
-	mapping      model.CloudPath
+	mapping      model.MediaDirectory
 	event        plutofish.Event
 	row          model.PlutoFishEvent
 	old, desired model.PlutoFishBusinessPlan
@@ -54,7 +54,7 @@ func (f *pfRepairFixture) addLegacy(t *testing.T, event plutofish.Event, receipt
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := model.PlutoFishBusinessPlan{Scope: scope, TransferID: event.TransferID, RootPath: f.mapping.LocalPath, RelativePath: plutoFishLegacyPath(scope, event.TransferID, strings.TrimSuffix(event.FileName, filepath.Ext(event.FileName))+".strm"), Content: "/old/wrong-playback.mkv"}
+	old := model.PlutoFishBusinessPlan{Scope: scope, TransferID: event.TransferID, RootPath: f.mapping.SavePath, RelativePath: plutoFishLegacyPath(scope, event.TransferID, strings.TrimSuffix(event.FileName, filepath.Ext(event.FileName))+".strm"), Content: "/old/wrong-playback.mkv"}
 	if err := f.db.Create(&old).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestPlutoFishRepairPreviewApplyAndIdempotencyOffline(t *testing.T) {
 	var beforePlan model.PlutoFishBusinessPlan
 	f.db.First(&beforePlan)
 	item := f.preview(t)
-	if !item.CanRepair || item.State != "ready" || item.NewPath != filepath.Join(f.mapping.LocalPath, "Movies/Title/影片 #1.strm") {
+	if !item.CanRepair || item.State != "ready" || item.NewPath != filepath.Join(f.mapping.SavePath, "Movies/Title/影片 #1.strm") {
 		t.Fatalf("item=%+v", item)
 	}
 	if item.Content == item.OldContent {
@@ -192,7 +192,7 @@ func TestPlutoFishRepairPreviewApplyAndIdempotencyOffline(t *testing.T) {
 		t.Fatalf("result=%+v", result)
 	}
 	f.assertDone(t)
-	if _, err := os.Stat(filepath.Join(f.mapping.LocalPath, "PlutoFish")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(f.mapping.SavePath, "PlutoFish")); !os.IsNotExist(err) {
 		t.Fatal("empty hash tree remains")
 	}
 	if result := f.apply(t, item); result.State != "repaired" {

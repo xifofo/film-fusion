@@ -30,7 +30,7 @@ type upgradeTestEnv struct {
 	h                            *Service
 	db                           *gorm.DB
 	client                       *driver.Pan115Client
-	dir                          model.CloudDirectory
+	dir                          model.MediaDirectory
 	storage                      model.CloudStorage
 	files                        map[string]service.Web115File
 	paths                        map[string]string
@@ -49,7 +49,7 @@ func newUpgradeTestEnv(t *testing.T, sameName, subtitles bool) *upgradeTestEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = e.db.AutoMigrate(&model.CloudStorage{}, &model.CloudDirectory{}, &model.CloudPath{}, &model.OrganizePlan{}, &model.OrganizeMediaFile{}, &model.OrganizeManagedStrm{}, &model.OrganizeStorageLock{}, &model.OrganizeUpgradeJob{}, &model.PickcodeCache{}, &model.Match302BalanceAssignment{}, &model.OrganizeLog{}); err != nil {
+	if err = e.db.AutoMigrate(&model.CloudStorage{}, &model.MediaDirectory{}, &model.OrganizePlan{}, &model.OrganizeMediaFile{}, &model.OrganizeManagedStrm{}, &model.OrganizeStorageLock{}, &model.OrganizeUpgradeJob{}, &model.PickcodeCache{}, &model.Match302BalanceAssignment{}, &model.OrganizeLog{}); err != nil {
 		t.Fatal(err)
 	}
 	previous := database.DB
@@ -70,7 +70,7 @@ func newUpgradeTestEnv(t *testing.T, sameName, subtitles bool) *upgradeTestEnv {
 	e.must(e.db.Create(&e.storage).Error)
 	policy := service.MediaUpgradePresets()["quality"]
 	policy.Enabled = true
-	e.dir = model.CloudDirectory{ID: 2, UserID: 1, CloudStorageID: 3, DirectoryID: "10", DirectoryName: "影视", SavePath: t.TempDir(), ContentPrefix: "https://media.test/strm", UpgradePolicy: planJSON(policy)}
+	e.dir = model.MediaDirectory{OrganizeEnabled: true, ID: 2, UserID: 1, CloudStorageID: 3, DirectoryID: "10", DirectoryName: "影视", SavePath: t.TempDir(), ContentPrefix: "https://media.test/strm", UpgradePolicy: planJSON(policy)}
 	e.must(e.db.Create(&e.dir).Error)
 	targetDir := "/影视/Example (2024) {tmdb-123}"
 	e.paths[targetDir] = "900"
@@ -223,9 +223,9 @@ func TestOrganizeUpgradeReplacesFilesAndAllStrmMappings(t *testing.T) {
 	for _, sameName := range []bool{false, true} {
 		t.Run(fmt.Sprint("same-name=", sameName), func(t *testing.T) {
 			e := newUpgradeTestEnv(t, sameName, true)
-			mapping := model.CloudPath{UserID: 1, CloudStorageID: 3, SourcePath: "/影视", SourceType: model.SourceTypeMoviePilot2, LocalPath: t.TempDir(), ContentPrefix: "https://second.test/play", ContentEncodeURI: true}
+			mapping := model.MediaDirectory{MappingEnabled: true, UserID: 1, CloudStorageID: 3, SourcePath: "/影视", SourceType: model.SourceTypeMoviePilot2, SavePath: t.TempDir(), ContentPrefix: "https://second.test/play", ContentEncodeURI: true}
 			e.must(e.db.Create(&mapping).Error)
-			secondOld := upgradeBindings(e.dir, []model.CloudPath{mapping}, e.oldPath)[1]
+			secondOld := upgradeBindings(e.dir, []model.MediaDirectory{mapping}, e.oldPath)[1]
 			e.write(secondOld.Path, secondOld.Content)
 			e.preview()
 			e.lostAck = true

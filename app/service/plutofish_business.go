@@ -36,8 +36,8 @@ type PlutoFishBusinessOptions struct {
 }
 
 type PlutoFishBusinessResult struct {
-	LocalPath string `json:"localPath"`
-	Message   string `json:"message"`
+	SavePath string `json:"localPath"`
+	Message  string `json:"message"`
 }
 
 // PlutoFishBusiness performs only local reads and writes. It deliberately
@@ -96,7 +96,7 @@ func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutof
 	if (len(rules.Download) > 0 && pathhelper.IsFileMatchedByFilter(cloudFile, filter, "download")) || !pathhelper.IsFileMatchedByFilter(cloudFile, filter, "include") {
 		return fail("文件被云路径规则排除或属于下载类文件，已保留待处理且未执行下载")
 	}
-	rootPath := strings.TrimSpace(mapping.LocalPath)
+	rootPath := strings.TrimSpace(mapping.SavePath)
 	if !filepath.IsAbs(rootPath) {
 		return fail("云路径未配置有效的本地绝对路径")
 	}
@@ -135,9 +135,9 @@ func (b *PlutoFishBusiness) plan(ctx context.Context, scope string, event plutof
 // One receiving account may cover several libraries. Select the most specific
 // matching source directory before applying its filters and output settings.
 // Equal matches remain for review; configuration order must never decide a write.
-func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudFile string) (model.CloudPath, string, error) {
-	fail := func(message string) (model.CloudPath, string, error) {
-		return model.CloudPath{}, "", errors.New(message)
+func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudFile string) (model.MediaDirectory, string, error) {
+	fail := func(message string) (model.MediaDirectory, string, error) {
+		return model.MediaDirectory{}, "", errors.New(message)
 	}
 	ids := []uint{}
 	seen := map[uint]bool{}
@@ -154,11 +154,11 @@ func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudF
 	if len(ids) == 0 {
 		return fail("接收网盘尚未绑定 FilmFusion 云路径映射")
 	}
-	var mappings []model.CloudPath
-	if err := b.db.WithContext(ctx).Where("id IN ? AND user_id = ?", ids, b.options.UserID).Find(&mappings).Error; err != nil || len(mappings) != len(ids) {
+	var mappings []model.MediaDirectory
+	if err := b.db.WithContext(ctx).Where("id IN ? AND user_id = ?", ids, b.options.UserID).Scopes(model.MappingDirectories).Find(&mappings).Error; err != nil || len(mappings) != len(ids) {
 		return fail("无法读取当前用户的云路径映射，请检查映射是否存在")
 	}
-	var selected model.CloudPath
+	var selected model.MediaDirectory
 	var eventPath string
 	bestLength, matches := -1, 0
 	for _, mapping := range mappings {
@@ -200,7 +200,7 @@ func (b *PlutoFishBusiness) selectMapping(ctx context.Context, accountID, cloudF
 // Handle 按持久化计划生成本地文件；成功不代表网盘播放或 Emby 刷新成功。
 func (b *PlutoFishBusiness) Handle(ctx context.Context, scope string, event plutofish.Event) (PlutoFishBusinessResult, error) {
 	plan, err := b.plan(ctx, scope, event)
-	result := PlutoFishBusinessResult{LocalPath: filepath.Join(plan.RootPath, plan.RelativePath)}
+	result := PlutoFishBusinessResult{SavePath: filepath.Join(plan.RootPath, plan.RelativePath)}
 	if err != nil {
 		return PlutoFishBusinessResult{}, err
 	}

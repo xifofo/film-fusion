@@ -33,9 +33,9 @@ func NewStrmService(log *logger.Logger, download115Svc *Download115Service) *Str
 	}
 }
 
-func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
+func (s *StrmService) CreateFile(path string, cloudPath model.MediaDirectory) error {
+	if cloudPath.SavePath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return nil
 	}
 	if !pathhelper.IsSubPath(path, cloudPath.SourcePath) {
@@ -63,9 +63,9 @@ func (s *StrmService) CreateFile(path string, cloudPath model.CloudPath) error {
 	return nil
 }
 
-func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.CloudPath, originalInside, destinationInside bool) {
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
+func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.MediaDirectory, originalInside, destinationInside bool) {
+	if cloudPath.SavePath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
@@ -88,13 +88,13 @@ func (s *StrmService) RenameFile(originalPath, path string, cloudPath model.Clou
 
 	// 原路径也在监控目录内时，需要删除本地的内容
 	if originalInside {
-		s.DeleteAction(cloudPath.LocalPath, originalPath, false)
+		s.DeleteAction(cloudPath.SavePath, originalPath, false)
 	}
 }
 
-func (s *StrmService) CreateDir(path string, cloudPath model.CloudPath) {
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
+func (s *StrmService) CreateDir(path string, cloudPath model.MediaDirectory) {
+	if cloudPath.SavePath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
@@ -103,9 +103,9 @@ func (s *StrmService) CreateDir(path string, cloudPath model.CloudPath) {
 	}
 }
 
-func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.CloudPath, originalInside, destinationInside bool) {
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件处理", cloudPath.ID)
+func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.MediaDirectory, originalInside, destinationInside bool) {
+	if cloudPath.SavePath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件处理", cloudPath.ID)
 		return
 	}
 
@@ -115,7 +115,7 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 
 	// 原路径也在监控目录内时，需要删除本地的内容
 	if originalInside {
-		s.DeleteAction(cloudPath.LocalPath, originalPath, true)
+		s.DeleteAction(cloudPath.SavePath, originalPath, true)
 	}
 }
 
@@ -129,7 +129,7 @@ func (s *StrmService) RenameDir(originalPath, path string, cloudPath model.Cloud
 // 参数：
 //   - dirPath: 要遍历的目录路径
 //   - cloudPath: 云盘路径配置信息，包含过滤规则等
-func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.CloudPath) {
+func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.MediaDirectory) {
 	// Keep this traversal and its recursive pages bound to the same account.
 	worker := *s
 	worker.sdk115Open = sdk115helper.WithAccessToken(s.sdk115Open, cloudPath.CloudStorage.AccessToken)
@@ -162,7 +162,7 @@ func (s *StrmService) WalkDirWith115OpenAPI(dirPath string, cloudPath model.Clou
 //   - currentPath: 当前遍历的路径
 //   - cloudPath: 云盘路径配置信息
 //   - depth: 当前递归深度，用于防止无限递归
-func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudPath, depth int) {
+func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.MediaDirectory, depth int) {
 	if upgradeRecoveryEvent(currentPath, cloudPath) {
 		return
 	}
@@ -227,11 +227,11 @@ func (s *StrmService) walkDir115(cid, currentPath string, cloudPath model.CloudP
 	}
 }
 
-func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.CloudPath, pickcode string) {
+func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath model.MediaDirectory, pickcode string) {
 	if upgradeRecoveryEvent(path, cloudPath) {
 		return
 	}
-	savePath, err := pathhelper.JoinUnderRoot(cloudPath.LocalPath, path)
+	savePath, err := pathhelper.JoinUnderRoot(cloudPath.SavePath, path)
 	if err != nil {
 		s.logger.Warnf("拒绝不安全的 STRM 目标路径 %q: %v", path, err)
 		return
@@ -242,7 +242,7 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 		return
 	}
 	fileExt := strings.ToLower(filepath.Ext(savePath))
-	if s.protectUpgradeEntry(cloudPath.LocalPath, upgradeStrmPath(savePath), false, true) || s.protectUpgradeEntry(cloudPath.LocalPath, savePath, false, true) {
+	if s.protectUpgradeEntry(cloudPath.SavePath, upgradeStrmPath(savePath), false, true) || s.protectUpgradeEntry(cloudPath.SavePath, savePath, false, true) {
 		return
 	}
 
@@ -300,11 +300,11 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	strmFilePath := fullPathName + ".strm"
 	relativeFullPath := relativePath[:len(relativePath)-len(fileExt)]
 	strmRelativePath := relativeFullPath + ".strm"
-	if err := os.MkdirAll(cloudPath.LocalPath, 0755); err != nil {
+	if err := os.MkdirAll(cloudPath.SavePath, 0755); err != nil {
 		s.logger.Errorf("创建 STRM 根目录失败: %v", err)
 		return
 	}
-	localRoot, err := os.OpenRoot(cloudPath.LocalPath)
+	localRoot, err := os.OpenRoot(cloudPath.SavePath)
 	if err != nil {
 		s.logger.Errorf("打开 STRM 根目录失败: %v", err)
 		return
@@ -368,9 +368,9 @@ func (s *StrmService) CreateStrmOrDownloadWith115OpenAPI(path string, cloudPath 
 	s.logger.Debugf("STRM 文件内容: %s", content)
 }
 
-func (s *StrmService) DeleteStrm(path string, cloudPath model.CloudPath, isDir bool) {
-	if cloudPath.LocalPath == "" {
-		s.logger.Warnf("CloudPath (ID: %d) 没有设置 LocalPath，跳过 STRM 文件删除", cloudPath.ID)
+func (s *StrmService) DeleteStrm(path string, cloudPath model.MediaDirectory, isDir bool) {
+	if cloudPath.SavePath == "" {
+		s.logger.Warnf("CloudPath (ID: %d) 没有设置 SavePath，跳过 STRM 文件删除", cloudPath.ID)
 		return
 	}
 
@@ -380,7 +380,7 @@ func (s *StrmService) DeleteStrm(path string, cloudPath model.CloudPath, isDir b
 		return
 	}
 
-	s.DeleteAction(cloudPath.LocalPath, path, isDir)
+	s.DeleteAction(cloudPath.SavePath, path, isDir)
 }
 
 func (s *StrmService) DeleteAction(localRootPath, eventPath string, isDirectory bool) {

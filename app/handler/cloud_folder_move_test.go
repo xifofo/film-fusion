@@ -209,7 +209,7 @@ func TestCloudFolderMoveHandlerReportsSTRMFailureWithoutLosingCloudSuccess(t *te
 	stub := &cloudFolderMoveHandlerStub{move: func(context.Context, uint, uint, service.CloudFolderMoveRequest) (*service.CloudFolderMoveResult, error) {
 		return &service.CloudFolderMoveResult{
 			Status: "moved", FolderID: "500", FileID: "99",
-			STRM: &service.CloudFolderMoveStrmResult{Status: "failed", CloudPathID: 12, LocalPath: "/strm/Movie.strm", Message: "本地 STRM 写入失败，可重试"},
+			STRM: &service.CloudFolderMoveStrmResult{Status: "failed", CloudPathID: 12, SavePath: "/strm/Movie.strm", Message: "本地 STRM 写入失败，可重试"},
 		}, nil
 	}}
 	recorder := cloudFolderMoveTestRequest(newCloudFolderMoveTestRouter(stub, uint(7)), http.MethodPost, "/api/cloud-storage/8/folder-move", validCloudFolderMoveBody)
@@ -220,7 +220,7 @@ func TestCloudFolderMoveHandlerReportsSTRMFailureWithoutLosingCloudSuccess(t *te
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if recorder.Code != http.StatusOK || response.Code != 0 || response.Data.Status != "moved" || response.Data.FolderID != "500" || response.Data.STRM == nil || response.Data.STRM.Status != "failed" || response.Data.STRM.CloudPathID != 12 || response.Data.STRM.LocalPath != "/strm/Movie.strm" {
+	if recorder.Code != http.StatusOK || response.Code != 0 || response.Data.Status != "moved" || response.Data.FolderID != "500" || response.Data.STRM == nil || response.Data.STRM.Status != "failed" || response.Data.STRM.CloudPathID != 12 || response.Data.STRM.SavePath != "/strm/Movie.strm" {
 		t.Fatalf("cloud and STRM outcomes conflated: %d %s", recorder.Code, recorder.Body.String())
 	}
 }

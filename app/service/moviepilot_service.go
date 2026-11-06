@@ -11,14 +11,10 @@ import (
 )
 
 const (
-	moviePilotTokenCheckInterval     = 30 * time.Minute
-	moviePilotTokenSkew              = 2 * time.Minute
-	moviePilotRequestTimeout         = 8 * time.Second
-	moviePilotLocalFallbackTTL       = 2 * time.Minute
-	MediaRecognitionSourceMoviePilot = config.MediaRecognitionSourceMoviePilot
-	MediaRecognitionSourceLocal      = config.MediaRecognitionSourceLocal
-	MediaRecognitionSourceMedianame  = config.MediaRecognitionSourceMedianame
-	MediaRecognitionSourceShadow     = config.MediaRecognitionSourceShadow
+	moviePilotTokenCheckInterval    = 30 * time.Minute
+	moviePilotTokenSkew             = 2 * time.Minute
+	moviePilotRequestTimeout        = 8 * time.Second
+	MediaRecognitionSourceMedianame = config.MediaRecognitionSourceMedianame
 )
 
 type MoviePilotService struct {
@@ -33,8 +29,6 @@ type MoviePilotService struct {
 	accessToken    string
 	tokenExpiresAt time.Time
 	tokenRefresh   *moviePilotTokenRefresh
-	fallbackUntil  time.Time
-	fallbackReason string
 
 	stopChan chan struct{}
 	wg       sync.WaitGroup
@@ -50,7 +44,7 @@ func NewMoviePilotService(cfg *config.Config, log *logger.Logger) *MoviePilotSer
 	}
 }
 
-// SetLocalMediaRecognition 为识别路由和影子对比接入 FilmFusion 本地引擎。
+// SetLocalMediaRecognition 为识别路由接入 FilmFusion 本地引擎。
 func (s *MoviePilotService) SetLocalMediaRecognition(local *MediaRecognitionService) {
 	s.local = local
 }

@@ -44,6 +44,7 @@ Token 仅接受 Authorization 请求头，不支持 URL 查询参数或 Cookie�
 | GET | `/api/api-tokens` | 当前管理员颁发的 Token 元数据列表 |
 | GET | `/api/api-tokens/scopes` | 可授权模块、说明及路由前缀 |
 | POST | `/api/api-tokens` | 创建 Token |
+| PATCH | `/api/api-tokens/:id` | 修改自己的 Token 名称、授权模块或到期时间；已撤销记录不能编辑 |
 | POST | `/api/api-tokens/:id/revoke` | 撤销当前管理员颁发的 Token，重复调用幂等 |
 
 创建请求：
@@ -59,5 +60,15 @@ Token 仅接受 Authorization 请求头，不支持 URL 查询参数或 Cookie�
 `expires_at` 为 RFC3339 时间；`null` 或省略表示永不过期。
 成功返回 HTTP 201 和 `{ "code": 0, "data": { "token": "ffapi_...", "record": { ... } } }`。
 后续列表不会返回完整 Token 或摘要。创建和列表响应设置 `Cache-Control: no-store`。
+
+更新请求只包含要修改的字段，例如 `{"name":"客厅插件"}` 或 `{"scopes":["emby-stats"],"expires_at":null}`。
+`expires_at` 省略时保留原时间，`null` 表示永不过期；指定新时间必须晚于当前时间。
+更新成功返回 HTTP 200 和 `{ "code": 0, "data": { ... } }`，只含元数据，并设置 `Cache-Control: no-store`。
+完整凭据保持不变，授权或到期变更作用于后续请求；不会取消已通过鉴权的请求。
+其他管理员的记录返回 404；已撤销记录返回 409，不能通过编辑恢复。
+
+V2 页面支持关键词、名称、令牌标识、授权模块、状态及四个时间字段的区间组合筛选，先筛选和排序完整集合再分页。
+名称双击原位编辑，授权模块与到期时间双击打开专用表单；其他字段只读。更新只提交变更字段，不提供字段撤销/重做。
+搜索条件由当前标签页的共享视图偏好保存。V2 保留带标签的常规搜索栏，高级条件使用搜索栏下方的无标题 Modal；浮层与搜索栏对齐并覆盖表格，不改变表格高度。应用后关闭并显示生效条件数量。浮层开关与未应用草稿不持久化，搜索栏重置清空全部条件，浮层重置只清空当前高级条件草稿。
 
 此功能提供通用 API 凭据；Emby 原生插件及专用直链解析 API 需分别实现。

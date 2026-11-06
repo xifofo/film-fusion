@@ -32,7 +32,7 @@ func (r *recordingAutomationOrganizer) OrganizeAutomation(
 
 func TestAutomationOrganizeStrmReusesCompletedDownloadFolders(t *testing.T) {
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	storage := model.CloudStorage{
@@ -42,7 +42,7 @@ func TestAutomationOrganizeStrmReusesCompletedDownloadFolders(t *testing.T) {
 	if err := db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{
+	directory := model.MediaDirectory{OrganizeEnabled: true,
 		UserID: 1, CloudStorageID: storage.ID, DirectoryName: "影视中心",
 		DirectoryID: "downloads", SavePath: "/library", ContentPrefix: "https://media.example/",
 	}
@@ -93,10 +93,10 @@ func TestAutomationOrganizeStrmReusesCompletedDownloadFolders(t *testing.T) {
 
 func TestAutomationOrganizeStrmRejectsMismatchedStorage(t *testing.T) {
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{
+	directory := model.MediaDirectory{OrganizeEnabled: true,
 		UserID: 1, CloudStorageID: 99, DirectoryName: "影视中心", DirectoryID: "downloads", SavePath: "/library",
 	}
 	if err := db.Create(&directory).Error; err != nil {

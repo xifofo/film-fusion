@@ -169,7 +169,7 @@ func validateAutomationLocalSourceWorkflow(definition AutomationDefinition) erro
 		incoming[edge.Target] = append(incoming[edge.Target], edge)
 	}
 	for _, node := range definition.Nodes {
-		requires115Files := node.Type == AutomationNodeOrganizeStrm || node.Type == AutomationNodeMoviePilotRecognize ||
+		requires115Files := node.Type == AutomationNodeOrganizeStrm || node.Type == AutomationNodeMediaFileRecognize ||
 			(node.Type == AutomationNodeFilmFusionRecognize && automationFilmFusionRecognitionMode(node) == MediaRecognitionModeFile)
 		if !requires115Files {
 			continue

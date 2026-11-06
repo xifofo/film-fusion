@@ -140,7 +140,7 @@ func extractTmdbIDFromName(name string) string {
 //
 // 同 expected LocalDir 的 items 共享一次结果，同 parent 的扫描共享一次 ReadDir，避免对同一剧集多集重复 IO。
 // SavePath 为空时静默跳过（与 generateStrmFiles 报错相反，本检查不应阻断流程）。
-func (h *Service) populateLocalLibraryStatus(dir model.CloudDirectory, items *[]Organize115ItemResult) {
+func (h *Service) populateLocalLibraryStatus(dir model.MediaDirectory, items *[]Organize115ItemResult) {
 	if items == nil || len(*items) == 0 {
 		return
 	}

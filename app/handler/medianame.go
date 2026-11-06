@@ -41,7 +41,11 @@ func (h *MediaRecognitionHandler) ValidateMedianameConfig(c *gin.Context) {
 	h.success(c, gin.H{"movie": movie, "tv": tv}, "medianame 分类与模板校验通过")
 }
 func (h *MediaRecognitionHandler) PreviewMedianameTemplate(c *gin.Context) {
-	var req mediaRecognitionRenameTemplateRequest
+	var req struct {
+		MediaType string         `json:"media_type"`
+		Template  string         `json:"template"`
+		Sample    map[string]any `json:"sample,omitempty"`
+	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.error(c, 400, err.Error())
 		return

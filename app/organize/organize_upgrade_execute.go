@@ -25,7 +25,7 @@ type organizeUpgradeOperation struct {
 }
 
 type organizeUpgradePayload struct {
-	Directory  model.CloudDirectory       `json:"directory"`
+	Directory  model.MediaDirectory       `json:"directory"`
 	Result     Organize115CookieResult    `json:"result"`
 	Operations []organizeUpgradeOperation `json:"operations"`
 	Rollback   bool                       `json:"rollback"`
@@ -97,7 +97,7 @@ func (h *Service) validateUpgradeTargets(client *driver.Pan115Client, storageID 
 	return nil
 }
 
-func (h *Service) startUpgradeJob(dir model.CloudDirectory, storage model.CloudStorage, client *driver.Pan115Client, result Organize115CookieResult) (Organize115CookieResult, error) {
+func (h *Service) startUpgradeJob(dir model.MediaDirectory, storage model.CloudStorage, client *driver.Pan115Client, result Organize115CookieResult) (Organize115CookieResult, error) {
 	if err := h.validateUpgradeTargets(client, storage.ID, result); err != nil {
 		return result, err
 	}

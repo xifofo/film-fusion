@@ -5,11 +5,12 @@ import (
 	"film-fusion/app/handler"
 	"film-fusion/app/middleware"
 	"film-fusion/app/service"
+	"github.com/gin-gonic/gin"
 )
 
 // setupRoutes 设置API路由
 func (s *Server) setupRoutes() {
-	// 旧版入口保持根路径；AdminBase 新版及其静态资源独立挂载在 /v2/。
+	// 根路径统一提供 AdminBase 前端，历史 /v2/ 地址由静态入口重定向。
 	s.gin.NoRoute(frontendHandler("dist"))
 
 	// 观看记录服务（被 webhook 与统计接口共用）
@@ -21,14 +22,15 @@ func (s *Server) setupRoutes() {
 	authHandler := handler.NewAuthHandler(s.Config, s.appLoginProtection)
 	apiTokenService := service.NewAPITokenService(database.GetDB())
 	apiTokenHandler := handler.NewAPITokenHandler(apiTokenService)
+	dictionaryHandler := handler.NewDictionaryHandler(service.NewDictionaryService(database.GetDB()))
 	notificationHandler := handler.NewNotificationHandler(s.notificationService)
 	automationHandler := handler.NewAutomationHandler(s.automationService)
 	rssRelayHandler := handler.NewRSSRelayHandler(s.rssService)
 	cloudStorageHandler := handler.NewCloudStorageHandler()
 	cloudFolderMoveHandler := handler.NewCloudFolderMoveHandler(service.NewCloudFolderMoveService(database.GetDB(), service.NewWeb115Service(s.Logger)))
-	cloudPathHandler := handler.NewCloudPathHandler()
-	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService, s.moviePilotService)
-	cloudDirectoryHandler := handler.NewCloudDirectoryHandler()
+	mediaDirectoryHandler := handler.NewMediaDirectoryHandler()
+	mediaRecognitionHandler := handler.NewMediaRecognitionHandler(s.mediaRecognitionService)
+
 	s.cloudBrowserService = service.NewCloudBrowserService(database.GetDB(), service.NewWeb115Service(s.Logger))
 	cloudBrowserHandler := handler.NewCloudBrowserHandler(s.cloudBrowserService)
 	web115CookieHandler := handler.NewWeb115CookieHandler(s.Logger, s.web115KeepAliveService)
@@ -98,10 +100,23 @@ func (s *Server) setupRoutes() {
 	protected := api.Group("/")
 	protected.Use(middleware.APIAuth(s.Config, apiTokenService), middleware.RequireAdmin())
 	{
+		// 系统字典仅供后台管理员 JWT 维护；不把 cloud-storage Token 扩权到通用字典。
+		protected.GET("/dictionaries", dictionaryHandler.List)
+		protected.POST("/dictionaries", dictionaryHandler.Create)
+		protected.GET("/dictionaries/:code", dictionaryHandler.Get)
+		protected.PATCH("/dictionaries/:code", dictionaryHandler.Update)
+		protected.GET("/dictionaries/:code/items", dictionaryHandler.Items)
+		protected.POST("/dictionaries/:code/items", dictionaryHandler.CreateItem)
+		protected.GET("/dictionaries/:code/items/:id", dictionaryHandler.GetItem)
+		protected.PATCH("/dictionaries/:code/items/:id", dictionaryHandler.UpdateItem)
+		protected.DELETE("/dictionaries/:code/items/:id", dictionaryHandler.DeleteItem)
+		protected.GET("/dictionary-options/:code", dictionaryHandler.Options)
+
 		// Token 管理不属于任何可授权模块，只允许后台登录 JWT。
 		protected.GET("/api-tokens", apiTokenHandler.List)
 		protected.GET("/api-tokens/scopes", apiTokenHandler.Scopes)
 		protected.POST("/api-tokens", apiTokenHandler.Create)
+		protected.PATCH("/api-tokens/:id", apiTokenHandler.Update)
 		protected.POST("/api-tokens/:id/revoke", apiTokenHandler.Revoke)
 
 		// 用户相关
@@ -109,6 +124,8 @@ func (s *Server) setupRoutes() {
 		protected.PUT("/me", authHandler.UpdateMe)
 		protected.POST("/me/avatar", authHandler.UploadAvatar)
 		protected.GET("/system-info", systemInfoHandler.Get)
+		// 服务器目录仅供后台登录会话浏览，不纳入可授权的 API Token 模块。
+		protected.GET("/local-directories", handler.NewLocalDirectoryHandler().List)
 
 		// 系统配置相关路由
 		plutoFishHandler := handler.NewPlutoFishHandler(s.plutoFishService)
@@ -206,6 +223,7 @@ func (s *Server) setupRoutes() {
 			// 基础CRUD操作
 			storage.POST("/", cloudStorageHandler.CreateCloudStorage)
 			storage.GET("/", cloudStorageHandler.GetCloudStorages)
+			storage.PUT("/order", cloudStorageHandler.ReorderCloudStorages)
 			storage.GET("/:id", cloudStorageHandler.GetCloudStorage)
 			storage.PUT("/:id", cloudStorageHandler.UpdateCloudStorage)
 			storage.DELETE("/:id", cloudStorageHandler.DeleteCloudStorage)
@@ -221,55 +239,30 @@ func (s *Server) setupRoutes() {
 		// 115授权相关路由
 		auth115 := protected.Group("/auth/115")
 		{
+			auth115.GET("/apps", auth115Handler.ListApps)
 			auth115.POST("/qrcode", auth115Handler.GetQrCode)
 			auth115.POST("/status", auth115Handler.CheckStatus)
 			auth115.POST("/complete", auth115Handler.CompleteAuth)
 			auth115.GET("/sessions", auth115Handler.GetAuthSessions) // 调试用
 		}
 
-		// 云盘路径监控相关路由
-		paths := protected.Group("/paths")
+		// 已发布的浏览器扩展使用此只读地址选择整理目标；它与新版共用查询，不保留旧表或写入逻辑。
+		protected.GET("/directories/", func(c *gin.Context) {
+			query := c.Request.URL.Query()
+			query.Set("capability", "organize")
+			c.Request.URL.RawQuery = query.Encode()
+			mediaDirectoryHandler.List(c)
+		})
+
+		// 媒体目录共用一个配置入口；映射与整理按能力分别执行。
+		directories := protected.Group("/media-directories")
 		{
-			// 基础CRUD操作
-			paths.POST("/", cloudPathHandler.CreateCloudPath)
-			paths.GET("/", cloudPathHandler.GetCloudPaths)
-			paths.GET("/:id", cloudPathHandler.GetCloudPath)
-			paths.PUT("/:id", cloudPathHandler.UpdateCloudPath)
-			paths.DELETE("/:id", cloudPathHandler.DeleteCloudPath)
-
-			// 同步操作（通过webhook触发）
-			paths.POST("/:id/sync", cloudPathHandler.SyncCloudPath)
-			paths.GET("/:id/status", cloudPathHandler.GetSyncStatus)
-
-			// 批量操作
-			paths.POST("/batch", cloudPathHandler.BatchOperation)
-
-			// 配置选项
-			paths.GET("/link-types", cloudPathHandler.GetLinkTypes)
-			paths.GET("/source-types", cloudPathHandler.GetSourceTypes)
-			paths.GET("/strm-content-types", cloudPathHandler.GetStrmContentTypes)
-			paths.GET("/path-types", cloudPathHandler.GetPathTypes)
-
-			// 验证和统计
-			paths.POST("/validate", cloudPathHandler.ValidateCloudPath)
-			paths.GET("/statistics", cloudPathHandler.GetPathStatistics)
-
-			// 导入导出
-			paths.GET("/export", cloudPathHandler.ExportPaths)
-			paths.POST("/import", cloudPathHandler.ImportPaths)
-
-			// STRM 内容替换
-			paths.POST("/:id/strm/replace", cloudPathHandler.ReplaceStrmContent)
-		}
-
-		// 云盘目录配置相关路由
-		directories := protected.Group("/directories")
-		{
-			directories.POST("/", cloudDirectoryHandler.CreateCloudDirectory)
-			directories.GET("/", cloudDirectoryHandler.GetCloudDirectories)
-			directories.GET("/:id", cloudDirectoryHandler.GetCloudDirectory)
-			directories.PUT("/:id", cloudDirectoryHandler.UpdateCloudDirectory)
-			directories.DELETE("/:id", cloudDirectoryHandler.DeleteCloudDirectory)
+			directories.GET("/", mediaDirectoryHandler.List)
+			directories.POST("/", mediaDirectoryHandler.Save)
+			directories.GET("/:id", mediaDirectoryHandler.Get)
+			directories.PUT("/:id", mediaDirectoryHandler.Save)
+			directories.DELETE("/:id", mediaDirectoryHandler.Delete)
+			directories.POST("/:id/strm/replace", mediaDirectoryHandler.ReplaceStrmContent)
 			directories.GET("/:id/browser", cloudBrowserHandler.Browse)
 			directories.POST("/:id/browser/strm", cloudBrowserHandler.GenerateSTRM)
 			directories.GET("/:id/browser/jobs", cloudBrowserHandler.ActiveJob)
@@ -308,7 +301,7 @@ func (s *Server) setupRoutes() {
 			downloadQueue.DELETE("/:id", downloadQueueHandler.Remove)
 		}
 
-		// FilmFusion 本地识别词、媒体分类配置与识别测试。
+		// medianame 配置、识别词与流程预览。
 		mediaRecognition := protected.Group("/media-recognition")
 		{
 			mediaRecognition.GET("/medianame-config", mediaRecognitionHandler.GetMedianameConfig)
@@ -318,15 +311,7 @@ func (s *Server) setupRoutes() {
 			mediaRecognition.POST("/pipeline-test", organizeHandler.TestMediaPipeline)
 			mediaRecognition.GET("/words", mediaRecognitionHandler.GetWords)
 			mediaRecognition.PUT("/words", mediaRecognitionHandler.UpdateWords)
-			mediaRecognition.GET("/category-config", mediaRecognitionHandler.GetCategoryConfig)
-			mediaRecognition.POST("/category-config/validate", mediaRecognitionHandler.ValidateCategoryConfig)
-			mediaRecognition.PUT("/category-config", mediaRecognitionHandler.UpdateCategoryConfig)
-			mediaRecognition.GET("/rename-config", mediaRecognitionHandler.GetRenameConfig)
-			mediaRecognition.PUT("/rename-config", mediaRecognitionHandler.UpdateRenameConfig)
-			mediaRecognition.POST("/rename-config/validate", mediaRecognitionHandler.ValidateRenameTemplate)
-			mediaRecognition.POST("/rename-config/preview", mediaRecognitionHandler.PreviewRenameTemplate)
 			mediaRecognition.POST("/test", mediaRecognitionHandler.Test)
-			mediaRecognition.POST("/shadow-test", mediaRecognitionHandler.ShadowTest)
 		}
 
 		// 整理文件相关路由

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -23,15 +22,6 @@ func (s *MoviePilotService) BuildOrganizeTargetPath(category string, input Media
 		return target, err
 	}
 
-	if s != nil && s.local != nil {
-		target, configured, err := s.local.BuildMediaRenameTargetPath(category, input)
-		if err != nil {
-			return "", err
-		}
-		if configured {
-			return target, nil
-		}
-	}
 	legacyOriginalName := strings.TrimSpace(input.LegacyOriginalName)
 	if legacyOriginalName == "" {
 		legacyOriginalName = input.OriginalName
@@ -163,76 +153,22 @@ func (s *MoviePilotService) ManualTransfer(ctx context.Context, request MoviePil
 }
 
 func (s *MoviePilotService) TransferName(filePath, fileType string) (string, map[string]any, error) {
-	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
-		return s.transferNameLocally(filePath, fallbackErr)
-	}
-	name, raw, err := s.transferNameWithMoviePilot(filePath, fileType)
-	if err == nil {
-		s.clearLocalRecognitionFallback()
-		return name, raw, nil
-	}
-	return s.transferNameLocally(filePath, err)
+	return s.TransferNameWithSource(filePath, fileType, "")
 }
 
 // TransferNameWithSource mirrors RecognizeFileWithSource for the naming stage.
 func (s *MoviePilotService) TransferNameWithSource(filePath, fileType, source string) (string, map[string]any, error) {
-	normalized, err := s.ResolveMediaRecognitionSource(source)
+	_, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return "", nil, err
 	}
-	if normalized == MediaRecognitionSourceMedianame {
-		r := s.RecognizeMedianame(s.requestContext(), filePath, MediaRecognitionOptions{Mode: MediaRecognitionModeFile, LookupTMDB: true})
-		target, vars, err := s.MedianameTarget(s.requestContext(), r, "", false, "")
-		if err != nil {
-			return "", map[string]any{"medianame": r}, err
-		}
-		return path.Base(target), map[string]any{"medianame": r, "rename_context": vars, "target_path": target}, nil
-	}
-	if normalized == MediaRecognitionSourceLocal {
-		if s.local == nil {
-			return "", nil, errors.New("FilmFusion 本地识别未初始化")
-		}
-		return s.local.BuildTransferName(filePath)
-	}
-	name, raw, err := s.transferNameWithMoviePilot(filePath, fileType)
-	if err == nil {
-		s.clearLocalRecognitionFallback()
-	}
-	if normalized == MediaRecognitionSourceShadow {
-		return s.finishTransferNameWithShadow(filePath, name, raw, err)
-	}
-	return name, raw, err
-}
 
-func (s *MoviePilotService) transferNameWithMoviePilot(filePath, fileType string) (string, map[string]any, error) {
-	values := url.Values{}
-	values.Set("path", filePath)
-	if fileType != "" {
-		values.Set("filetype", fileType)
-	}
-
-	body, err := s.doGet("/api/v1/transfer/name", values)
+	r := s.RecognizeMedianame(s.requestContext(), filePath, MediaRecognitionOptions{Mode: MediaRecognitionModeFile, LookupTMDB: true})
+	target, vars, err := s.MedianameTarget(s.requestContext(), r, "", false, "")
 	if err != nil {
-		return "", nil, err
+		return "", map[string]any{"medianame": r}, err
 	}
-	if err := validateMoviePilotSuccess(body); err != nil {
-		return "", nil, err
-	}
-
-	dataMap := unwrapDataMap(body)
-	name := extractString(dataMap, "name", "new_name", "file_name", "filename", "title")
-	if name == "" {
-		if rawName, ok := dataMap["data"]; ok {
-			if str, ok := rawName.(string); ok {
-				name = str
-			}
-		}
-	}
-
-	if strings.TrimSpace(name) == "" {
-		return "", dataMap, errors.New("MoviePilot 未返回重命名结果")
-	}
-	return name, dataMap, nil
+	return path.Base(target), map[string]any{"medianame": r, "rename_context": vars, "target_path": target}, nil
 }
 
 func BuildMoviePilotTargetPath(category string, info MoviePilotMediaInfo, transferName, originalName string) string {

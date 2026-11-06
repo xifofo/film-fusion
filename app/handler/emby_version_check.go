@@ -104,7 +104,7 @@ type EmbyVersionScannedPath struct {
 	CloudPathID    uint   `json:"cloud_path_id"`
 	StorageName    string `json:"storage_name,omitempty"`
 	SourcePath     string `json:"source_path"`
-	LocalPath      string `json:"local_path"`
+	SavePath       string `json:"local_path"`
 	EmbyPathPrefix string `json:"emby_path_prefix,omitempty"`
 	FileCount      int    `json:"file_count"`
 	Error          string `json:"error,omitempty"`
@@ -223,13 +223,13 @@ func (h *EmbyVersionCheckHandler) Scan(c *gin.Context) {
 		return
 	}
 
-	var paths []model.CloudPath
+	var paths []model.MediaDirectory
 	query := database.DB.Preload("CloudStorage").
-		Where("user_id = ? AND local_path <> ''", userID)
+		Where("user_id = ? AND save_path <> ''", userID)
 	if len(req.CloudPathIDs) > 0 {
 		query = query.Where("id IN ?", req.CloudPathIDs)
 	}
-	if err := query.Order("id asc").Find(&paths).Error; err != nil {
+	if err := query.Order("id asc").Scopes(model.MappingDirectories).Find(&paths).Error; err != nil {
 		h.error(c, http.StatusInternalServerError, 500, "读取云路径映射失败")
 		return
 	}
@@ -257,7 +257,7 @@ func (h *EmbyVersionCheckHandler) Status(c *gin.Context) {
 	h.success(c, EmbyVersionCheckStatus{Running: job != nil && job.Running, Job: job}, "获取检查状态成功")
 }
 
-func (h *EmbyVersionCheckHandler) startJob(userID uint, req EmbyVersionCheckRequest, mediaType string, paths []model.CloudPath) (*EmbyVersionCheckJob, bool) {
+func (h *EmbyVersionCheckHandler) startJob(userID uint, req EmbyVersionCheckRequest, mediaType string, paths []model.MediaDirectory) (*EmbyVersionCheckJob, bool) {
 	h.mu.Lock()
 	if current := h.jobs[userID]; current != nil && current.Running {
 		h.mu.Unlock()
@@ -284,7 +284,7 @@ func (h *EmbyVersionCheckHandler) startJob(userID uint, req EmbyVersionCheckRequ
 	return snapshot, true
 }
 
-func (h *EmbyVersionCheckHandler) runJob(userID uint, jobID string, paths []model.CloudPath, mediaType string, selectedIDs []uint) {
+func (h *EmbyVersionCheckHandler) runJob(userID uint, jobID string, paths []model.MediaDirectory, mediaType string, selectedIDs []uint) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			h.finishJob(userID, jobID, nil, fmt.Sprintf("后台检查异常: %v", recovered))
@@ -343,11 +343,11 @@ func cloneEmbyVersionCheckJob(job *EmbyVersionCheckJob) *EmbyVersionCheckJob {
 	return &copyJob
 }
 
-func scanEmbyVersionCloudPaths(paths []model.CloudPath, mediaType string) EmbyVersionCheckResult {
+func scanEmbyVersionCloudPaths(paths []model.MediaDirectory, mediaType string) EmbyVersionCheckResult {
 	return scanEmbyVersionCloudPathsWithProgress(paths, mediaType, nil)
 }
 
-func scanEmbyVersionCloudPathsWithProgress(paths []model.CloudPath, mediaType string, report func(EmbyVersionCheckProgress)) EmbyVersionCheckResult {
+func scanEmbyVersionCloudPathsWithProgress(paths []model.MediaDirectory, mediaType string, report func(EmbyVersionCheckProgress)) EmbyVersionCheckResult {
 	result := EmbyVersionCheckResult{
 		ScannedAt:    time.Now(),
 		ScannedPaths: make([]EmbyVersionScannedPath, 0, len(paths)),
@@ -367,11 +367,11 @@ func scanEmbyVersionCloudPathsWithProgress(paths []model.CloudPath, mediaType st
 
 	for i := range paths {
 		p := paths[i]
-		localRoot := strings.TrimSpace(p.LocalPath)
+		localRoot := strings.TrimSpace(p.SavePath)
 		scanned := EmbyVersionScannedPath{
 			CloudPathID:    p.ID,
 			SourcePath:     p.SourcePath,
-			LocalPath:      localRoot,
+			SavePath:       localRoot,
 			EmbyPathPrefix: p.EmbyPathPrefix,
 		}
 		if p.CloudStorage != nil {
@@ -522,7 +522,7 @@ func normalizeEmbyVersionMediaType(value string) string {
 	}
 }
 
-func buildEmbyVersionFile(p model.CloudPath, storageName, localRoot, absPath, relPath string, info fs.FileInfo) EmbyVersionFile {
+func buildEmbyVersionFile(p model.MediaDirectory, storageName, localRoot, absPath, relPath string, info fs.FileInfo) EmbyVersionFile {
 	score, reasons := scoreMediaVersion(Organize115ItemResult{
 		FileName: relPath,
 		FileSize: info.Size(),

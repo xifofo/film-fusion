@@ -58,10 +58,10 @@ func (s *stubAutomationEmbyClient) WebItemURL(id string) string {
 
 func TestAutomationMediaExistsAcceptsTemplatesAndRoutesExisting(t *testing.T) {
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{UserID: 7, DirectoryName: "影视", SavePath: "/media"}
+	directory := model.MediaDirectory{OrganizeEnabled: true, UserID: 7, DirectoryName: "影视", SavePath: "/media"}
 	if err := db.Create(&directory).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +101,10 @@ func TestAutomationStrmVerifyReadsOnlyConfiguredRoot(t *testing.T) {
 	}
 
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{UserID: 1, DirectoryName: "STRM", SavePath: root}
+	directory := model.MediaDirectory{OrganizeEnabled: true, UserID: 1, DirectoryName: "STRM", SavePath: root}
 	if err := db.Create(&directory).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -147,10 +147,10 @@ func TestAutomationStrmRegenerateAtomicallyRestoresOrganizeOutput(t *testing.T) 
 		t.Fatal(err)
 	}
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{UserID: 1, DirectoryName: "STRM", SavePath: root}
+	directory := model.MediaDirectory{OrganizeEnabled: true, UserID: 1, DirectoryName: "STRM", SavePath: root}
 	if err := db.Create(&directory).Error; err != nil {
 		t.Fatal(err)
 	}

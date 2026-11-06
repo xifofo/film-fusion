@@ -164,9 +164,9 @@ func TestAutomationMoviePilotRecognitionUsesVirtualTMDBMarker(t *testing.T) {
 		}},
 	})
 
-	output, err := automation.executeAutomationMoviePilotRecognize(
+	output, err := automation.executeAutomationMediaFileRecognize(
 		context.Background(),
-		AutomationNode{ID: "mp", Type: AutomationNodeMoviePilotRecognize, Config: map[string]any{"tmdb_id": "12345"}},
+		AutomationNode{ID: "mp", Type: AutomationNodeMediaFileRecognize, Config: map[string]any{"tmdb_id": "12345"}},
 		definition, runContext,
 	)
 	if err != nil {

@@ -87,7 +87,7 @@ func TestMedianameCandidateSelectionRejectsInvalidAndStaleRequests(t *testing.T)
 			case "wrong_type":
 				selection.MediaType = "movie"
 			case "request_error":
-				preview.Groups[0].Items[0].ShadowComparison.Medianame.Medianame.Result.Status = mtmdb.StatusRequestError
+				preview.Groups[0].Items[0].Medianame.Result.Status = mtmdb.StatusRequestError
 				e.db.Model(&model.OrganizePlan{}).Where("id = ?", preview.PlanID).Update("result_json", planJSON(preview))
 			case "executed":
 				e.db.Model(&model.OrganizePlan{}).Where("id = ?", preview.PlanID).Update("status", "executed")
@@ -97,7 +97,7 @@ func TestMedianameCandidateSelectionRejectsInvalidAndStaleRequests(t *testing.T)
 				preview.Pipeline.Words = []string{"changed"}
 				e.db.Model(&model.OrganizePlan{}).Where("id = ?", preview.PlanID).Update("result_json", planJSON(preview))
 			case "changed_directory":
-				e.db.Model(&model.CloudDirectory{}).Where("id = 2").Update("directory_name", "Changed")
+				e.db.Model(&model.MediaDirectory{}).Where("id = 2").Update("directory_name", "Changed")
 			}
 			if _, err := e.handler.selectMedianameCandidate(userID, selection); err == nil {
 				t.Fatal("invalid candidate selection accepted")

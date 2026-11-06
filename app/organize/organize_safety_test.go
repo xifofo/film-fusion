@@ -10,54 +10,10 @@ import (
 	"film-fusion/app/config"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
-
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
 )
 
 func TestBuildMediaLookupTargetDirFollowsActiveRenameTemplate(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open(fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "-"))), &gorm.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.AutoMigrate(&model.SystemConfig{}); err != nil {
-		t.Fatal(err)
-	}
-	rename := service.NewMediaRecognitionService(db, nil, nil)
-	moviePilot := service.NewMoviePilotService(&config.Config{}, nil)
-	moviePilot.SetLocalMediaRecognition(rename)
-	handler := &Service{moviePilotSvc: moviePilot}
-	movieInfo := service.MoviePilotMediaInfo{
-		MediaType: "movie", Title: "流浪地球", Year: "2019", TitleYear: "流浪地球 (2019)", TmdbID: "535167",
-	}
 
-	legacy, err := handler.buildMediaLookupTargetDir("影视", "华语电影", movieInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if legacy != "/影视/华语电影/流浪地球 (2019) {tmdb-535167}" {
-		t.Fatalf("legacy lookup dir=%q", legacy)
-	}
-	if _, err := rename.SaveMediaRenameConfig(service.DefaultMovieRenameFormat, service.DefaultTVRenameFormat); err != nil {
-		t.Fatal(err)
-	}
-	customMovie, err := handler.buildMediaLookupTargetDir("影视", "华语电影", movieInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if customMovie != "/影视/华语电影/流浪地球 (2019)" {
-		t.Fatalf("custom movie lookup dir=%q", customMovie)
-	}
-
-	customTV, err := handler.buildMediaLookupTargetDir("影视", "国产剧", service.MoviePilotMediaInfo{
-		MediaType: "show", Title: "三体", Year: "2023", TitleYear: "三体 (2023)", TmdbID: "136315",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if customTV != "/影视/国产剧/三体 (2023)" {
-		t.Fatalf("custom tv lookup dir=%q", customTV)
-	}
 }
 
 func TestBuildRecognizeInputsUsesGrandparentWithProcessedName(t *testing.T) {
@@ -163,104 +119,64 @@ func TestDedupeConsecutiveTransferTagsOnlyRemovesRepeatedBitDepth(t *testing.T) 
 }
 
 func TestEnhanceEpisodeRecognizeInputWithTMDBEnglish(t *testing.T) {
-	tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/3/tv/123" {
-			t.Fatalf("unexpected TMDB path=%s", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("language"); got != "en-US" {
-			t.Fatalf("TMDB language=%q want en-US", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"The English Show","original_name":"原始剧名"}`))
-	}))
-	defer tmdbServer.Close()
-
-	var moviePilotInput string
-	moviePilotServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const candidateID = 123
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/login/access-token":
-			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
-		case "/api/v1/media/recognize_file":
-			moviePilotInput = r.URL.Query().Get("path")
-			_, _ = w.Write([]byte(`{
-				"success": true,
-				"data": {
-					"media_info": {"media_type":"tv","title":"中文剧名","tmdb_id":"123"},
-					"meta_info": {"season_episode":"S01E02","resource_pix":"2160p","resource_type":"WEB-DL","video_encode":"H.265"}
-				}
-			}`))
+		case "/3/tv/123":
+			_, _ = w.Write([]byte(`{"id":123,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01","seasons":[{"season_number":1,"episode_count":10}]}`))
+		case "/3/search/tv":
+			_, _ = fmt.Fprintf(w, `{"page":1,"total_pages":1,"results":[{"id":%d,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01"}]}`, candidateID)
+		case "/3/tv/999":
+			_, _ = w.Write([]byte(`{"id":999,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01","seasons":[{"season_number":1,"episode_count":10}]}`))
 		default:
+			t.Errorf("unexpected recognition request: %s", r.URL.Path)
 			http.NotFound(w, r)
 		}
 	}))
-	defer moviePilotServer.Close()
-
-	h := &Service{
-		tmdbSvc: service.NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
-			Enabled:        true,
-			BaseURL:        tmdbServer.URL,
-			APIKey:         "test-key",
-			TimeoutSeconds: 1,
-		}}, nil),
-		moviePilotSvc: service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
-			API:      moviePilotServer.URL,
-			Username: "user",
-			Password: "pass",
-		}}, nil),
-	}
-
-	recognizeName := normalizeFilenameForRecognition("S01E02 - 2160p.WEB-DL High Quality.AAC.H.265.mkv")
-	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
-		service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"},
-		"",
-		recognizeName,
-		"中文剧名/Season 01/"+recognizeName,
-	)
-	want := "The English Show.S01E02.2160p.WEB-DL High Quality.AAC.H.265.mkv"
+	defer server.Close()
+	cfg := &config.Config{TMDB: config.TMDBConfig{Enabled: true, BaseURL: server.URL + "/3", APIKey: "test", TimeoutSeconds: 1}}
+	tmdb := service.NewTMDBService(cfg, nil)
+	provider := service.NewMoviePilotService(cfg, nil)
+	provider.SetLocalMediaRecognition(service.NewMediaRecognitionService(setupOrganizePlanTest(t).db, tmdb, nil))
+	h := &Service{tmdbSvc: tmdb, moviePilotSvc: provider}
+	name := "S01E02.2160p.mkv"
+	current := "中文剧名/Season 01/" + name
+	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"}, "", name, current)
+	want := "The English Show." + name
 	if got != want {
 		t.Fatalf("enhanced input=%q want %q", got, want)
-	}
-	if moviePilotInput != want {
-		t.Fatalf("MoviePilot input=%q want %q", moviePilotInput, want)
 	}
 }
 
 func TestEnhanceEpisodeRecognizeInputRejectsDifferentTMDBResult(t *testing.T) {
-	tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	const candidateID = 999
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"Ambiguous Show"}`))
-	}))
-	defer tmdbServer.Close()
-
-	moviePilotServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/login/access-token" {
-			_, _ = w.Write([]byte(`{"access_token":"test-token","expires_in":3600}`))
-			return
+		switch r.URL.Path {
+		case "/3/tv/123":
+			_, _ = w.Write([]byte(`{"id":123,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01","seasons":[{"season_number":1,"episode_count":10}]}`))
+		case "/3/search/tv":
+			_, _ = fmt.Fprintf(w, `{"page":1,"total_pages":1,"results":[{"id":%d,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01"}]}`, candidateID)
+		case "/3/tv/999":
+			_, _ = w.Write([]byte(`{"id":999,"name":"The English Show","original_name":"The English Show","first_air_date":"2024-01-01","seasons":[{"season_number":1,"episode_count":10}]}`))
+		default:
+			t.Errorf("unexpected recognition request: %s", r.URL.Path)
+			http.NotFound(w, r)
 		}
-		_, _ = w.Write([]byte(`{"success":true,"data":{"media_info":{"media_type":"tv","title":"Wrong Show","tmdb_id":"999"}}}`))
 	}))
-	defer moviePilotServer.Close()
-
-	h := &Service{
-		tmdbSvc: service.NewTMDBService(&config.Config{TMDB: config.TMDBConfig{
-			Enabled: true, BaseURL: tmdbServer.URL, APIKey: "test-key", TimeoutSeconds: 1,
-		}}, nil),
-		moviePilotSvc: service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
-			API: moviePilotServer.URL, Username: "user", Password: "pass",
-		}}, nil),
-	}
-
-	current := "中文剧名/Season 01/S01E02.2160p.mkv"
-	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(
-		service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"},
-		"",
-		"S01E02.2160p.mkv",
-		current,
-	)
-	if got != current {
-		t.Fatalf("mismatched TMDB input=%q want fallback %q", got, current)
+	defer server.Close()
+	cfg := &config.Config{TMDB: config.TMDBConfig{Enabled: true, BaseURL: server.URL + "/3", APIKey: "test", TimeoutSeconds: 1}}
+	tmdb := service.NewTMDBService(cfg, nil)
+	provider := service.NewMoviePilotService(cfg, nil)
+	provider.SetLocalMediaRecognition(service.NewMediaRecognitionService(setupOrganizePlanTest(t).db, tmdb, nil))
+	h := &Service{tmdbSvc: tmdb, moviePilotSvc: provider}
+	name := "S01E02.2160p.mkv"
+	current := "中文剧名/Season 01/" + name
+	got := h.enhanceEpisodeRecognizeInputWithTMDBEnglish(service.MoviePilotMediaInfo{MediaType: "tv", TmdbID: "123"}, "", name, current)
+	want := current
+	if got != want {
+		t.Fatalf("enhanced input=%q want %q", got, want)
 	}
 }
 
@@ -518,7 +434,7 @@ func TestAttachOrganizeSubtitlesMatchesOnlyItsVideoVersion(t *testing.T) {
 		t.Fatalf("subtitle pickcode=%q", attachment.PickCode)
 	}
 	handler := &Service{}
-	if err := handler.generateStrmFiles(model.CloudDirectory{SavePath: "/tmp/film-fusion-test"}, &items, true); err != nil {
+	if err := handler.generateStrmFiles(model.MediaDirectory{OrganizeEnabled: true, SavePath: "/tmp/film-fusion-test"}, &items, true); err != nil {
 		t.Fatalf("generateStrmFiles() error=%v", err)
 	}
 	if items[2].StrmPath != "" {

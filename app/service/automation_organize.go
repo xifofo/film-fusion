@@ -73,8 +73,8 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 	}
 
 	cloudDirectoryID := automationConfigUint(node.Config, "cloud_directory_id")
-	var directory model.CloudDirectory
-	if err := s.db.First(&directory, cloudDirectoryID).Error; err != nil {
+	var directory model.MediaDirectory
+	if err := s.db.Scopes(model.OrganizingDirectories).First(&directory, cloudDirectoryID).Error; err != nil {
 		return nil, fmt.Errorf("目录配置不存在: %w", err)
 	}
 	storageID := automationAnyUint(sourceOutput["cloud_storage_id"])
@@ -138,7 +138,17 @@ func (s *AutomationService) executeAutomationOrganizeStrm(
 	}
 
 	recognitionSource := automationConfigString(node.Config, "recognition_source")
+	if recognitionSource != "" {
+		recognitionSource, err = NormalizeMediaRecognitionSource(recognitionSource)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if upstream := automationAnyString(sourceOutput["recognition_source"]); upstream != "" {
+		upstream, err = NormalizeMediaRecognitionSource(upstream)
+		if err != nil {
+			return nil, err
+		}
 		if recognitionSource != "" && recognitionSource != upstream {
 			return nil, errors.New("识别节点与整理节点引擎不一致，请统一流程配置")
 		}

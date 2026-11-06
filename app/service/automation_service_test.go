@@ -12,7 +12,7 @@ import (
 
 func TestCreateAutomationValidatesOrganizeAccountAndCookie(t *testing.T) {
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	storage := model.CloudStorage{
@@ -22,7 +22,7 @@ func TestCreateAutomationValidatesOrganizeAccountAndCookie(t *testing.T) {
 	if err := db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{
+	directory := model.MediaDirectory{OrganizeEnabled: true,
 		UserID: 1, CloudStorageID: storage.ID, DirectoryName: "媒体库", DirectoryID: "library",
 	}
 	if err := db.Create(&directory).Error; err != nil {

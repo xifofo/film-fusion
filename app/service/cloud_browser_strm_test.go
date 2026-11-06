@@ -14,7 +14,7 @@ import (
 	"gorm.io/gorm/logger"
 )
 
-func browserSTRMFixture(t *testing.T) (*CloudBrowserService, model.CloudDirectory, []CloudBrowserBreadcrumb, CloudBrowserEntry) {
+func browserSTRMFixture(t *testing.T) (*CloudBrowserService, model.MediaDirectory, []CloudBrowserBreadcrumb, CloudBrowserEntry) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "strm.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
@@ -28,7 +28,7 @@ func browserSTRMFixture(t *testing.T) (*CloudBrowserService, model.CloudDirector
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	config := model.CloudDirectory{ID: 5, UserID: 7, CloudStorageID: 1, DirectoryID: "10", DirectoryName: "Library", SavePath: t.TempDir(), ContentPrefix: "https://media.example/play", IncludeExtensions: `["mkv","mp4"]`}
+	config := model.MediaDirectory{OrganizeEnabled: true, ID: 5, UserID: 7, CloudStorageID: 1, DirectoryID: "10", DirectoryName: "Library", SavePath: t.TempDir(), ContentPrefix: "https://media.example/play", IncludeExtensions: `["mkv","mp4"]`}
 	ancestors := []CloudBrowserBreadcrumb{{ID: "0", Name: "根目录"}, {ID: "10", ParentID: "0", Name: "actual 115 root"}, {ID: "20", ParentID: "10", Name: "Season 1"}}
 	item := CloudBrowserEntry{FileID: "30", ParentID: "20", Name: "Movie.mkv", IsFile: true, Size: 100 << 20, Complete: true}
 	return &CloudBrowserService{db: db}, config, ancestors, item
@@ -36,12 +36,12 @@ func browserSTRMFixture(t *testing.T) (*CloudBrowserService, model.CloudDirector
 
 func TestCloudBrowserSTRMMatchesDeepestDirectoryID(t *testing.T) {
 	_, config, ancestors, _ := browserSTRMFixture(t)
-	configs := []model.CloudDirectory{{ID: 1, DirectoryID: "0"}, config, {ID: 9, DirectoryID: "20"}}
+	configs := []model.MediaDirectory{{OrganizeEnabled: true, ID: 1, DirectoryID: "0"}, config, {OrganizeEnabled: true, ID: 9, DirectoryID: "20"}}
 	matched, depth, err := cloudBrowserMatchDirectory(configs, ancestors)
 	if err != nil || matched == nil || matched.ID != 9 || depth != 2 {
 		t.Fatalf("match=%+v depth=%d err=%v", matched, depth, err)
 	}
-	configs = append(configs, model.CloudDirectory{ID: 11, DirectoryID: "20"})
+	configs = append(configs, model.MediaDirectory{OrganizeEnabled: true, ID: 11, DirectoryID: "20"})
 	if _, _, err := cloudBrowserMatchDirectory(configs, ancestors); err == nil {
 		t.Fatal("ambiguous configuration accepted")
 	}
@@ -56,12 +56,12 @@ func TestCloudBrowserSTRMMatchesDeepestDirectoryID(t *testing.T) {
 			case "unsafe name":
 				broken[2].Name = "../outside"
 			}
-			if _, _, err := cloudBrowserMatchDirectory([]model.CloudDirectory{config}, broken); err == nil {
+			if _, _, err := cloudBrowserMatchDirectory([]model.MediaDirectory{config}, broken); err == nil {
 				t.Fatal("unsafe ancestry accepted")
 			}
 		})
 	}
-	if selected, _, err := cloudBrowserMatchDirectory([]model.CloudDirectory{{DirectoryID: "999"}}, ancestors); err != nil || selected != nil {
+	if selected, _, err := cloudBrowserMatchDirectory([]model.MediaDirectory{{OrganizeEnabled: true, DirectoryID: "999"}}, ancestors); err != nil || selected != nil {
 		t.Fatalf("unmatched directory=%+v err=%v", selected, err)
 	}
 }
@@ -72,31 +72,31 @@ func TestCloudBrowserSTRMConfiguredAliasAndRegeneration(t *testing.T) {
 	item.Name = "A #片.mkv"
 	wantPath := filepath.Join(config.SavePath, "媒体/Film/Season 1/A #片.strm")
 	wantContent := "https://media.example/play/%E5%AA%92%E4%BD%93/Film/Season%201/A%20%23%E7%89%87.mkv"
-	preflight, err := cloudBrowserSTRMTarget([]model.CloudDirectory{config}, ancestors, item)
+	preflight, err := cloudBrowserSTRMTarget([]model.MediaDirectory{config}, ancestors, item)
 	if err != nil || preflight != wantPath {
 		t.Fatalf("preflight=%q err=%v", preflight, err)
 	}
 	collision := item
 	collision.FileID, collision.Name = "31", "A #片.mp4"
-	if target, err := cloudBrowserSTRMTarget([]model.CloudDirectory{config}, ancestors, collision); err != nil || target != preflight {
+	if target, err := cloudBrowserSTRMTarget([]model.MediaDirectory{config}, ancestors, collision); err != nil || target != preflight {
 		t.Fatalf("same-stem collision was not exposed: target=%q err=%v", target, err)
 	}
 	if entries, err := os.ReadDir(config.SavePath); err != nil || len(entries) != 0 {
 		t.Fatalf("preflight wrote files: %+v %v", entries, err)
 	}
-	result := svc.writeSTRM(context.Background(), []model.CloudDirectory{config}, ancestors, item)
+	result := svc.writeSTRM(context.Background(), []model.MediaDirectory{config}, ancestors, item)
 	if result.Status != "created" || result.DirectoryID != config.ID || result.LocalPath != wantPath {
 		t.Fatalf("result=%+v", result)
 	}
 	if data, err := os.ReadFile(wantPath); err != nil || string(data) != wantContent {
 		t.Fatalf("content=%q err=%v", data, err)
 	}
-	result = svc.writeSTRM(context.Background(), []model.CloudDirectory{config}, ancestors, item)
+	result = svc.writeSTRM(context.Background(), []model.MediaDirectory{config}, ancestors, item)
 	if result.Status != "unchanged" {
 		t.Fatalf("idempotency=%+v", result)
 	}
 	config.ContentPrefix = "https://new.example/stream/"
-	result = svc.writeSTRM(context.Background(), []model.CloudDirectory{config}, ancestors, item)
+	result = svc.writeSTRM(context.Background(), []model.MediaDirectory{config}, ancestors, item)
 	if result.Status != "updated" {
 		t.Fatalf("regeneration=%+v", result)
 	}
@@ -113,7 +113,7 @@ func TestCloudBrowserSTRMUsesSpecificMappingAndGuardsManagedPaths(t *testing.T) 
 	svc, config, ancestors, item := browserSTRMFixture(t)
 	nested := config
 	nested.ID, nested.DirectoryID, nested.DirectoryName, nested.SavePath = 6, "20", "Nested", t.TempDir()
-	result := svc.writeSTRM(context.Background(), []model.CloudDirectory{config, nested}, ancestors, item)
+	result := svc.writeSTRM(context.Background(), []model.MediaDirectory{config, nested}, ancestors, item)
 	if result.Status != "created" || result.DirectoryID != nested.ID || result.LocalPath != filepath.Join(nested.SavePath, "Nested/Movie.strm") {
 		t.Fatalf("nested mapping=%+v", result)
 	}
@@ -124,7 +124,7 @@ func TestCloudBrowserSTRMUsesSpecificMappingAndGuardsManagedPaths(t *testing.T) 
 		t.Fatal(err)
 	}
 	nested.ContentPrefix = "https://replacement.example"
-	guarded := svc.writeSTRM(context.Background(), []model.CloudDirectory{config, nested}, ancestors, item)
+	guarded := svc.writeSTRM(context.Background(), []model.MediaDirectory{config, nested}, ancestors, item)
 	if guarded.Status != "skipped" || !strings.Contains(guarded.Message, "整理任务") {
 		t.Fatalf("managed STRM overwritten: %+v", guarded)
 	}
@@ -186,7 +186,7 @@ func TestCloudBrowserSTRMRejectsUnmatchedUnsafeAndWrongMembership(t *testing.T) 
 			case "no database":
 				svc.db = nil
 			}
-			result := svc.writeSTRM(context.Background(), []model.CloudDirectory{config}, ancestors, item)
+			result := svc.writeSTRM(context.Background(), []model.MediaDirectory{config}, ancestors, item)
 			if result.Status != "failed" && result.Status != "skipped" {
 				t.Fatalf("invalid input wrote a file: %+v", result)
 			}

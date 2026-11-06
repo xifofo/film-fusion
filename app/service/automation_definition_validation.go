@@ -238,13 +238,13 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 				if predecessor.Type == AutomationNodeList115TasksOpenAPI && automationConfigString(predecessor.Config, "info_hash") == "" {
 					result.Errors = append(result.Errors, "等待 115 下载前的任务列表节点必须配置 info_hash")
 				}
-			case AutomationNodeMoviePilotRecognize:
+			case AutomationNodeMediaFileRecognize:
 				if predecessor.Type != AutomationNodeWait115 && predecessor.Type != AutomationNodeTrigger {
-					result.Errors = append(result.Errors, fmt.Sprintf("MP 媒体识别节点 %s 必须连接在 115 目录触发器或等待 115 下载完成节点之后", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("媒体文件识别节点 %s 必须连接在 115 目录触发器或等待 115 下载完成节点之后", id))
 				}
 				if (predecessor.Type == AutomationNodeTrigger && sourcePort != "next") ||
 					(predecessor.Type != AutomationNodeTrigger && sourcePort != "success") {
-					result.Errors = append(result.Errors, fmt.Sprintf("MP 媒体识别节点 %s 必须连接等待节点的成功出口", id))
+					result.Errors = append(result.Errors, fmt.Sprintf("媒体文件识别节点 %s 必须连接等待节点的成功出口", id))
 				}
 			case AutomationNodeFilmFusionRecognize:
 				if automationFilmFusionRecognitionMode(node) == MediaRecognitionModeFile {
@@ -257,7 +257,7 @@ func ValidateAutomationDefinition(definition AutomationDefinition) AutomationVal
 					}
 				}
 			case AutomationNodeOrganizeStrm:
-				validPredecessor := predecessor.Type == AutomationNodeTrigger || predecessor.Type == AutomationNodeWait115 || predecessor.Type == AutomationNodeMoviePilotRecognize
+				validPredecessor := predecessor.Type == AutomationNodeTrigger || predecessor.Type == AutomationNodeWait115 || predecessor.Type == AutomationNodeMediaFileRecognize
 				if predecessor.Type == AutomationNodeFilmFusionRecognize {
 					validPredecessor = automationFilmFusionRecognitionMode(predecessor) == MediaRecognitionModeFile
 				}
@@ -368,8 +368,8 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 			AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 			AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
 			AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
-			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-			AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
+			AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMediaTitleRecognize, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
+			AutomationNodeMediaFileRecognize, AutomationNodeOrganizeStrm,
 			AutomationNodeStrmVerify, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 			AutomationNodeHTTPRequest, AutomationNodeNotification:
 			return true
@@ -406,8 +406,8 @@ func isAutomationSourcePortValid(nodeType, port string) bool {
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
 		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
-		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer,
-		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
+		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMediaTitleRecognize, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer,
+		AutomationNodeMediaFileRecognize, AutomationNodeOrganizeStrm, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 		AutomationNodeHTTPRequest, AutomationNodeNotification:
 		return port == "success" || port == "failure"
 	case AutomationNodeTrigger:

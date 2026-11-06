@@ -89,8 +89,8 @@ func (h *Service) CheckAutomationMediaStatus(
 	if tmdbID == "" {
 		return status, errors.New("TMDB ID 不能为空")
 	}
-	var dir model.CloudDirectory
-	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", request.CloudDirectoryID, request.UserID).First(&dir).Error; err != nil {
+	var dir model.MediaDirectory
+	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", request.CloudDirectoryID, request.UserID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return status, errors.New("云盘目录不存在或无权限")
 	}
 	info := service.MoviePilotMediaInfo{

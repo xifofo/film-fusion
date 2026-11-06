@@ -27,7 +27,7 @@ func TestPlutoFishHandlersHideSecretsAndExposeDurableReview(t *testing.T) {
 	pool, _ := db.DB()
 	pool.SetMaxOpenConns(1)
 	defer pool.Close()
-	if err := db.AutoMigrate(&model.SystemConfig{}, &model.PlutoFishCursor{}, &model.PlutoFishEvent{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.CloudPath{}); err != nil {
+	if err := db.AutoMigrate(&model.SystemConfig{}, &model.PlutoFishCursor{}, &model.PlutoFishEvent{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	svc := service.NewPlutoFishService(db)

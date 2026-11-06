@@ -169,13 +169,13 @@ func TestOrganizePreviewQueuePersistsRecognitionSource(t *testing.T) {
 		CloudDirectoryID:  8,
 		CloudStorageID:    9,
 		FolderID:          "folder-recognition-source",
-		RecognitionSource: MediaRecognitionSourceLocal,
+		RecognitionSource: "local",
 	}})
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("enqueue local task: tasks=%+v err=%v", tasks, err)
 	}
-	if tasks[0].RecognitionSource != MediaRecognitionSourceLocal {
-		t.Fatalf("recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceLocal)
+	if tasks[0].RecognitionSource != MediaRecognitionSourceMedianame {
+		t.Fatalf("recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceMedianame)
 	}
 
 	tasks, err = queue.Enqueue([]OrganizePreviewTaskInput{{
@@ -183,13 +183,13 @@ func TestOrganizePreviewQueuePersistsRecognitionSource(t *testing.T) {
 		CloudDirectoryID:  8,
 		CloudStorageID:    9,
 		FolderID:          "folder-recognition-source",
-		RecognitionSource: MediaRecognitionSourceMoviePilot,
+		RecognitionSource: "moviepilot",
 	}})
 	if err != nil || len(tasks) != 1 {
 		t.Fatalf("reenqueue MoviePilot task: tasks=%+v err=%v", tasks, err)
 	}
-	if tasks[0].RecognitionSource != MediaRecognitionSourceMoviePilot {
-		t.Fatalf("updated recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceMoviePilot)
+	if tasks[0].RecognitionSource != MediaRecognitionSourceMedianame {
+		t.Fatalf("updated recognition source=%q want=%q", tasks[0].RecognitionSource, MediaRecognitionSourceMedianame)
 	}
 }
 

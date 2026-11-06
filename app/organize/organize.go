@@ -59,10 +59,10 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 	category := strings.TrimSpace(req.Category)
 	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
-	var dir model.CloudDirectory
+	var dir model.MediaDirectory
 	if err := h.store().Preload("CloudStorage").
 		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
-		First(&dir).Error; err != nil {
+		Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return Organize115CookieResult{}, fmt.Errorf("云盘目录不存在或无权限")
 	}
 
@@ -81,15 +81,10 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 	}
 
 	categoryCfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(recognitionSource)
-	categoryError := ""
 	if err != nil {
-		if recognitionSource != service.MediaRecognitionSourceShadow {
-			return Organize115CookieResult{}, fmt.Errorf("获取媒体分类配置失败: %w", err)
-		}
-		categoryError = "获取 MP2 分类配置失败: " + err.Error()
+		return Organize115CookieResult{}, fmt.Errorf("获取媒体分类配置失败: %w", err)
 	}
 
-	h.moviePilotSvc.RecordPipelineCategories(categoryCfg)
 	webClient, err := h.organizeClient(storage.Cookie)
 	if err != nil {
 		return Organize115CookieResult{}, fmt.Errorf("115 Cookie 无效")
@@ -129,7 +124,6 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 				storage:                storage,
 				webClient:              webClient,
 				categoryCfg:            categoryCfg,
-				categoryError:          categoryError,
 				includeExts:            includeExts,
 				excludeExts:            excludeExts,
 				folderID:               folderID,

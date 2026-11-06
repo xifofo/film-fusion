@@ -425,10 +425,10 @@ func (h *Service) buildPreviewChildTasks(task model.OrganizePreviewTask) ([]serv
 		return nil, nil
 	}
 
-	var dir model.CloudDirectory
+	var dir model.MediaDirectory
 	if err := h.store().Preload("CloudStorage").
 		Where("id = ? AND user_id = ?", task.CloudDirectoryID, task.UserID).
-		First(&dir).Error; err != nil {
+		Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return nil, fmt.Errorf("云盘目录不存在或无权限")
 	}
 	storage := dir.CloudStorage

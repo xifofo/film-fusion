@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"errors"
 	"film-fusion/app/database"
 	"film-fusion/app/model"
+	"film-fusion/app/service"
 	"net/http"
 	"strconv"
 	"time"
@@ -135,7 +137,7 @@ func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 	var total int64
 	query.Model(&model.CloudStorage{}).Count(&total)
 
-	if err := query.Order("sort_order ASC, created_at DESC").
+	if err := query.Order("sort_order ASC, created_at DESC, id DESC").
 		Offset(offset).
 		Limit(pageSize).
 		Find(&storages).Error; err != nil {
@@ -308,25 +310,29 @@ func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
 // DeleteCloudStorage 删除网盘存储配置
 func (h *CloudStorageHandler) DeleteCloudStorage(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err != nil {
+	if err != nil || id == 0 {
 		h.error(c, http.StatusBadRequest, 400, "无效的ID")
 		return
 	}
 
-	userID, exists := c.Get("user_id")
-	if !exists {
+	userID := c.GetUint("user_id")
+	if userID == 0 {
 		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
-	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
-		Delete(&model.CloudStorage{}).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "删除存储配置失败")
+	if err := service.DeleteCloudStorage(c.Request.Context(), database.DB, userID, uint(id)); err != nil {
+		var inUse *service.CloudStorageInUseError
+		switch {
+		case errors.As(err, &inUse):
+			c.JSON(http.StatusConflict, ApiResponse{Code: 409, Message: inUse.Error(), Data: inUse})
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在或无权限")
+		default:
+			h.error(c, http.StatusInternalServerError, 500, "删除存储配置失败，未删除任何关联；请稍后重试")
+		}
 		return
 	}
-
-	// 清理引用该存储的 Emby 账号绑定，避免悬挂
-	_ = database.DB.Where("cloud_storage_id = ?", id).Delete(&model.EmbyAccountBinding{}).Error
 
 	h.success(c, nil, "删除成功")
 }

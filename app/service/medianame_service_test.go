@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"film-fusion/app/config"
+	"film-fusion/app/model"
 	"github.com/xifofo/medianame"
 	"github.com/xifofo/medianame/rename"
 	mtmdb "github.com/xifofo/medianame/tmdb"
@@ -140,11 +141,8 @@ func TestMedianameParsingAndNamingStayInBranch(t *testing.T) {
 		}
 		writeMedianameJSON(w, medianameDetails(123, "Example", "tv"))
 	})
-	old, err := s.SaveCategoryConfig("电影:\n  MP2电影:\n电视剧:\n  MP2剧集:\n")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = s.SaveMediaRenameConfig("OLD/{{title}}{{fileExt}}", "OLD/{{title}}{{fileExt}}"); err != nil {
+	legacy := model.SystemConfig{ConfigKey: model.ConfigKeyMediaRecognitionRename, ConfigValue: "invalid obsolete template"}
+	if err := s.db.Create(&legacy).Error; err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := s.LoadMedianameConfig()
@@ -182,13 +180,9 @@ func TestMedianameParsingAndNamingStayInBranch(t *testing.T) {
 			t.Fatalf("directory composition: %s %v", target, err)
 		}
 	}
-	loaded, _ := s.LoadCategoryConfig()
-	if loaded.YAML != old.YAML {
-		t.Fatal("medianame overwrote MP2 categories")
-	}
-	formats, _ := s.LoadMediaRenameConfig()
-	if formats.MovieFormat != "OLD/{{title}}{{fileExt}}" {
-		t.Fatal("medianame overwrote MP2 rename")
+	var untouched model.SystemConfig
+	if err := s.db.First(&untouched, legacy.ID).Error; err != nil || untouched.ConfigValue != legacy.ConfigValue {
+		t.Fatalf("legacy row changed: %+v %v", untouched, err)
 	}
 	cfg.TVTemplate = "{{.title}}/{{.season_episode}} - {{.episode_title}}{{.fileExt}}"
 	if _, err = s.SaveMedianameConfig(cfg); err != nil {

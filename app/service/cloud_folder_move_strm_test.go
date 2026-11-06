@@ -27,22 +27,22 @@ func TestCloudMovedSTRMMappingSourceSemantics(t *testing.T) {
 		{"unknown source", "other", "/电影", "/电影/A/A.mkv", ""},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			mapping, event, err := cloudMovedSTRMMapping([]model.CloudPath{{ID: 1, SourceType: test.sourceType, SourcePath: test.source}}, test.actual)
+			mapping, event, err := cloudMovedSTRMMapping([]model.MediaDirectory{{MappingEnabled: true, ID: 1, SourceType: test.sourceType, SourcePath: test.source}}, test.actual)
 			if err != nil || event != test.wantEvent || ((mapping != nil) != (test.wantEvent != "")) {
 				t.Fatalf("mapping=%+v event=%q err=%v", mapping, event, err)
 			}
 		})
 	}
-	mappings := []model.CloudPath{
-		{ID: 1, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/"},
-		{ID: 2, SourceType: model.SourceTypeCloudDrive2, SourcePath: "/挂载/电影"},
-		{ID: 3, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/电影/A"},
+	mappings := []model.MediaDirectory{
+		{MappingEnabled: true, ID: 1, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/"},
+		{MappingEnabled: true, ID: 2, SourceType: model.SourceTypeCloudDrive2, SourcePath: "/挂载/电影"},
+		{MappingEnabled: true, ID: 3, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/电影/A"},
 	}
 	selected, _, err := cloudMovedSTRMMapping(mappings, "/电影/A/A.mkv")
 	if err != nil || selected == nil || selected.ID != 3 {
 		t.Fatalf("longest mapping lost: %+v %v", selected, err)
 	}
-	mappings = append(mappings, model.CloudPath{ID: 4, SourceType: model.SourceTypeCloudDrive2, SourcePath: "/另一挂载/电影/A"})
+	mappings = append(mappings, model.MediaDirectory{MappingEnabled: true, ID: 4, SourceType: model.SourceTypeCloudDrive2, SourcePath: "/另一挂载/电影/A"})
 	if _, _, err := cloudMovedSTRMMapping(mappings, "/电影/A/A.mkv"); err == nil {
 		t.Fatal("equally specific mappings silently selected")
 	}
@@ -71,7 +71,7 @@ func TestCloudMovedSTRMFilterRules(t *testing.T) {
 	}
 }
 
-func saveCloudSTRMMapping(t *testing.T, svc *CloudFolderMoveService, mapping model.CloudPath) model.CloudPath {
+func saveCloudSTRMMapping(t *testing.T, svc *CloudFolderMoveService, mapping model.MediaDirectory) model.MediaDirectory {
 	t.Helper()
 	if mapping.UserID == 0 {
 		mapping.UserID = 7
@@ -97,14 +97,14 @@ func TestCloudFolderMoveGeneratesSTRMAndRetryDoesNotMoveAgain(t *testing.T) {
 			if sourceType == model.SourceTypeCloudDrive2 {
 				source, event = "/挂载/自定义位置", "/挂载/自定义位置/Movie/Movie.mkv"
 			}
-			mapping := saveCloudSTRMMapping(t, svc, model.CloudPath{SourceType: sourceType, SourcePath: source, LocalPath: root, ContentPrefix: "https://media.example/play", FilterRules: `{"include":["mkv"],"download":["srt"]}`})
+			mapping := saveCloudSTRMMapping(t, svc, model.MediaDirectory{MappingEnabled: true, SourceType: sourceType, SourcePath: source, SavePath: root, ContentPrefix: "https://media.example/play", FilterRules: `{"include":["mkv"],"download":["srt"]}`})
 			result, err := svc.Move(context.Background(), 7, 1, request)
 			if err != nil || result.Status != "moved" || result.STRM == nil || result.STRM.Status != "created" || result.STRM.CloudPathID != mapping.ID {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
 			wantPath := filepath.Join(root, strings.TrimPrefix(strings.TrimSuffix(event, ".mkv")+".strm", "/"))
 			data, readErr := os.ReadFile(wantPath)
-			if readErr != nil || string(data) != "https://media.example/play"+event || result.STRM.LocalPath != wantPath {
+			if readErr != nil || string(data) != "https://media.example/play"+event || result.STRM.SavePath != wantPath {
 				t.Fatalf("data=%q err=%v result=%+v", data, readErr, result.STRM)
 			}
 			request.FolderID = result.FolderID
@@ -120,15 +120,15 @@ func TestCloudFolderMoveSTRMURIEncodingAndOwnerIsolation(t *testing.T) {
 	svc, provider, request := folderMoveFixture(t)
 	provider.dirs["10"][0].Name, request.FileName = "A #片.mkv", "A #片.mkv"
 	root := t.TempDir()
-	mapping := saveCloudSTRMMapping(t, svc, model.CloudPath{SourceType: model.SourceTypeCloudDrive2, SourcePath: "/挂载/自定义位置", LocalPath: root, ContentPrefix: "https://media.example/play/", ContentEncodeURI: true})
+	mapping := saveCloudSTRMMapping(t, svc, model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeCloudDrive2, SourcePath: "/挂载/自定义位置", SavePath: root, ContentPrefix: "https://media.example/play/", ContentEncodeURI: true})
 	otherRoot := t.TempDir()
-	saveCloudSTRMMapping(t, svc, model.CloudPath{UserID: 8, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置/Movie", LocalPath: otherRoot})
-	saveCloudSTRMMapping(t, svc, model.CloudPath{CloudStorageID: 2, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置/Movie", LocalPath: otherRoot})
+	saveCloudSTRMMapping(t, svc, model.MediaDirectory{MappingEnabled: true, UserID: 8, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置/Movie", SavePath: otherRoot})
+	saveCloudSTRMMapping(t, svc, model.MediaDirectory{MappingEnabled: true, CloudStorageID: 2, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置/Movie", SavePath: otherRoot})
 	result, err := svc.Move(context.Background(), 7, 1, request)
 	if err != nil || result.STRM.Status != "created" || result.STRM.CloudPathID != mapping.ID {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
-	data, err := os.ReadFile(result.STRM.LocalPath)
+	data, err := os.ReadFile(result.STRM.SavePath)
 	want := "https://media.example/play/%E6%8C%82%E8%BD%BD/%E8%87%AA%E5%AE%9A%E4%B9%89%E4%BD%8D%E7%BD%AE/Movie/A%20%23%E7%89%87.mkv"
 	if err != nil || string(data) != want {
 		t.Fatalf("URI content=%q want=%q err=%v", data, want, err)
@@ -143,7 +143,7 @@ func TestCloudFolderMoveSTRMSkipsUnmappedAndFilteredFiles(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			svc, provider, request := folderMoveFixture(t)
 			root := t.TempDir()
-			mapping := model.CloudPath{SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置", LocalPath: root}
+			mapping := model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置", SavePath: root}
 			switch mode {
 			case "outside mapping":
 				mapping.SourcePath = "/other"
@@ -176,7 +176,7 @@ func TestCloudFolderMoveSTRMFailurePreservesMoveAndCanRetry(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			svc, provider, request := folderMoveFixture(t)
 			root := t.TempDir()
-			mapping := model.CloudPath{SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置", LocalPath: root}
+			mapping := model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/自定义位置", SavePath: root}
 			localPath := filepath.Join(root, "自定义位置/Movie/Movie.strm")
 			switch mode {
 			case "local conflict":
@@ -187,8 +187,8 @@ func TestCloudFolderMoveSTRMFailurePreservesMoveAndCanRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "root is file":
-				mapping.LocalPath = filepath.Join(root, "not-a-directory")
-				if err := os.WriteFile(mapping.LocalPath, []byte("preserve me"), 0644); err != nil {
+				mapping.SavePath = filepath.Join(root, "not-a-directory")
+				if err := os.WriteFile(mapping.SavePath, []byte("preserve me"), 0644); err != nil {
 					t.Fatal(err)
 				}
 			case "managed path":
@@ -202,7 +202,7 @@ func TestCloudFolderMoveSTRMFailurePreservesMoveAndCanRetry(t *testing.T) {
 			case "invalid provider path":
 				provider.resolvePath = "/自定义位置/../outside"
 			case "relative local root":
-				mapping.LocalPath = "relative"
+				mapping.SavePath = "relative"
 			case "invalid filter":
 				mapping.FilterRules = "{invalid"
 			}
@@ -221,10 +221,10 @@ func TestCloudFolderMoveSTRMFailurePreservesMoveAndCanRetry(t *testing.T) {
 			}
 			// Repair only the failed local mapping, then repeat the same request.
 			fixedRoot := t.TempDir()
-			if err := svc.db.Where("id <> ?", saved.ID).Delete(&model.CloudPath{}).Error; err != nil {
+			if err := svc.db.Where("id <> ?", saved.ID).Delete(&model.MediaDirectory{}).Error; err != nil {
 				t.Fatal(err)
 			}
-			if err := svc.db.Model(&model.CloudPath{}).Where("id = ?", saved.ID).Updates(map[string]any{"local_path": fixedRoot, "filter_rules": ""}).Error; err != nil {
+			if err := svc.db.Model(&model.MediaDirectory{}).Where("id = ?", saved.ID).Updates(map[string]any{"save_path": fixedRoot, "filter_rules": ""}).Error; err != nil {
 				t.Fatal(err)
 			}
 			provider.resolveErr, provider.resolvePath = nil, ""
@@ -242,7 +242,7 @@ func TestCloudMovedSTRMRejectsUnsafeFilenameAndSymlinkEscape(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			svc, provider, _ := folderMoveFixture(t)
 			root := t.TempDir()
-			saveCloudSTRMMapping(t, svc, model.CloudPath{SourceType: model.SourceTypeMoviePilot2, SourcePath: "/", LocalPath: root})
+			saveCloudSTRMMapping(t, svc, model.MediaDirectory{MappingEnabled: true, SourceType: model.SourceTypeMoviePilot2, SourcePath: "/", SavePath: root})
 			result := svc.createMovedFileSTRM(context.Background(), provider, 7, 1, &CloudFolderMoveResult{FolderID: "20", FileName: name})
 			if result.Status != "failed" || provider.resolveCalls != 0 {
 				t.Fatalf("unsafe name accepted: %+v", result)

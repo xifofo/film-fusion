@@ -35,7 +35,7 @@ func TestPlutoFishHTTPToLocalSTRMAndRestartReplay(t *testing.T) {
 	if err := db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	mapping := model.CloudPath{ID: 1, UserID: 1, CloudStorageID: 1, SourcePath: "/Movies", SourceType: model.SourceTypeMoviePilot2, LocalPath: t.TempDir(), ContentPrefix: "/existing-media-mount", LinkType: model.LinkTypeStrm}
+	mapping := model.MediaDirectory{MappingEnabled: true, ID: 1, UserID: 1, CloudStorageID: 1, SourcePath: "/Movies", SourceType: model.SourceTypeMoviePilot2, SavePath: t.TempDir(), ContentPrefix: "/existing-media-mount", LinkType: model.LinkTypeStrm}
 	if err := db.Create(&mapping).Error; err != nil {
 		t.Fatal(err)
 	}

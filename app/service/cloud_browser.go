@@ -99,15 +99,15 @@ func NewCloudBrowserService(db *gorm.DB, web *Web115Service) *CloudBrowserServic
 	return s
 }
 
-func (s *CloudBrowserService) directory(ctx context.Context, userID, directoryID uint) (model.CloudDirectory, error) {
-	var directory model.CloudDirectory
+func (s *CloudBrowserService) directory(ctx context.Context, userID, directoryID uint) (model.MediaDirectory, error) {
+	var directory model.MediaDirectory
 	if userID == 0 || directoryID == 0 {
 		return directory, cloudMoveError(400, "目录配置参数无效")
 	}
 	if s.db == nil {
 		return directory, cloudMoveError(500, "数据库不可用")
 	}
-	err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", directoryID, userID).First(&directory).Error
+	err := s.db.WithContext(ctx).Where("id = ? AND user_id = ?", directoryID, userID).Scopes(model.OrganizingDirectories).First(&directory).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return directory, cloudMoveError(404, "未找到当前用户的目录配置")
 	}
@@ -117,9 +117,9 @@ func (s *CloudBrowserService) directory(ctx context.Context, userID, directoryID
 	return directory, nil
 }
 
-func (s *CloudBrowserService) directories(ctx context.Context, userID, storageID uint) ([]model.CloudDirectory, error) {
-	var directories []model.CloudDirectory
-	if err := s.db.WithContext(ctx).Where("user_id = ? AND cloud_storage_id = ?", userID, storageID).Find(&directories).Error; err != nil {
+func (s *CloudBrowserService) directories(ctx context.Context, userID, storageID uint) ([]model.MediaDirectory, error) {
+	var directories []model.MediaDirectory
+	if err := s.db.WithContext(ctx).Where("user_id = ? AND cloud_storage_id = ?", userID, storageID).Scopes(model.OrganizingDirectories).Find(&directories).Error; err != nil {
 		return nil, cloudMoveError(500, "读取目录配置失败")
 	}
 	return directories, nil

@@ -288,7 +288,7 @@ func TestLocalDirectoryDisableCannotRaceScan(t *testing.T) {
 
 func TestLocalDirectoryWorkflowRejectsOnlyInvalid115Input(t *testing.T) {
 	for _, node := range []AutomationNode{
-		{Type: AutomationNodeOrganizeStrm}, {Type: AutomationNodeMoviePilotRecognize},
+		{Type: AutomationNodeOrganizeStrm}, {Type: AutomationNodeMediaFileRecognize},
 		{Type: AutomationNodeFilmFusionRecognize, Config: map[string]any{"recognition_mode": "file"}},
 	} {
 		definition := AutomationDefinition{Nodes: []AutomationNode{{ID: "trigger", Type: AutomationNodeTrigger}, {ID: "delay", Type: AutomationNodeDelay}, {ID: "action", Type: node.Type, Config: node.Config}},

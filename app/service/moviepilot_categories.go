@@ -113,103 +113,19 @@ func (rule *MoviePilotCategoryRule) UnmarshalJSON(data []byte) error {
 }
 
 func (s *MoviePilotService) GetCategoryConfig() (MoviePilotCategoryConfig, error) {
-	if s.local != nil {
-		if localConfig, configured, err := s.local.LoadMoviePilotCategoryConfig(); err != nil {
-			if s.logger != nil {
-				s.logger.Warnf("[media-recognition] 读取本地分类配置失败，将继续尝试 MoviePilot: %v", err)
-			}
-		} else if configured {
-			return localConfig, nil
-		}
-	}
-	if fallbackErr, active := s.activeLocalRecognitionFallback(); active {
-		s.logLocalRecognitionFallback("分类配置", fallbackErr)
-		return s.localMediaRecognitionCategoryConfig(), nil
-	}
-	body, err := s.doGet("/api/v1/media/category/config", nil)
-	if err != nil {
-		if s.local != nil {
-			s.logLocalRecognitionFallback("分类配置", err)
-			return s.localMediaRecognitionCategoryConfig(), nil
-		}
-		return MoviePilotCategoryConfig{}, err
-	}
-	if err := validateMoviePilotSuccess(body); err != nil {
-		if s.local != nil {
-			s.logLocalRecognitionFallback("分类配置", err)
-			return s.localMediaRecognitionCategoryConfig(), nil
-		}
-		return MoviePilotCategoryConfig{}, err
-	}
-
-	var wrapper struct {
-		Data json.RawMessage `json:"data"`
-	}
-	var cfg MoviePilotCategoryConfig
-	if err := json.Unmarshal(body, &wrapper); err == nil && len(wrapper.Data) > 0 {
-		if err := json.Unmarshal(wrapper.Data, &cfg); err == nil {
-			s.clearLocalRecognitionFallback()
-			return cfg, nil
-		}
-	}
-
-	if err := json.Unmarshal(body, &cfg); err != nil {
-		if s.local != nil {
-			s.logLocalRecognitionFallback("分类配置", err)
-			return s.localMediaRecognitionCategoryConfig(), nil
-		}
-		return MoviePilotCategoryConfig{}, fmt.Errorf("解析 MoviePilot 分类配置失败: %w", err)
-	}
-
-	s.clearLocalRecognitionFallback()
-	return cfg, nil
+	return s.GetCategoryConfigWithSource("")
 }
 
-// GetCategoryConfigWithSource avoids contacting MoviePilot when an organize
-// request explicitly selects FilmFusion's local recognition engine.
+// GetCategoryConfigWithSource 读取所选内置引擎的分类，不请求外部识别服务。
 func (s *MoviePilotService) GetCategoryConfigWithSource(source string) (MoviePilotCategoryConfig, error) {
-	normalized, err := s.ResolveMediaRecognitionSource(source)
+	_, err := s.ResolveMediaRecognitionSource(source)
 	if err != nil {
 		return MoviePilotCategoryConfig{}, err
-	}
-	if normalized == MediaRecognitionSourceMedianame {
-		if s.local == nil {
-			return MoviePilotCategoryConfig{}, errors.New("medianame 服务未初始化")
-		}
-		return s.local.MedianameCategoryNames()
-	}
-	if normalized != MediaRecognitionSourceLocal {
-		return s.GetCategoryConfig()
 	}
 	if s.local == nil {
-		return MoviePilotCategoryConfig{}, errors.New("FilmFusion 本地识别未初始化")
+		return MoviePilotCategoryConfig{}, errors.New("medianame 服务未初始化")
 	}
-	config, configured, err := s.local.LoadMoviePilotCategoryConfig()
-	if err != nil {
-		return MoviePilotCategoryConfig{}, fmt.Errorf("读取 FilmFusion 本地分类配置失败: %w", err)
-	}
-	if configured {
-		return config, nil
-	}
-	return s.localMediaRecognitionCategoryConfig(), nil
-}
-
-func (s *MoviePilotService) localMediaRecognitionCategoryConfig() MoviePilotCategoryConfig {
-	if s != nil && s.local != nil {
-		if config, _, err := s.local.LoadMoviePilotCategoryConfig(); err == nil {
-			return config
-		} else if s.logger != nil {
-			s.logger.Warnf("[media-recognition] 加载本地分类配置失败，使用内置默认值: %v", err)
-		}
-	}
-	config, err := mediaRecognitionCategoryConfigFromYAML(DefaultMediaRecognitionCategoryYAML)
-	if err == nil {
-		return config
-	}
-	return MoviePilotCategoryConfig{
-		Movie: map[string]*MoviePilotCategoryRule{"电影": nil}, MovieOrder: []string{"电影"},
-		TV: map[string]*MoviePilotCategoryRule{"电视剧": nil}, TVOrder: []string{"电视剧"},
-	}
+	return s.local.MedianameCategoryNames()
 }
 
 func SelectMoviePilotCategory(mediaType string, info MoviePilotMediaInfo, cfg MoviePilotCategoryConfig) string {

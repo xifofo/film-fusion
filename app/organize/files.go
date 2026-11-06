@@ -54,7 +54,7 @@ func (h *Service) batchRenameAndMove(webClient *driver.Pan115Client, items []Org
 	return nil
 }
 
-func (h *Service) generateStrmFiles(dir model.CloudDirectory, items *[]Organize115ItemResult, dryRun bool) error {
+func (h *Service) generateStrmFiles(dir model.MediaDirectory, items *[]Organize115ItemResult, dryRun bool) error {
 	if items == nil || len(*items) == 0 {
 		return nil
 	}
@@ -122,7 +122,7 @@ func buildStrmInfo(savePath, contentPrefix, targetPath string, encodeURI bool) (
 	return strmPath, content
 }
 
-func (h *Service) cachePickcodeCaches(dir model.CloudDirectory, items []Organize115ItemResult) {
+func (h *Service) cachePickcodeCaches(dir model.MediaDirectory, items []Organize115ItemResult) {
 	if len(items) == 0 {
 		return
 	}

@@ -17,9 +17,9 @@ func isAutomationActionNode(nodeType string) bool {
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
 		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
-		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle,
+		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMediaTitleRecognize,
 		AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-		AutomationNodeMoviePilotRecognize,
+		AutomationNodeMediaFileRecognize,
 		AutomationNodeOrganizeStrm, AutomationNodeStrmVerify, AutomationNodeStrmRegenerate,
 		AutomationNodeEmbyRefreshWait, AutomationNodeHTTPRequest, AutomationNodeNotification:
 		return true
@@ -186,14 +186,14 @@ func (s *AutomationService) executeAutomationNode(ctx context.Context, run model
 	case AutomationNodeRename115OpenAPI:
 		output, err := s.executeAutomationRename115OpenAPI(ctx, node, runContext)
 		return withAutomationSelectedPort(output, err), err
-	case AutomationNodeMoviePilotTitle:
-		return s.executeAutomationMoviePilotTitleRecognize(ctx, node, runContext)
+	case AutomationNodeMediaTitleRecognize:
+		return s.executeAutomationMediaTitleRecognize(ctx, node, runContext)
 	case AutomationNodeFilmFusionRecognize:
 		return s.executeAutomationFilmFusionRecognize(ctx, node, definition, runContext)
 	case AutomationNodeMediaExists:
 		return s.executeAutomationMediaExists(ctx, node, runContext)
-	case AutomationNodeMoviePilotRecognize:
-		return s.executeAutomationMoviePilotRecognize(ctx, node, definition, runContext)
+	case AutomationNodeMediaFileRecognize:
+		return s.executeAutomationMediaFileRecognize(ctx, node, definition, runContext)
 	case AutomationNodeOrganizeStrm:
 		return s.executeAutomationOrganizeStrm(ctx, node, definition, runContext)
 	case AutomationNodeStrmVerify:

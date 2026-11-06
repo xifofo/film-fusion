@@ -42,7 +42,7 @@ func NewMoviePilot2NotifyService(log *logger.Logger, download115Svc *Download115
 	}
 }
 
-func (s *MoviePilot2NotifyService) ProcessNotify(data MoviePilot2NotifyRequestData, cloudPaths []model.CloudPath) {
+func (s *MoviePilot2NotifyService) ProcessNotify(data MoviePilot2NotifyRequestData, cloudPaths []model.MediaDirectory) {
 	// 处理 movie-pilot v2 的通知逻辑
 	// 处理整理完成的通知
 	if data.Type == "transfer.complete" {
@@ -57,7 +57,7 @@ func (s *MoviePilot2NotifyService) ProcessNotify(data MoviePilot2NotifyRequestDa
 	}
 }
 
-func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2NotifyRequestDataTransferinfo, cloudPaths []model.CloudPath) {
+func (s *MoviePilot2NotifyService) HandleFileNotify(transferInfo MoviePilot2NotifyRequestDataTransferinfo, cloudPaths []model.MediaDirectory) {
 	s.logger.Infof("处理 movie-pilot v2 通知: %s", transferInfo.TransferType)
 	if !transferInfo.Success {
 		return

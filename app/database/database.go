@@ -48,6 +48,10 @@ func Init(cfg *config.Config, log *logger.Logger) error {
 		log.Errorf("初始化 115 运行配置失败: %v", err)
 		return err
 	}
+	if err := Init115AppCatalog(db); err != nil {
+		log.Errorf("初始化 115 应用目录失败: %v", err)
+		return err
+	}
 
 	// 媒体识别方式是数据库运行配置；新安装和升级默认进入影子模式。
 	if err := InitMediaRecognitionSettings(cfg); err != nil {

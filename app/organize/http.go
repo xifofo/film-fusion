@@ -41,7 +41,7 @@ func (h *Handler) GetCategoryConfig(c *gin.Context) {
 	h = h.withContext(c.Request.Context())
 	cfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(c.Query("recognition_source"))
 	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "获取 MoviePilot 分类配置失败: "+err.Error())
+		h.error(c, http.StatusBadRequest, 400, "获取媒体分类配置失败: "+err.Error())
 		return
 	}
 
@@ -95,10 +95,10 @@ func (h *Handler) CheckMediaLocalStatus(c *gin.Context) {
 		return
 	}
 
-	var dir model.CloudDirectory
+	var dir model.MediaDirectory
 	if err := h.store().
 		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
-		First(&dir).Error; err != nil {
+		Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
 		return
 	}
@@ -208,15 +208,10 @@ func (h *Handler) Organize115(c *gin.Context) {
 	worker.moviePilotSvc = frozen
 	h = &Handler{Service: &worker}
 	categoryCfg, err := h.moviePilotSvc.GetCategoryConfigWithSource(snapshot.Source)
-	categoryError := ""
 	if err != nil {
-		if snapshot.Source != service.MediaRecognitionSourceShadow {
-			h.error(c, http.StatusBadRequest, 400, "获取媒体分类配置失败")
-			return
-		}
-		categoryError = "获取 MP2 分类配置失败: " + err.Error()
+		h.error(c, http.StatusBadRequest, 400, "获取媒体分类配置失败")
+		return
 	}
-	frozen.RecordPipelineCategories(categoryCfg)
 
 	client := sdk115helper.WithAccessToken(h.sdk115Open, storage.AccessToken)
 
@@ -248,7 +243,7 @@ func (h *Handler) Organize115(c *gin.Context) {
 			}
 
 			totalFiles++
-			item := h.planOrganizeItem(processOrganizeArgs{recognitionSource: snapshot.Source, dryRun: true, categoryCfg: categoryCfg, categoryError: categoryError, dir: model.CloudDirectory{ClassifyByCategory: true}}, service.Web115File{FileID: file.Fid, Name: file.Fn, PickCode: file.Pc})
+			item := h.planOrganizeItem(processOrganizeArgs{recognitionSource: snapshot.Source, dryRun: true, categoryCfg: categoryCfg, dir: model.MediaDirectory{ClassifyByCategory: true}}, service.Web115File{FileID: file.Fid, Name: file.Fn, PickCode: file.Pc})
 			results = append(results, item)
 		}
 
@@ -350,10 +345,10 @@ func (h *Handler) CreatePreviewTasks(c *gin.Context) {
 	category := strings.TrimSpace(req.Category)
 	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
-	var dir model.CloudDirectory
+	var dir model.MediaDirectory
 	if err := h.store().Preload("CloudStorage").
 		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
-		First(&dir).Error; err != nil {
+		Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
 		return
 	}

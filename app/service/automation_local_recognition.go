@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -59,21 +60,17 @@ func (s *AutomationService) executeAutomationFilmFusionTitleRecognize(
 		return map[string]any{"selected_port": "failure", "error": "待识别标题为空"}, nil
 	}
 	if len(input) > maxMediaRecognitionInput {
-		return map[string]any{"selected_port": "failure", "input": input, "error": "待识别标题超过本地识别长度限制"}, nil
+		return map[string]any{"selected_port": "failure", "input": input, "error": "待识别标题超过medianame 识别长度限制"}, nil
 	}
 	tmdbID, err := resolveAutomationOptionalTMDBID(runContext, automationConfigString(node.Config, "tmdb_id"))
 	if err != nil {
 		return nil, err
 	}
-	if tmdbID == "" {
-		tmdbID = extractLocalTMDBMarkerID(input)
-	}
 	recognizeInput := input
 	if tmdbID != "" {
-		if candidates := automationTitleRecognitionCandidates(input, tmdbID); len(candidates) > 0 {
-			recognizeInput = candidates[0]
-		}
+		recognizeInput += " [tmdb=" + tmdbID + "]"
 	}
+
 	result, recognizeErr := s.localMedia.Recognize(ctx, recognizeInput, MediaRecognitionOptions{
 		Mode: MediaRecognitionModeTitle, LookupTMDB: automationFilmFusionLookupTMDB(node.Config),
 	})
@@ -87,7 +84,7 @@ func (s *AutomationService) executeAutomationFilmFusionTitleRecognize(
 		output["reason"] = recognizeErr.Error()
 		return output, nil
 	}
-	if reason := validateAutomationFilmFusionRecognitionResult(result, tmdbID); reason != "" {
+	if reason := validateAutomationFilmFusionRecognitionResult(result, tmdbID, automationFilmFusionLookupTMDB(node.Config)); reason != "" {
 		output["selected_port"] = "failure"
 		output["error"] = reason
 		output["reason"] = reason
@@ -166,7 +163,7 @@ func (s *AutomationService) executeAutomationFilmFusionFileRecognize(
 	}
 	sort.Slice(files, func(left, right int) bool { return files[left].Path < files[right].Path })
 	output := map[string]any{
-		"engine": "local", "mode": MediaRecognitionModeFile,
+		"engine": "medianame", "mode": MediaRecognitionModeFile,
 		"cloud_storage_id": storageID, "access_method": accessMethod,
 		"requested_tmdb_id": tmdbID, "total_files": len(files),
 		"directory_id": sourceOutput["directory_id"], "file_ids": sourceOutput["file_ids"],
@@ -190,9 +187,13 @@ func (s *AutomationService) executeAutomationFilmFusionFileRecognize(
 			return output, err
 		}
 		recognizeInput := strings.TrimSpace(file.Path)
-		if candidates := automationRecognitionCandidates(file, tmdbID); len(candidates) > 0 {
-			recognizeInput = candidates[0]
+		if recognizeInput == "" {
+			recognizeInput = file.Name
 		}
+		if tmdbID != "" {
+			recognizeInput = path.Join(path.Dir(recognizeInput), appendAutomationMedianameID(path.Base(recognizeInput), tmdbID))
+		}
+
 		result, recognizeErr := s.localMedia.Recognize(ctx, recognizeInput, MediaRecognitionOptions{
 			Mode: MediaRecognitionModeFile, LookupTMDB: automationFilmFusionLookupTMDB(node.Config),
 		})
@@ -206,7 +207,7 @@ func (s *AutomationService) executeAutomationFilmFusionFileRecognize(
 			})
 			continue
 		}
-		if reason := validateAutomationFilmFusionRecognitionResult(result, tmdbID); reason != "" {
+		if reason := validateAutomationFilmFusionRecognitionResult(result, tmdbID, automationFilmFusionLookupTMDB(node.Config)); reason != "" {
 			failed = append(failed, map[string]any{
 				"file_id": file.FileID, "file_name": file.Name, "file_path": file.Path,
 				"recognize_input": recognizeInput, "error": reason,
@@ -234,21 +235,24 @@ func (s *AutomationService) executeAutomationFilmFusionFileRecognize(
 	}
 	if len(failed) > 0 {
 		output["selected_port"] = "failure"
-		output["reason"] = fmt.Sprintf("%d 个媒体文件未能完成本地识别", len(failed))
+		output["reason"] = fmt.Sprintf("%d 个媒体文件未能完成 medianame 识别", len(failed))
 		return output, nil
 	}
 	output["selected_port"] = "success"
 	return output, nil
 }
 
-func validateAutomationFilmFusionRecognitionResult(result MediaRecognitionResult, requestedTMDBID string) string {
+func validateAutomationFilmFusionRecognitionResult(result MediaRecognitionResult, requestedTMDBID string, lookupTMDB bool) string {
+	if lookupTMDB && result.TMDBStatus != "compatible" {
+		return firstAutomationNonEmpty(result.Warning, "medianame 未返回可采用的媒体："+result.TMDBStatus)
+	}
 	if strings.TrimSpace(firstAutomationNonEmpty(result.MediaInfo.Title, result.MetaInfo.Name)) == "" {
-		return "FilmFusion 本地识别未解析出媒体标题"
+		return "medianame 识别未解析出媒体标题"
 	}
 	if requestedTMDBID != "" {
 		recognizedID := strings.TrimSpace(firstAutomationNonEmpty(result.MediaInfo.TMDBID, result.MetaInfo.TMDBID))
 		if recognizedID != requestedTMDBID {
-			return "FilmFusion 本地识别没有识别为指定的 TMDB ID " + requestedTMDBID
+			return "medianame 识别没有识别为指定的 TMDB ID " + requestedTMDBID
 		}
 	}
 	return ""
@@ -268,7 +272,7 @@ func automationFilmFusionRecognitionOutput(
 		quality = extractAutomationQuality(strings.TrimSpace(meta.ResourceType + " " + meta.ProcessedInput))
 	}
 	return map[string]any{
-		"engine": firstAutomationNonEmpty(result.Engine, "local"), "mode": firstAutomationNonEmpty(result.Mode, MediaRecognitionModeTitle),
+		"engine": firstAutomationNonEmpty(result.Engine, "medianame"), "mode": firstAutomationNonEmpty(result.Mode, MediaRecognitionModeTitle),
 		"input": strings.TrimSpace(input), "recognize_input": strings.TrimSpace(recognizeInput),
 		"processed_input": strings.TrimSpace(meta.ProcessedInput), "requested_tmdb_id": strings.TrimSpace(requestedTMDBID),
 		"tmdb_id":        strings.TrimSpace(firstAutomationNonEmpty(media.TMDBID, meta.TMDBID)),
@@ -283,4 +287,10 @@ func automationFilmFusionRecognitionOutput(
 		"media_info": result.MediaInfo, "word_result": result.WordResult,
 		"candidates": result.Candidates, "raw": result.Raw,
 	}
+}
+
+// 将显式辅助 ID 放在扩展名前，同时保留输入中原有的 ID 与冲突证据。
+func appendAutomationMedianameID(input, id string) string {
+	ext := path.Ext(input)
+	return strings.TrimSuffix(input, ext) + " [tmdb=" + id + "]" + ext
 }

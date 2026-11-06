@@ -12,12 +12,17 @@ import (
 
 const mediaRecognitionSourceDescription = "系统默认媒体识别方式"
 
-// InitMediaRecognitionSettings 初始化系统默认识别方式，之后始终以数据库为准。
+// InitMediaRecognitionSettings 初始化识别配置，并将数据库中的历史引擎值写回 medianame。
 func InitMediaRecognitionSettings(cfg *config.Config) error {
 	if DB == nil {
 		return errors.New("数据库未初始化")
 	}
 	if loaded, err := LoadMediaRecognitionSettings(DB); err == nil {
+		if err := DB.Model(&model.SystemConfig{}).
+			Where("config_key = ? AND config_value <> ?", model.ConfigKeyMediaRecognitionSource, loaded.Source).
+			Update("config_value", loaded.Source).Error; err != nil {
+			return err
+		}
 		cfg.MediaRecognition = loaded
 		return nil
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {

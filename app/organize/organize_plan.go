@@ -41,8 +41,8 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 		req.medianameSnapshot = previous.Pipeline
 	}
 	// Capture destination conditions before any remote reads; changes during preview invalidate it.
-	var dir model.CloudDirectory
-	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).First(&dir).Error; err != nil {
+	var dir model.MediaDirectory
+	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return Organize115CookieResult{}, errors.New("云盘目录不存在或无权限")
 	}
 	if req.RecognitionSource == "" {
@@ -87,9 +87,9 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 	return result, nil
 }
 
-func organizeDirectoryConditions(dir model.CloudDirectory) string {
+func organizeDirectoryConditions(dir model.MediaDirectory) string {
 	// Dates, credentials and unrelated user metadata do not affect the plan.
-	dir.CreatedAt = model.CloudDirectory{}.CreatedAt
+	dir.CreatedAt = model.MediaDirectory{}.CreatedAt
 	dir.UpdatedAt = dir.CreatedAt
 	dir.CloudStorage = nil
 	dir.User = nil
@@ -100,8 +100,11 @@ func validateOrganizePlanRequest(req, saved Organize115CookieRequest) error {
 	if req.CloudDirectoryID != saved.CloudDirectoryID {
 		return errors.New("预览目录已改变，请重新预览")
 	}
-	if req.RecognitionSource != "" && req.RecognitionSource != saved.RecognitionSource {
-		return errors.New("预览引擎已改变，请重新预览")
+	if req.RecognitionSource != "" {
+		source, err := service.NormalizeMediaRecognitionSource(req.RecognitionSource)
+		if err != nil || source != saved.RecognitionSource {
+			return errors.New("预览引擎已改变，请重新预览")
+		}
 	}
 	if req.MediaType != saved.MediaType || req.Category != saved.Category || req.FilenameRegexEnabled != saved.FilenameRegexEnabled || req.FilenameRegexPattern != saved.FilenameRegexPattern || req.FilenameRegexReplacement != saved.FilenameRegexReplacement {
 		return errors.New("整理选项已改变，请重新预览")
@@ -249,11 +252,15 @@ func (h *Service) applyOrganizePlan(userID uint, req Organize115CookieRequest) (
 	if json.Unmarshal([]byte(row.ResultJSON), &result) != nil || json.Unmarshal([]byte(row.RequestJSON), &saved) != nil || result.Pipeline == nil || result.Pipeline.Schema != 1 || result.Pipeline.Source == "" {
 		return result, errors.New("历史预览缺少引擎或配置快照，请重新预览")
 	}
+	// 只有 medianame 计划可以执行；历史引擎的路径必须重新预览。
+	if result.Pipeline.Source != service.MediaRecognitionSourceMedianame {
+		return result, errors.New("历史引擎整理计划已停用，请使用 medianame 重新预览")
+	}
 	if err := validateOrganizePlanRequest(req, saved); err != nil {
 		return result, err
 	}
-	var dir model.CloudDirectory
-	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).First(&dir).Error; err != nil {
+	var dir model.MediaDirectory
+	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return result, errors.New("目录不可用，请重新预览")
 	}
 	if organizeDirectoryConditions(dir) != row.DirectoryJSON {

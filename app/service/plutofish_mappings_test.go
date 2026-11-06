@@ -13,10 +13,10 @@ import (
 
 func TestPlutoFishConfigAllowsSeveralCloudPathsPerAccount(t *testing.T) {
 	db := openPlutoFishTestDB(t, filepath.Join(t.TempDir(), "config.db"))
-	for _, mapping := range []model.CloudPath{
-		{ID: 1, UserID: 7, SourcePath: "/Movies"},
-		{ID: 2, UserID: 7, SourcePath: "/TV"},
-		{ID: 3, UserID: 8, SourcePath: "/Other"},
+	for _, mapping := range []model.MediaDirectory{
+		{MappingEnabled: true, ID: 1, UserID: 7, SourcePath: "/Movies"},
+		{MappingEnabled: true, ID: 2, UserID: 7, SourcePath: "/TV"},
+		{MappingEnabled: true, ID: 3, UserID: 8, SourcePath: "/Other"},
 	} {
 		if err := db.Create(&mapping).Error; err != nil {
 			t.Fatal(err)
@@ -55,7 +55,7 @@ func TestPlutoFishMultipleMappingsRouteByDirectory(t *testing.T) {
 		t.Run(map[bool]string{false: "MP2", true: "CD2"}[cd2], func(t *testing.T) {
 			b, movies, event := plutoFishBusinessFixture(t)
 			tv := movies
-			tv.ID, tv.SourcePath, tv.LocalPath = 3, "/TV", t.TempDir()
+			tv.ID, tv.SourcePath, tv.SavePath = 3, "/TV", t.TempDir()
 			mount := ""
 			if cd2 {
 				movies.SourceType, movies.SourcePath = model.SourceTypeCloudDrive2, "/115Media/Movies"
@@ -69,14 +69,14 @@ func TestPlutoFishMultipleMappingsRouteByDirectory(t *testing.T) {
 				t.Fatal(err)
 			}
 			b.options.Mappings = append(b.options.Mappings, PlutoFishAccountMapping{TargetAccountID: "account", CloudPathID: tv.ID})
-			for _, entry := range []struct{ directory, root, task string }{{"/Movies/Title", movies.LocalPath, "movie"}, {"/TV/Show/Season 01", tv.LocalPath, "tv"}} {
+			for _, entry := range []struct{ directory, root, task string }{{"/Movies/Title", movies.SavePath, "movie"}, {"/TV/Show/Season 01", tv.SavePath, "tv"}} {
 				event.TargetDirectoryPath, event.TransferID, event.FileName = entry.directory, entry.task, "Episode.mkv"
 				result, err := b.Handle(context.Background(), "scope", event)
 				wantPath := filepath.Join(entry.root, mount, entry.directory, "Episode.strm")
-				if err != nil || result.LocalPath != wantPath {
+				if err != nil || result.SavePath != wantPath {
 					t.Fatalf("directory=%s result=%+v want=%s err=%v", entry.directory, result, wantPath, err)
 				}
-				content, err := os.ReadFile(result.LocalPath)
+				content, err := os.ReadFile(result.SavePath)
 				wantContent := "https://existing-player.example/play/" + mount + strings.ReplaceAll(strings.TrimPrefix(entry.directory, "/"), " ", "%20") + "/Episode.mkv"
 				if err != nil || string(content) != wantContent {
 					t.Fatalf("content=%q want=%q err=%v", content, wantContent, err)
@@ -98,7 +98,7 @@ func TestPlutoFishMultipleMappingsPreferSpecificPathAndDoNotFallBack(t *testing.
 	for _, reverse := range []bool{false, true} {
 		b, broad, event := plutoFishBusinessFixture(t)
 		specific := broad
-		specific.ID, specific.SourcePath, specific.LocalPath = 3, "/Movies/Title", t.TempDir()
+		specific.ID, specific.SourcePath, specific.SavePath = 3, "/Movies/Title", t.TempDir()
 		if err := b.db.Create(&specific).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -107,7 +107,7 @@ func TestPlutoFishMultipleMappingsPreferSpecificPathAndDoNotFallBack(t *testing.
 			b.options.Mappings[0], b.options.Mappings[1] = b.options.Mappings[1], b.options.Mappings[0]
 		}
 		plan, err := b.plan(context.Background(), "scope", event)
-		if err != nil || plan.RootPath != specific.LocalPath {
+		if err != nil || plan.RootPath != specific.SavePath {
 			t.Fatalf("specific mapping not used: %+v %v", plan, err)
 		}
 		specific.FilterRules = `{"include":["mp4"]}`
@@ -117,7 +117,7 @@ func TestPlutoFishMultipleMappingsPreferSpecificPathAndDoNotFallBack(t *testing.
 		if _, err := b.Handle(context.Background(), "scope", event); err == nil {
 			t.Fatal("excluded file fell back to broader mapping")
 		}
-		if entries, err := os.ReadDir(broad.LocalPath); err != nil || len(entries) != 0 {
+		if entries, err := os.ReadDir(broad.SavePath); err != nil || len(entries) != 0 {
 			t.Fatal("unexpected broad output", entries, err)
 		}
 	}
@@ -126,7 +126,7 @@ func TestPlutoFishMultipleMappingsPreferSpecificPathAndDoNotFallBack(t *testing.
 func TestPlutoFishMultipleMappingsRejectEqualEffectiveSources(t *testing.T) {
 	b, first, event := plutoFishBusinessFixture(t)
 	second := first
-	second.ID, second.SourceType, second.SourcePath, second.LocalPath = 3, model.SourceTypeCloudDrive2, "/AnotherMount/Movies/", t.TempDir()
+	second.ID, second.SourceType, second.SourcePath, second.SavePath = 3, model.SourceTypeCloudDrive2, "/AnotherMount/Movies/", t.TempDir()
 	if err := b.db.Create(&second).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestPlutoFishMultipleMappingsRejectEqualEffectiveSources(t *testing.T) {
 	if _, err := b.Handle(context.Background(), "scope", event); err == nil || !strings.Contains(err.Error(), "同等优先级") {
 		t.Fatalf("ambiguous mapping accepted: %v", err)
 	}
-	for _, root := range []string{first.LocalPath, second.LocalPath} {
+	for _, root := range []string{first.SavePath, second.SavePath} {
 		if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 			t.Fatal("ambiguous event wrote a file", entries, err)
 		}

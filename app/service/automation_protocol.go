@@ -408,8 +408,8 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("storage_name", "string", "115 账号名称", "执行重命名的账号名称。", "115 主账号"),
 		automationVariable("access_method", "string", "访问方式", "固定为 openapi。", "openapi"),
 	}, automation115ResponseOutputs("object")...)},
-	{Type: AutomationNodeMoviePilotTitle, Label: "MP 标题识别", Inputs: automationRecognitionInputs("$item.title"), Outputs: automationRecognitionOutputs()},
-	{Type: AutomationNodeFilmFusionRecognize, Label: "FilmFusion 本地识别", Inputs: []AutomationVariableProtocol{
+	{Type: AutomationNodeMediaTitleRecognize, Label: "媒体标题识别", Inputs: automationRecognitionInputs("$item.title"), Outputs: automationRecognitionOutputs()},
+	{Type: AutomationNodeFilmFusionRecognize, Label: "medianame 解析（兼容节点）", Inputs: []AutomationVariableProtocol{
 		automationVariable("recognition_mode", "string", "识别模式", "title 识别发布标题；file 递归识别等待节点返回的 115 下载文件。", "title"),
 		automationTemplateVariable("input", "string", "待识别标题", "发布标题模式的输入，可引用 事件字段、流程变量或上游输出。", "$item.title", false),
 		automationTemplateVariable("tmdb_id", "string", "辅助 TMDB ID", "可选；提供后会在本地识别输入中加入 TMDB 标记并校验识别结果。", "1396", false),
@@ -420,7 +420,7 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationTemplateVariable("title", "string", "媒体标题", "用于计算目标目录。", "{{nodes.mp_title.output.title}}", false),
 		automationTemplateVariable("year", "string", "年份", "用于计算目标目录。", "{{nodes.mp_title.output.year}}", false),
 		automationTemplateVariable("media_type", "string", "媒体类型", "电影或电视剧。", "{{nodes.mp_title.output.media_type}}", false),
-		automationTemplateVariable("category", "string", "媒体分类", "可选的 MoviePilot 分类。", "{{nodes.mp_title.output.category}}", false),
+		automationTemplateVariable("category", "string", "媒体分类", "可选的媒体分类。", "{{nodes.mp_title.output.category}}", false),
 	}, Outputs: []AutomationVariableProtocol{
 		automationVariable("exists", "boolean", "是否已存在", "本地目录或 Emby 中是否已经存在。", true),
 		automationVariable("local_exists", "boolean", "本地是否存在", "目标媒体目录是否已存在。", true),
@@ -430,7 +430,7 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("emby_url", "string", "Emby 页面", "匹配项目的 Emby Web 地址。", "https://emby.example/web/index.html#!/item?id=12345"),
 		automationVariable("existing_seasons", "array", "已有季", "本地已存在的季度目录。", []string{"Season 01"}),
 	}},
-	{Type: AutomationNodeMoviePilotRecognize, Label: "MP2 / 影子识别", Inputs: automationRecognitionInputs(""), Outputs: append(automationRecognitionOutputs(),
+	{Type: AutomationNodeMediaFileRecognize, Label: "媒体文件识别", Inputs: automationRecognitionInputs(""), Outputs: append(automationRecognitionOutputs(),
 		automationVariable("requested_tmdb_id", "string", "辅助 TMDB ID", "本次识别实际使用的辅助 TMDB ID；留空自动识别时为空。", "1396"),
 		automationVariable("total_files", "integer", "媒体文件数", "115 下载结果中找到的可识别媒体文件数量。", 1),
 		automationVariable("recognized_count", "integer", "识别文件数", "成功识别的媒体文件数量。", 1),
@@ -440,10 +440,10 @@ var automationNodeProtocols = []AutomationNodeProtocol{
 		automationVariable("partial", "boolean", "部分识别", "是否只有部分文件识别成功。", false),
 	)},
 	{Type: AutomationNodeOrganizeStrm, Label: "整理生成 STRM", Inputs: []AutomationVariableProtocol{
-		automationVariable("recognition_source", "string", "整理引擎", "moviepilot、medianame、shadow；留空跟随目录或系统设置。", "shadow"),
+		automationVariable("recognition_source", "string", "整理引擎", "固定使用 medianame，历史引擎配置自动转换。", "medianame"),
 		automationVariable("dry_run", "boolean", "只生成预览", "生成完整计划，不移动文件或写 STRM。", false),
 	}, Outputs: []AutomationVariableProtocol{
-		automationVariable("recognition_source", "string", "固定引擎", "本任务识别和整理使用同一模式。", "shadow"),
+		automationVariable("recognition_source", "string", "固定引擎", "本任务识别和整理使用同一模式。", "medianame"),
 		automationVariable("dry_run", "boolean", "仅预览", "为 true 时仅生成计划，没有文件操作。", false),
 		automationVariable("planned_count", "integer", "预览文件数", "只预览时有效计划中的媒体数量。", 1),
 		automationVariable("plans", "array", "计划快照", "各批次 plan_id、包版本和配置快照；items 内包含完整路径与影子诊断。", []any{}),
@@ -538,21 +538,21 @@ func automation115SubmitOutputs() []AutomationVariableProtocol {
 func automationRecognitionInputs(defaultInput string) []AutomationVariableProtocol {
 	fields := make([]AutomationVariableProtocol, 0, 3)
 	if defaultInput != "" {
-		fields = append(fields, automationTemplateVariable("input", "string", "待识别标题", "MoviePilot 标题识别输入。", defaultInput, true))
+		fields = append(fields, automationTemplateVariable("input", "string", "待识别标题", "内置引擎的标题识别输入。", defaultInput, true))
 	}
-	fields = append(fields, automationVariable("recognition_source", "string", "识别方式", "moviepilot、medianame、local 或 shadow；留空跟随系统设置。", "shadow"))
+	fields = append(fields, automationVariable("recognition_source", "string", "识别方式", "固定使用 medianame，历史引擎配置自动转换。", "medianame"))
 	fields = append(fields, automationTemplateVariable("tmdb_id", "string", "辅助 TMDB ID", "留空自动识别，或提供 TMDB ID 辅助识别。", "1396", false))
 	return fields
 }
 
 func automationRecognitionOutputs() []AutomationVariableProtocol {
 	return []AutomationVariableProtocol{
-		automationVariable("tmdb_id", "string", "TMDB ID", "MoviePilot 识别出的 TMDB ID。", "1396"),
+		automationVariable("tmdb_id", "string", "TMDB ID", "内置引擎识别出的 TMDB ID。", "1396"),
 		automationVariable("title", "string", "媒体标题", "识别出的规范媒体标题。", "绝命毒师"),
 		automationVariable("year", "string", "年份", "媒体首播或上映年份。", "2008"),
 		automationVariable("media_type", "string", "媒体类型", "movie 或 tv。", "tv"),
 		automationVariable("season_episode", "string", "季集信息", "识别出的季集信息。", "S01E01"),
-		automationVariable("category", "string", "媒体分类", "MoviePilot 分类结果。", "欧美剧"),
+		automationVariable("category", "string", "媒体分类", "内置引擎的分类结果。", "欧美剧"),
 		automationVariable("rating", "number", "评分", "识别结果中的评分。", 9.5),
 		automationVariable("quality", "string", "质量", "识别出的资源质量。", "2160p"),
 		automationVariable("poster_url", "string", "海报地址", "TMDB 海报或背景图地址。", "https://image.tmdb.org/example.jpg"),
@@ -561,9 +561,9 @@ func automationRecognitionOutputs() []AutomationVariableProtocol {
 
 func automationLocalRecognitionOutputs() []AutomationVariableProtocol {
 	return []AutomationVariableProtocol{
-		automationVariable("engine", "string", "识别引擎", "固定为 local，表示本次没有调用 MoviePilot。", "local"),
+		automationVariable("engine", "string", "识别引擎", "固定为 medianame。", "medianame"),
 		automationVariable("mode", "string", "实际模式", "本次执行使用的 title 或 file 模式。", "title"),
-		automationVariable("recognize_input", "string", "实际识别输入", "应用辅助 TMDB 标记后送入本地识别内核的文本。", "示例剧.S01E01.{tmdb-1396}.mkv"),
+		automationVariable("recognize_input", "string", "实际识别输入", "应用辅助 TMDB 标记后送入 medianame的文本。", "示例剧.S01E01.{tmdb-1396}.mkv"),
 		automationVariable("processed_input", "string", "词表处理结果", "按已保存识别词处理后的标题或路径。", "示例剧.S01E01.2160p.mkv"),
 		automationVariable("requested_tmdb_id", "string", "辅助 TMDB ID", "本次配置并解析出的辅助 TMDB ID；未配置时为空。", "1396"),
 		automationVariable("tmdb_id", "string", "TMDB ID", "本地标记解析或 TMDB 匹配得到的 TMDB ID。", "1396"),
@@ -575,18 +575,18 @@ func automationLocalRecognitionOutputs() []AutomationVariableProtocol {
 		automationVariable("rating", "number", "评分", "TMDB 匹配补全的评分；纯本地解析时为 0。", 9.5),
 		automationVariable("quality", "string", "质量", "本地解析得到的分辨率或资源质量。", "2160p"),
 		automationVariable("poster_url", "string", "海报地址", "TMDB 匹配得到的海报或背景图地址。", "https://image.tmdb.org/t/p/w780/example.jpg"),
-		automationVariable("tmdb_status", "string", "TMDB 状态", "matched、not_found、not_configured、failed 或 skipped。", "matched"),
-		automationVariable("warning", "string", "识别提示", "TMDB 不可用等非阻断提示。", "TMDB 未配置，已返回纯本地解析结果"),
+		automationVariable("tmdb_status", "string", "TMDB 状态", "compatible、review、ambiguous、not_identified 或 request_error。", "compatible"),
+		automationVariable("warning", "string", "识别提示", "TMDB 不可用等非阻断提示。", "medianame 需要复核候选"),
 		automationVariable("applied_words", "array", "命中识别词", "本次实际命中的 FilmFusion 本地识别词。", []string{"广告 => "}),
 		automationVariable("meta_info", "object", "本地解析详情", "本地媒体元数据解析结果。", map[string]any{"name": "绝命毒师", "media_type": "tv"}),
 		automationVariable("media_info", "object", "媒体信息", "本地解析与可选 TMDB 匹配后的统一媒体实体。", map[string]any{"title": "绝命毒师", "tmdb_id": "1396"}),
 		automationVariable("word_result", "object", "识别词轨迹", "识别词处理前后文本和逐条执行轨迹。", map[string]any{"processed": "绝命毒师.S01E01"}),
 		automationVariable("candidates", "array", "TMDB 候选", "本地 TMDB 匹配时参与选择的候选列表。", []any{}),
-		automationVariable("raw", "object", "原始结果", "本地识别内核返回的兼容原始结构。", map[string]any{"engine": "local"}),
+		automationVariable("raw", "object", "原始结果", "medianame 返回的兼容原始结构。", map[string]any{"engine": "medianame"}),
 		automationVariable("total_files", "integer", "媒体文件数", "文件模式在 115 下载结果中找到的视频文件数量。", 1),
 		automationVariable("recognized_count", "integer", "识别文件数", "文件模式成功完成本地解析的视频文件数量。", 1),
 		automationVariable("failed_count", "integer", "识别失败数", "文件模式未能完成本地解析的视频文件数量。", 0),
-		automationVariable("items", "array", "识别结果", "文件模式下每个视频文件的本地识别详情。", []any{}),
+		automationVariable("items", "array", "识别结果", "文件模式下每个视频文件的medianame 识别详情。", []any{}),
 		automationVariable("failed_items", "array", "识别失败明细", "文件模式下未能识别的文件及原因。", []any{}),
 		automationVariable("partial", "boolean", "部分识别", "文件模式是否只有部分文件识别成功。", false),
 	}

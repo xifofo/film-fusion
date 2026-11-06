@@ -125,7 +125,7 @@ func folderMoveFixture(t *testing.T) (*CloudFolderMoveService, *folderMoveFake, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = db.AutoMigrate(&model.CloudStorage{}, &model.OrganizeStorageLock{}, &model.CloudPath{}, &model.OrganizeManagedStrm{}); err != nil {
+	if err = db.AutoMigrate(&model.CloudStorage{}, &model.OrganizeStorageLock{}, &model.MediaDirectory{}, &model.OrganizeManagedStrm{}); err != nil {
 		t.Fatal(err)
 	}
 	if err = db.Create(&model.CloudStorage{ID: 1, UserID: 7, StorageType: model.StorageType115Open, Status: model.StatusActive, StorageName: "test", AccessToken: "secret", Cookie: "UID=7; CID=test; SEID=test"}).Error; err != nil {

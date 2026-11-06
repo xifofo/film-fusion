@@ -29,7 +29,7 @@ func TestPlutoFishPathsFollowExistingCloudDriveMapping(t *testing.T) {
 
 			event.TargetDirectoryPath = "/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01"
 			event.TargetPickCode = "not-a-path"
-			localDir := filepath.Join(mapping.LocalPath, "115LongTerm/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01")
+			localDir := filepath.Join(mapping.SavePath, "115LongTerm/影视中心/国产剧集/尚公主 (2026) {tmdb-286171}/Season 01")
 			for _, episode := range []string{"03", "04"} {
 				name := "Tigers.Sniff.the.Rose.S01E" + episode + ".2026.2160p.TX.WEB-DL.DDP5.1.Atmos.HFR.H.265-SalmonWeb"
 				event.ID, event.TransferID, event.FileName = "event-"+episode, "transfer-"+episode, name+".mkv"
@@ -51,7 +51,7 @@ func TestPlutoFishPathsFollowExistingCloudDriveMapping(t *testing.T) {
 				}
 
 				result, err := b.Handle(context.Background(), "service|owner", event)
-				if err != nil || result.LocalPath != wantPath {
+				if err != nil || result.SavePath != wantPath {
 					t.Fatalf("result=%+v want=%q err=%v", result, wantPath, err)
 				}
 				if data, err := os.ReadFile(wantPath); err != nil || string(data) != wantContent {
@@ -66,7 +66,7 @@ func TestPlutoFishPathsFollowExistingCloudDriveMapping(t *testing.T) {
 			}
 
 			files := 0
-			if err := filepath.WalkDir(mapping.LocalPath, func(path string, entry os.DirEntry, err error) error {
+			if err := filepath.WalkDir(mapping.SavePath, func(path string, entry os.DirEntry, err error) error {
 				if err != nil {
 					return err
 				}
@@ -101,7 +101,7 @@ func TestPlutoFishMappedSTRMRecoversWithoutManifest(t *testing.T) {
 	if _, err := store.processOne(ctx, b.Handle); err == nil {
 		t.Fatal("expected receipt failure after writing STRM")
 	}
-	wantPath := filepath.Join(mapping.LocalPath, "Movies/Title/影片 #1.strm")
+	wantPath := filepath.Join(mapping.SavePath, "Movies/Title/影片 #1.strm")
 	before, err := os.Stat(wantPath)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestPlutoFishLegacyPlanRemainsForReview(t *testing.T) {
 	b, mapping, event := plutoFishBusinessFixture(t)
 	scope := "service|owner"
 	legacy := model.PlutoFishBusinessPlan{
-		Scope: scope, TransferID: event.TransferID, RootPath: mapping.LocalPath,
+		Scope: scope, TransferID: event.TransferID, RootPath: mapping.SavePath,
 		RelativePath: fmt.Sprintf("PlutoFish/%x/%x/影片 #1.strm", sha256.Sum256([]byte(scope)), sha256.Sum256([]byte(event.TransferID))),
 		Content:      "https://existing-player.example/play/Movies/Title/%E5%BD%B1%E7%89%87%20%231.mkv",
 	}
@@ -141,7 +141,7 @@ func TestPlutoFishLegacyPlanRemainsForReview(t *testing.T) {
 	if _, err := b.Handle(context.Background(), scope, event); err == nil || !strings.Contains(err.Error(), "历史文件") {
 		t.Fatalf("legacy plan was not kept for review: %v", err)
 	}
-	if entries, err := os.ReadDir(mapping.LocalPath); err != nil || len(entries) != 0 {
+	if entries, err := os.ReadDir(mapping.SavePath); err != nil || len(entries) != 0 {
 		t.Fatalf("unexpected second output: %v %v", entries, err)
 	}
 	var saved model.PlutoFishBusinessPlan

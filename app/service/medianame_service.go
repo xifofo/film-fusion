@@ -423,18 +423,15 @@ func (s *MediaRecognitionService) MedianameTarget(ctx context.Context, r Mediana
 
 // No credentials are serialized. ConfigVersion describes the exact words and both branch configs.
 type MediaPipelineSnapshot struct {
-	Schema                 int                                  `json:"schema"`
-	Source                 string                               `json:"source"`
-	PackageVersion         string                               `json:"package_version"`
-	ConfigVersion          string                               `json:"config_version"`
-	Words                  []string                             `json:"words"`
-	WordsConfigured        bool                                 `json:"words_configured"`
-	MP2Categories          MediaRecognitionCategoryConfigResult `json:"mp2_categories"`
-	MP2EffectiveCategories *MoviePilotCategoryConfig            `json:"mp2_effective_categories,omitempty"`
-	MP2Rename              MediaRenameConfigResult              `json:"mp2_rename"`
-	Medianame              MedianameConfig                      `json:"medianame"`
-	MedianameConfigError   string                               `json:"medianame_config_error,omitempty"`
-	medianameError         error
+	Schema               int             `json:"schema"`
+	Source               string          `json:"source"`
+	PackageVersion       string          `json:"package_version"`
+	ConfigVersion        string          `json:"config_version"`
+	Words                []string        `json:"words"`
+	WordsConfigured      bool            `json:"words_configured"`
+	Medianame            MedianameConfig `json:"medianame"`
+	MedianameConfigError string          `json:"medianame_config_error,omitempty"`
+	medianameError       error
 }
 
 func (s *MoviePilotService) FreezeMediaPipeline(source string) (*MoviePilotService, *MediaPipelineSnapshot, error) {
@@ -446,14 +443,6 @@ func (s *MoviePilotService) FreezeMediaPipeline(source string) (*MoviePilotServi
 	if s.local != nil {
 		snapshot.Words, snapshot.WordsConfigured, err = s.local.LoadWords()
 		if err != nil {
-			return nil, nil, err
-		}
-		snapshot.MP2Categories, err = s.local.LoadCategoryConfig()
-		if err != nil && source != MediaRecognitionSourceMedianame {
-			return nil, nil, err
-		}
-		snapshot.MP2Rename, err = s.local.LoadMediaRenameConfig()
-		if err != nil && source != MediaRecognitionSourceMedianame {
 			return nil, nil, err
 		}
 		snapshot.Medianame, snapshot.medianameError = s.local.LoadMedianameConfig()
@@ -543,12 +532,29 @@ func adaptMedianameRecognition(r MedianameRecognition) MediaRecognitionResult {
 	}
 	p := r.Result.MetaInfo
 	out.TMDBStatus = string(r.Result.Status)
-	out.MetaInfo = MediaRecognitionMetaInfo{OriginalInput: r.WordResult.Original, ProcessedInput: r.WordResult.Processed, Name: p.Title, MediaType: string(p.Type), TMDBID: p.IDs.TMDB, BeginSeason: p.Season, EndSeason: p.SeasonEnd, BeginEpisode: p.Episode, EndEpisode: p.EpisodeEnd, Extension: p.Extension, ResourceType: p.Source, ResourcePix: p.Resolution, VideoEncode: p.VideoCodec, AudioEncode: p.AudioCodec, ResourceEffect: p.Effects, ResourceTeam: p.ReleaseGroup, AppliedWords: r.WordResult.AppliedWords}
+	out.MetaInfo = MediaRecognitionMetaInfo{OriginalInput: r.WordResult.Original, ProcessedInput: r.WordResult.Processed, Name: p.Title, MediaType: string(p.Type), TMDBID: p.IDs.TMDB, BeginSeason: p.Season, EndSeason: p.SeasonEnd, BeginEpisode: p.Episode, EndEpisode: p.EpisodeEnd, Extension: p.Extension, ResourceType: p.Source, ResourcePix: p.Resolution, VideoEncode: p.VideoCodec, AudioEncode: p.AudioCodec, WebSource: p.StreamingService, ResourceEffect: p.Effects, ResourceTeam: p.ReleaseGroup, AppliedWords: r.WordResult.AppliedWords}
+	if p.BitDepth > 0 {
+		out.MetaInfo.VideoBit = strconv.Itoa(p.BitDepth) + "bit"
+	}
 	if p.Year != 0 {
 		out.MetaInfo.Year = strconv.Itoa(p.Year)
 	}
 	asMedia := func(m *mtmdb.MediaInfo) MediaRecognitionMediaInfo {
-		return MediaRecognitionMediaInfo{Source: "medianame", MediaType: string(m.Type), Title: m.Title, OriginalTitle: m.OriginalTitle, Year: strconv.Itoa(m.Year), TMDBID: m.TMDBID, Category: m.Category, PosterPath: m.PosterPath, BackdropPath: m.BackdropPath, Rating: m.VoteAverage, Overview: m.Overview}
+		info := MediaRecognitionMediaInfo{Source: "medianame", MediaType: string(m.Type), Title: m.Title, TitleYear: m.Title, OriginalTitle: m.OriginalTitle, TMDBID: m.TMDBID, Category: m.Category, CategoryPath: m.Category, PosterPath: m.PosterPath, BackdropPath: m.BackdropPath, Rating: m.VoteAverage, Overview: m.Overview, OriginalLanguage: m.OriginalLanguage, OriginCountries: m.OriginCountry}
+		if m.Year > 0 {
+			info.Year = strconv.Itoa(m.Year)
+			info.TitleYear += " (" + info.Year + ")"
+		}
+		for _, genre := range m.Genres {
+			info.Genres = append(info.Genres, genre.Name)
+		}
+		for _, id := range m.GenreIDs {
+			info.GenreIDs = append(info.GenreIDs, strconv.Itoa(id))
+		}
+		for _, country := range m.ProductionCountries {
+			info.ProductionCountries = append(info.ProductionCountries, country.Code)
+		}
+		return info
 	}
 	if r.Result.MediaInfo != nil && r.Result.Status == mtmdb.StatusCompatible && r.Error == "" {
 		out.MediaInfo = asMedia(r.Result.MediaInfo)
@@ -608,15 +614,4 @@ func (s *MoviePilotService) PipelineTMDB() *TMDBService {
 		return nil
 	}
 	return s.local.tmdb
-}
-func (s *MoviePilotService) RecordPipelineCategories(cfg MoviePilotCategoryConfig) {
-	if s == nil || s.local == nil || s.local.frozen == nil {
-		return
-	}
-	snapshot := s.local.frozen
-	if snapshot.Source != MediaRecognitionSourceMedianame {
-		snapshot.MP2EffectiveCategories = &cfg
-	}
-	snapshot.ConfigVersion = ""
-	snapshot.ConfigVersion = fingerprint(snapshot)
 }

@@ -17,7 +17,7 @@ func TestAutomationMedianamePreservesCategoryAndSpecialEpisodes(t *testing.T) {
 		}
 		writeMedianameJSON(w, medianameDetails(123, "Example", "tv"))
 	})
-	_, _ = local.SaveCategoryConfig("电影:\n  OLD电影:\n电视剧:\n  OLD剧集:\n")
+
 	settings, _ := local.LoadMedianameConfig()
 	settings.CategoryYAML = "movie:\n  NEW电影:\ntv:\n  NEW剧集:\n"
 	if _, err := local.SaveMedianameConfig(settings); err != nil {
@@ -27,7 +27,7 @@ func TestAutomationMedianamePreservesCategoryAndSpecialEpisodes(t *testing.T) {
 	mp := NewMoviePilotService(cfg, nil)
 	mp.SetLocalMediaRecognition(local)
 	automation := &AutomationService{moviePilot: mp, localMedia: local}
-	output, err := automation.executeAutomationMoviePilotTitleRecognize(context.Background(), AutomationNode{Config: map[string]any{
+	output, err := automation.executeAutomationMediaTitleRecognize(context.Background(), AutomationNode{Config: map[string]any{
 		"input": "Example.2024.S00E01E03 [tmdb=123]",
 	}}, nil)
 	if err != nil || output["selected_port"] != "success" || output["category"] != "NEW剧集" || output["season_episode"] != "S00E01E03" || output["recognition_source"] != "medianame" {
@@ -43,7 +43,7 @@ func TestAutomationMedianamePreservesCategoryAndSpecialEpisodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg.MediaRecognition.Source = MediaRecognitionSourceMoviePilot
+	cfg.MediaRecognition.Source = "moviepilot"
 	info, _, _, err := recognizeAutomationMediaFile(adapter, automation115MediaFile{Name: "01.mkv", Path: "/Example.2024 [tmdb=123]/Season 0/01.mkv"}, "")
 	if err != nil || info.SeasonEpisode != "S00E01" || info.Category != "NEW剧集" {
 		t.Fatalf("file recognition lost pinned mode or inherited fields: %+v %v", info, err)
@@ -62,7 +62,7 @@ func TestAutomationMedianameNeverDropsConflictingIDsOrAcceptsRequestErrors(t *te
 			mp := NewMoviePilotService(cfg, nil)
 			mp.SetLocalMediaRecognition(local)
 			automation := &AutomationService{moviePilot: mp, localMedia: local}
-			output, _ := automation.executeAutomationMoviePilotTitleRecognize(context.Background(), AutomationNode{Config: map[string]any{"input": input, "recognition_source": "medianame"}}, nil)
+			output, _ := automation.executeAutomationMediaTitleRecognize(context.Background(), AutomationNode{Config: map[string]any{"input": input, "recognition_source": "medianame"}}, nil)
 			if output["selected_port"] != "failure" || output["tmdb_id"] != "" {
 				t.Fatalf("conflicting input adopted: %#v", output)
 			}
@@ -89,14 +89,14 @@ func TestAutomationMedianameNeverDropsConflictingIDsOrAcceptsRequestErrors(t *te
 
 func TestAutomationOrganizeKeepsUpstreamEngineAndPreviewMode(t *testing.T) {
 	db := newAutomationTestDB(t)
-	if err := db.AutoMigrate(&model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	storage := model.CloudStorage{UserID: 1, StorageType: model.StorageType115Open, Cookie: "fake-cookie", Status: model.StatusActive}
 	if err := db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{UserID: 1, CloudStorageID: storage.ID, DirectoryID: "library", RecognitionSource: "medianame"}
+	directory := model.MediaDirectory{OrganizeEnabled: true, UserID: 1, CloudStorageID: storage.ID, DirectoryID: "library", RecognitionSource: "medianame"}
 	if err := db.Create(&directory).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +109,9 @@ func TestAutomationOrganizeKeepsUpstreamEngineAndPreviewMode(t *testing.T) {
 	if err != nil || len(organizer.requests) != 1 || organizer.requests[0].RecognitionSource != "medianame" || !organizer.requests[0].DryRun {
 		t.Fatalf("upstream engine or preview mode lost: %+v %v", organizer.requests, err)
 	}
-	node.Config["recognition_source"] = "moviepilot"
+	node.Config["recognition_source"] = "local"
 	_, err = automation.executeAutomationOrganizeStrm(context.Background(), node, definition, automationTestRunContext("recognize", upstream))
-	if err == nil || len(organizer.requests) != 1 {
-		t.Fatal("mixed engine task was allowed")
+	if err != nil || len(organizer.requests) != 2 || organizer.requests[1].RecognitionSource != "medianame" {
+		t.Fatal("legacy local source did not normalize to medianame")
 	}
 }

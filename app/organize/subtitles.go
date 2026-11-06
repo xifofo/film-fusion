@@ -13,7 +13,7 @@ import (
 	"film-fusion/app/utils/pathhelper"
 )
 
-func (h *Service) enqueueSubtitleDownloads(dir model.CloudDirectory, storage *model.CloudStorage, items *[]Organize115ItemResult, dryRun bool, sourceFolderDeletionID uint) error {
+func (h *Service) enqueueSubtitleDownloads(dir model.MediaDirectory, storage *model.CloudStorage, items *[]Organize115ItemResult, dryRun bool, sourceFolderDeletionID uint) error {
 	if items == nil || len(*items) == 0 {
 		return nil
 	}

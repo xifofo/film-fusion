@@ -7,9 +7,9 @@ import (
 	"strings"
 )
 
-func (s *AutomationService) executeAutomationMoviePilotTitleRecognize(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
+func (s *AutomationService) executeAutomationMediaTitleRecognize(ctx context.Context, node AutomationNode, runContext map[string]any) (map[string]any, error) {
 	if s.moviePilot == nil {
-		return nil, errors.New("MoviePilot 媒体识别服务未初始化")
+		return nil, errors.New("FilmFusion 媒体识别服务未初始化")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -33,18 +33,12 @@ func (s *AutomationService) executeAutomationMoviePilotTitleRecognize(ctx contex
 	if err != nil {
 		return nil, err
 	}
-	if tmdbID == "" && recognizer.source != MediaRecognitionSourceMedianame {
-		tmdbID = extractLocalTMDBMarkerID(input)
-	}
 	category := ""
 	if value, ok := resolveAutomationReference(runContext, "$item.category"); ok {
 		category = strings.TrimSpace(fmt.Sprint(value))
 	}
 
 	media, recognizeInput, responded, recognized, recognizeErr := recognizeAutomationTitle(recognizer, input, category, tmdbID)
-	if recognized && recognizer.source != MediaRecognitionSourceMedianame {
-		media = s.reclassifyAutomationMoviePilotTitle(ctx, input, media)
-	}
 	output := automationTitleRecognitionOutput(input, recognizeInput, tmdbID, media)
 	output["recognition_source"] = recognizer.source
 	if recognizer.raw != nil {
@@ -59,80 +53,18 @@ func (s *AutomationService) executeAutomationMoviePilotTitleRecognize(ctx contex
 	}
 
 	output["selected_port"] = "failure"
-	reason := "MoviePilot 未返回可识别的媒体信息"
+	reason := "FilmFusion 未返回可识别的媒体信息"
 	if tmdbID != "" && responded {
-		reason = "MoviePilot 没有识别为指定的 TMDB ID " + tmdbID
+		reason = "FilmFusion 没有识别为指定的 TMDB ID " + tmdbID
 	}
 	if recognizeErr != nil {
 		reason = recognizeErr.Error()
 	}
 	output["error"] = reason
 	if !responded && recognizeErr != nil {
-		return output, fmt.Errorf("MoviePilot 标题识别请求失败: %w", recognizeErr)
+		return output, fmt.Errorf("FilmFusion 标题识别请求失败: %w", recognizeErr)
 	}
 	return output, nil
-}
-
-// reclassifyAutomationMoviePilotTitle keeps MoviePilot responsible for
-// identifying the title, then uses the returned TMDB identity to load complete
-// metadata and run FilmFusion's saved category rules. MoviePilot recognition
-// responses do not always contain every field used by category.yaml (notably
-// genre_ids), so classifying the partial response can select a later fallback
-// category even though the identified media itself is correct.
-func (s *AutomationService) reclassifyAutomationMoviePilotTitle(
-	ctx context.Context,
-	input string,
-	media AutomationMediaMetadata,
-) AutomationMediaMetadata {
-	if s == nil || s.localMedia == nil || strings.TrimSpace(media.TmdbID) == "" {
-		return media
-	}
-	recognizeInput := automationMoviePilotCategoryInput(input, media)
-	result, err := s.localMedia.Recognize(ctx, recognizeInput, MediaRecognitionOptions{
-		Mode: MediaRecognitionModeTitle, LookupTMDB: true,
-	})
-	if err != nil {
-		if s.log != nil && ctx.Err() == nil {
-			s.log.Warnf("[AUTOMATION] MP 标题识别分类补全失败，保留 MoviePilot 分类: %v", err)
-		}
-		return media
-	}
-	localTMDBID := strings.TrimSpace(firstAutomationNonEmpty(result.MediaInfo.TMDBID, result.MetaInfo.TMDBID))
-	if result.TMDBStatus != "matched_by_id" || localTMDBID != strings.TrimSpace(media.TmdbID) {
-		if s.log != nil && ctx.Err() == nil {
-			s.log.Warnf(
-				"[AUTOMATION] MP 标题识别未能按 TMDB %s 补全分类，保留 MoviePilot 分类（状态：%s）",
-				media.TmdbID,
-				firstAutomationNonEmpty(result.TMDBStatus, "unknown"),
-			)
-		}
-		return media
-	}
-	if category := strings.TrimSpace(result.MediaInfo.Category); category != "" {
-		media.Category = category
-	}
-	return media
-}
-
-func automationMoviePilotCategoryInput(input string, media AutomationMediaMetadata) string {
-	parts := make([]string, 0, 4)
-	if title := strings.TrimSpace(media.Title); title != "" {
-		parts = append(parts, title)
-	} else if input = strings.TrimSpace(input); input != "" {
-		parts = append(parts, input)
-	}
-	if year := strings.TrimSpace(media.Year); year != "" {
-		parts = append(parts, year)
-	}
-	if seasonEpisode := strings.TrimSpace(media.SeasonEpisode); seasonEpisode != "" {
-		parts = append(parts, seasonEpisode)
-	}
-	marker := "tmdbid=" + strings.TrimSpace(media.TmdbID)
-	if mediaType := normalizeLocalMediaType(media.MediaType); mediaType == "movie" || mediaType == "tv" {
-		marker += ";type=" + mediaType
-	}
-	parts = append(parts, "{["+marker+"]}")
-	return strings.Join(parts, ".")
 }
 
 func recognizeAutomationTitle(recognizer AutomationMediaRecognizer, title, category, tmdbID string) (AutomationMediaMetadata, string, bool, bool, error) {

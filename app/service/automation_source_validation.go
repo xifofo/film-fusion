@@ -176,8 +176,8 @@ func (s *AutomationService) validateAutomationMonitorLoop(cloudStorageID uint, d
 		if cloudDirectoryID == 0 {
 			continue
 		}
-		var directory model.CloudDirectory
-		if err := s.db.First(&directory, cloudDirectoryID).Error; err != nil {
+		var directory model.MediaDirectory
+		if err := s.db.Scopes(model.OrganizingDirectories).First(&directory, cloudDirectoryID).Error; err != nil {
 			return fmt.Errorf("整理目录配置不存在: %w", err)
 		}
 		if directory.CloudStorageID != cloudStorageID {

@@ -24,32 +24,29 @@ func (f organizePreviewTransport) RoundTrip(r *http.Request) (*http.Response, er
 }
 
 func TestOrganizePreviewReturnsSelectedFilePlanWithoutExecuting(t *testing.T) {
-	const rename = "Demo.2026.1080p.mkv"
-	mp := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	const rename = "Demo.2026.mkv"
+	tmdbServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/login/access-token":
-			_, _ = io.WriteString(w, `{"access_token":"test-token","expires_in":3600}`)
-		case "/api/v1/media/recognize_file":
-			_, _ = io.WriteString(w, `{"success":true,"data":{"media_info":{"media_type":"movie","title":"Demo","year":"2026","tmdb_id":"123"}}}`)
-		case "/api/v1/transfer/name":
-			_, _ = io.WriteString(w, `{"success":true,"data":{"name":"`+rename+`"}}`)
+		case "/3/search/movie":
+			_, _ = io.WriteString(w, `{"page":1,"total_pages":1,"results":[{"id":123,"title":"Demo","original_title":"Demo","release_date":"2026-01-01"}]}`)
+		case "/3/movie/123":
+			_, _ = io.WriteString(w, `{"id":123,"title":"Demo","original_title":"Demo","release_date":"2026-01-01"}`)
 		default:
-			t.Errorf("unexpected MoviePilot call: %s %s", r.Method, r.URL.Path)
+			t.Errorf("unexpected recognition request: %s", r.URL.Path)
 			http.NotFound(w, r)
 		}
 	}))
-	defer mp.Close()
+	defer tmdbServer.Close()
 
 	log := logger.New(config.LogConfig{Output: "stdout", Format: "json", Level: "error"})
 	defer log.Close()
-	h := &Service{
-		logger:    log,
-		web115Svc: service.NewWeb115Service(log),
-		moviePilotSvc: service.NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{
-			API: mp.URL, Username: "test", Password: "test",
-		}}, log),
-	}
+	cfg := &config.Config{TMDB: config.TMDBConfig{Enabled: true, BaseURL: tmdbServer.URL + "/3", APIKey: "test", TimeoutSeconds: 1}}
+	local := service.NewMediaRecognitionService(setupOrganizePlanTest(t).db, service.NewTMDBService(cfg, log), log)
+	provider := service.NewMoviePilotService(cfg, log)
+	provider.SetLocalMediaRecognition(local)
+	h := &Service{logger: log, web115Svc: service.NewWeb115Service(log), moviePilotSvc: provider}
+
 	client := driver.New()
 	readCalls := 0
 	mutationCalls := 0
@@ -82,7 +79,7 @@ func TestOrganizePreviewReturnsSelectedFilePlanWithoutExecuting(t *testing.T) {
 	}))
 	savePath := filepath.Join(t.TempDir(), "library")
 	group := h.processOrganize115CookieFolder(processOrganizeArgs{
-		dir: model.CloudDirectory{
+		dir: model.MediaDirectory{OrganizeEnabled: true,
 			DirectoryName: "影视", SavePath: savePath, ContentPrefix: "https://media.example/strm",
 		},
 		storage:           &model.CloudStorage{ID: 3},
@@ -91,7 +88,7 @@ func TestOrganizePreviewReturnsSelectedFilePlanWithoutExecuting(t *testing.T) {
 		fileIDs:           map[string]struct{}{"101": {}},
 		dryRun:            true,
 		mediaType:         "movie",
-		recognitionSource: service.MediaRecognitionSourceMoviePilot,
+		recognitionSource: service.MediaRecognitionSourceMedianame,
 	})
 	if group.Error != "" {
 		t.Fatalf("preview failed: %s", group.Error)

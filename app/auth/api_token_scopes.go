@@ -15,8 +15,9 @@ func APITokenScopes() []APITokenScope {
 	return []APITokenScope{
 		{"system-info", "系统信息", "读取服务器运行状态", []string{"/api/system-info"}},
 		{"cloud-storage", "云存储管理", "管理存储账号及 115 授权，包含账号凭据和 Cookie", []string{"/api/cloud-storage", "/api/auth/115", "/api/115-cookie", "/api/115-open"}},
-		{"paths", "云路径映射", "查询、修改路径映射并执行目录操作", []string{"/api/paths"}},
-		{"directories", "目录配置", "管理目录配置、浏览网盘并生成 STRM", []string{"/api/directories"}},
+		{"media-directories", "媒体目录", "管理媒体目录、路径映射、整理配置及 STRM 操作", []string{"/api/media-directories"}},
+		{"paths", "旧路径映射权限（已停用）", "保留旧 Token 的权限记录；管理配置请授权媒体目录", []string{"/api/paths"}},
+		{"directories", "旧目录列表（只读兼容）", "供旧浏览器扩展读取整理目录列表；管理配置请授权媒体目录", []string{"/api/directories"}},
 		{"strm", "STRM 生成", "生成或重新生成 STRM 文件", []string{"/api/strm"}},
 		{"media-recognition", "媒体识别", "识别测试及识别词、分类和重命名配置", []string{"/api/media-recognition"}},
 		{"organize", "文件整理", "整理文件、搜索媒体及管理预览任务", []string{"/api/organize"}},

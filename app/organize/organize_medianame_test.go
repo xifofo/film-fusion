@@ -44,7 +44,7 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 		t.Fatal(err)
 	}
 	e.db = db
-	if err = db.AutoMigrate(&model.SystemConfig{}, &model.CloudDirectory{}, &model.CloudStorage{}, &model.OrganizePlan{}, &model.OrganizeStorageLock{}, &model.PickcodeCache{}); err != nil {
+	if err = db.AutoMigrate(&model.SystemConfig{}, &model.MediaDirectory{}, &model.CloudStorage{}, &model.OrganizePlan{}, &model.OrganizeStorageLock{}, &model.PickcodeCache{}); err != nil {
 		t.Fatal(err)
 	}
 	prev := database.DB
@@ -54,12 +54,6 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 		e.calls++
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
-		case "/api/v1/login/access-token":
-			io.WriteString(w, `{"access_token":"test","expires_in":3600}`)
-		case "/api/v1/media/recognize_file", "/api/v1/media/recognize":
-			io.WriteString(w, `{"success":true,"data":{"media_info":{"media_type":"tv","title":"Example","year":"2024","tmdb_id":"123"},"meta_info":{"begin_season":0,"begin_episode":1,"season_episode":"S00E01"}}}`)
-		case "/api/v1/transfer/name":
-			io.WriteString(w, `{"success":true,"data":{"name":"MP2.S00E01.mkv"}}`)
 		case "/3/search/movie":
 			if r.URL.Query().Get("query") == "Kingdom of Heaven" {
 				io.WriteString(w, `{"page":1,"total_pages":1,"results":[{"id":1495,"title":"天国王朝","original_title":"Kingdom of Heaven","release_date":"2005-05-03"}]}`)
@@ -92,12 +86,6 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 	t.Cleanup(func() { _ = log.Close() })
 	tmdb := service.NewTMDBService(e.cfg, log)
 	e.local = service.NewMediaRecognitionService(db, tmdb, log)
-	if _, err = e.local.SaveCategoryConfig("电影:\n  MP2电影:\n电视剧:\n  MP2剧集:\n"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = e.local.SaveMediaRenameConfig("OLD/{{title}}{{fileExt}}", "OLD/{{title}}/{{season_episode}}{{fileExt}}"); err != nil {
-		t.Fatal(err)
-	}
 	cfg, err := e.local.LoadMedianameConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +123,7 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 	if err = db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	dir := model.CloudDirectory{ID: 2, UserID: 1, CloudStorageID: 3, DirectoryName: "影视", DirectoryID: "root", ClassifyByCategory: true, SavePath: filepath.Join(t.TempDir(), "library"), ContentPrefix: "https://example.test/strm"}
+	dir := model.MediaDirectory{OrganizeEnabled: true, ID: 2, UserID: 1, CloudStorageID: 3, DirectoryName: "影视", DirectoryID: "root", ClassifyByCategory: true, SavePath: filepath.Join(t.TempDir(), "library"), ContentPrefix: "https://example.test/strm"}
 	if err = db.Create(&dir).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -193,12 +181,6 @@ func TestOrganizeMedianamePreservesAnimeEpisodeSeparator(t *testing.T) {
 					t.Fatalf("preview: %+v, error: %v", preview, err)
 				}
 				item := preview.Items[0]
-				if source == "shadow" {
-					if item.Engine != "moviepilot" || item.ShadowComparison == nil || item.ShadowComparison.Medianame == nil {
-						t.Fatalf("missing independent shadow branch: %+v", item)
-					}
-					item = *item.ShadowComparison.Medianame
-				}
 				if item.Error != "" || item.Medianame == nil || item.Medianame.Result == nil {
 					t.Fatalf("medianame recognition failed: %+v", item)
 				}
@@ -220,7 +202,7 @@ func TestOrganizeMedianamePreservesAnimeEpisodeSeparator(t *testing.T) {
 	}
 }
 
-func TestOrganizeShadowPreviewAndConfirmedExecutionUseFrozenMP2Plan(t *testing.T) {
+func TestOrganizeLegacySourceAndConfirmedExecutionUseFrozenLocalPlan(t *testing.T) {
 	e := setupOrganizePlanTest(t)
 	preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
 	if err != nil {
@@ -229,18 +211,13 @@ func TestOrganizeShadowPreviewAndConfirmedExecutionUseFrozenMP2Plan(t *testing.T
 	if err = organizePreviewError(preview); err != nil {
 		t.Fatal(err)
 	}
-	if e.mutations != 0 || preview.PlanID == "" || preview.Pipeline == nil || preview.Pipeline.Source != "shadow" {
+	if e.mutations != 0 || preview.PlanID == "" || preview.Pipeline == nil || preview.Pipeline.Source != "medianame" {
 		t.Fatalf("preview: %+v mutations=%d", preview, e.mutations)
 	}
 	item := preview.Items[0]
-	other := item.ShadowComparison.Medianame
-	if item.Engine != "moviepilot" || !strings.Contains(item.TargetPath, "/MP2剧集/OLD/") || other == nil || !strings.Contains(other.TargetPath, "/NEW剧集/Example (2024) {tmdb-123}/Season 00/") {
-		t.Fatalf("independent paths: %+v", item)
+	if item.Engine != "medianame" || item.ShadowComparison != nil || !strings.Contains(item.TargetPath, "/NEW剧集/Example (2024) {tmdb-123}/Season 00/") {
+		t.Fatalf("legacy source did not use local plan: %+v", item)
 	}
-	if len(item.ShadowComparison.Differences) < 3 || other.Medianame.Result.Status != "compatible" {
-		t.Fatalf("full comparison missing: %+v", item.ShadowComparison)
-	}
-	t.Logf("preview MP2=%s; medianame=%s", item.TargetPath, other.TargetPath)
 	if _, err = os.Stat(item.StrmPath); !os.IsNotExist(err) {
 		t.Fatal("preview wrote STRM")
 	}
@@ -249,7 +226,7 @@ func TestOrganizeShadowPreviewAndConfirmedExecutionUseFrozenMP2Plan(t *testing.T
 	cfg, _ := e.local.LoadMedianameConfig()
 	cfg.TVTemplate = "CHANGED/{{.title}}.mkv"
 	_, _ = e.local.SaveMedianameConfig(cfg)
-	_, _ = e.local.SaveMediaRenameConfig("NEW/{{title}}.mkv", "NEW/{{title}}.mkv")
+
 	req := e.req
 	req.PlanID = preview.PlanID
 	req.DryRun = false
@@ -260,7 +237,7 @@ func TestOrganizeShadowPreviewAndConfirmedExecutionUseFrozenMP2Plan(t *testing.T
 	if err = organizePreviewError(actual); err != nil {
 		t.Fatal(err)
 	}
-	if actual.Items[0].TargetPath != item.TargetPath || actual.RecognitionSource != "shadow" || actual.Items[0].Engine != "moviepilot" || e.calls != beforeCalls {
+	if actual.Items[0].TargetPath != item.TargetPath || actual.RecognitionSource != "medianame" || actual.Items[0].Engine != "medianame" || e.calls != beforeCalls {
 		t.Fatalf("execution recomputed plan: %+v calls=%d/%d", actual, e.calls, beforeCalls)
 	}
 	data, err := os.ReadFile(item.StrmPath)
@@ -287,9 +264,9 @@ func TestOrganizePlanRejectsStaleAndHistoricalPreviews(t *testing.T) {
 			case "source":
 				e.sourceName = "Renamed.S00E01.mkv"
 			case "root":
-				e.db.Model(&model.CloudDirectory{}).Where("id = 2").Update("directory_name", "Changed")
+				e.db.Model(&model.MediaDirectory{}).Where("id = 2").Update("directory_name", "Changed")
 			case "options":
-				req.RecognitionSource = "medianame"
+				req.Category = "changed-after-preview"
 			case "foreign-user":
 				user = 2
 			case "historical":
@@ -306,7 +283,7 @@ func TestOrganizePlanRejectsStaleAndHistoricalPreviews(t *testing.T) {
 		})
 	}
 }
-func TestOrganizeMedianameFailureKeepsMP2Plan(t *testing.T) {
+func TestOrganizeMedianameFailureStopsPlan(t *testing.T) {
 	e := setupOrganizePlanTest(t)
 	e.tmdbFail = true
 	result, err := e.handler.buildOrganize115CookieResult(1, e.req)
@@ -314,28 +291,23 @@ func TestOrganizeMedianameFailureKeepsMP2Plan(t *testing.T) {
 		t.Fatal(err)
 	}
 	item := result.Items[0]
-	if item.Error != "" || item.TargetPath == "" || item.ShadowComparison.Medianame.Medianame.Result.Status != "request_error" || item.ShadowComparison.LocalTargetError == "" || e.mutations != 0 {
-		t.Fatalf("shadow failure hid primary or diagnostic: %+v", item)
+	if item.Error == "" || item.TargetPath != "" || item.Medianame.Result.Status != "request_error" || item.ShadowComparison != nil || e.mutations != 0 {
+		t.Fatalf("failed local recognition generated an executable plan: %+v", item)
 	}
 }
 
-func TestOrganizeBrokenMedianameConfigurationKeepsMP2AndDiagnostic(t *testing.T) {
+func TestOrganizeBrokenMedianameConfigurationStopsBeforeExecution(t *testing.T) {
 	e := setupOrganizePlanTest(t)
 	if err := e.db.Model(&model.SystemConfig{}).Where("config_key = ?", "media_recognition.medianame.v1").Update("config_value", `{}`).Error; err != nil {
 		t.Fatal(err)
 	}
-	result, err := e.handler.buildOrganize115CookieResult(1, e.req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := result.Items[0]
-	if item.Error != "" || item.TargetPath == "" || result.Pipeline.MedianameConfigError == "" || item.ShadowComparison.LocalTargetError == "" {
-		t.Fatalf("broken medianame config affected MP2: %+v", result)
+	if _, err := e.handler.buildOrganize115CookieResult(1, e.req); err == nil || e.mutations != 0 {
+		t.Fatalf("broken local configuration accepted: %v", err)
 	}
 }
 func TestDirectoryMedianameTrialOverridesSystemOnlyForNewTasks(t *testing.T) {
 	e := setupOrganizePlanTest(t)
-	e.db.Model(&model.CloudDirectory{}).Where("id = 2").Update("recognition_source", "medianame")
+	e.db.Model(&model.MediaDirectory{}).Where("id = 2").Update("recognition_source", "medianame")
 	result, err := e.handler.buildOrganize115CookieResult(1, e.req)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +388,7 @@ func TestPipelineWorkbenchUsesOrganizeBuildersWithoutCloudOperations(t *testing.
 				t.Fatalf("workbench response %s, %v", rr.Body, err)
 			}
 			item := response.Data.Item
-			if response.Data.Pipeline.Source != "shadow" || item.Engine != "moviepilot" || item.Error != "" || item.ShadowComparison == nil || item.ShadowComparison.Medianame.Error != "" || !strings.Contains(item.ShadowComparison.Medianame.TargetPath, "/Season 00/") {
+			if response.Data.Pipeline.Source != "medianame" || item.Engine != "medianame" || item.Error != "" || item.ShadowComparison != nil || !strings.Contains(item.TargetPath, "/Season 00/") {
 				t.Fatalf("incomplete workbench plan: %s", rr.Body)
 			}
 		})
@@ -464,8 +436,8 @@ func TestAutomationPreviewRetainsFullPlanAndFailedMedianameEvidence(t *testing.T
 		t.Fatalf("automation preview: %#v %v", output, err)
 	}
 	item := output["items"].([]any)[0].(map[string]any)
-	if item["shadow_comparison"] == nil || item["engine"] != "moviepilot" {
-		t.Fatalf("automation lost full shadow output: %#v", item)
+	if item["shadow_comparison"] != nil || item["engine"] != "medianame" {
+		t.Fatalf("automation lost local output: %#v", item)
 	}
 	e.tmdbFail = true
 	// New configuration invalidates the shared success cache for this failing run.
@@ -478,5 +450,44 @@ func TestAutomationPreviewRetainsFullPlanAndFailedMedianameEvidence(t *testing.T
 	item = output["items"].([]any)[0].(map[string]any)
 	if item["medianame"].(map[string]any)["result"].(map[string]any)["status"] != "request_error" {
 		t.Fatalf("failed preview lost status: %#v", item)
+	}
+}
+
+func TestOrganizeRejectsSavedLegacyPlansBeforeCloudAccess(t *testing.T) {
+	for _, source := range []string{"moviepilot", "shadow", "local"} {
+		t.Run(source, func(t *testing.T) {
+			e := setupOrganizePlanTest(t)
+			preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			preview.Pipeline.Source = source
+			if err := e.db.Model(&model.OrganizePlan{}).Where("id = ?", preview.PlanID).Update("result_json", planJSON(preview)).Error; err != nil {
+				t.Fatal(err)
+			}
+			e.handler.newOrganizeClient = func(string) (*driver.Pan115Client, error) { t.Fatal("old plan accessed 115"); return nil, nil }
+			req := e.req
+			req.PlanID, req.DryRun = preview.PlanID, false
+			if _, err := e.handler.buildOrganize115CookieResult(1, req); err == nil || !strings.Contains(err.Error(), "重新预览") {
+				t.Fatalf("old plan accepted: %v", err)
+			}
+		})
+	}
+}
+
+// 新预览使用 medianame；旧客户端提交同一引擎的别名时也可核对该计划。
+func TestOrganizePlanAcceptsLegacySourceAliasesForNewMedianamePlan(t *testing.T) {
+	saved := Organize115CookieRequest{RecognitionSource: "medianame"}
+	for _, source := range []string{"local", "moviepilot", "shadow", "medianame"} {
+		request := saved
+		request.RecognitionSource = source
+		if err := validateOrganizePlanRequest(request, saved); err != nil {
+			t.Fatalf("source %s: %v", source, err)
+		}
+	}
+	request := saved
+	request.RecognitionSource = "unknown"
+	if err := validateOrganizePlanRequest(request, saved); err == nil {
+		t.Fatal("accepted an unknown engine")
 	}
 }

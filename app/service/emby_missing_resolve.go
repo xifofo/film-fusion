@@ -19,7 +19,7 @@ type CloudPathOption struct {
 	StorageName    string `json:"storage_name"`
 	StorageType    string `json:"storage_type"`
 	SourcePath     string `json:"source_path"`
-	LocalPath      string `json:"local_path"`
+	SavePath       string `json:"local_path"`
 	EmbyPathPrefix string `json:"emby_path_prefix"`
 }
 
@@ -43,8 +43,8 @@ type ResolveSeriesResult struct {
 // Emby 多以容器形式部署，其上报的路径前缀与云端实际路径、本地挂载路径往往不一致。
 // 反推按以下优先级尝试：
 //  1. 若映射配置了 EmbyPathPrefix：去掉该前缀，余下路径直接作为云端目录（最可靠，不依赖本地挂载）；
-//  2. 否则用 Emby 路径的「后缀」在各映射 LocalPath 下试探真实存在的本地剧集目录；
-//  3. 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 LocalPath。
+//  2. 否则用 Emby 路径的「后缀」在各映射 SavePath 下试探真实存在的本地剧集目录；
+//  3. 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 SavePath。
 //
 // 定位到本地目录后，读取目录内首个 .strm 文件内容（= ContentPrefix + 云端路径），剥离 ContentPrefix
 // 反推云端目录；STRM 内容里的云端路径才是权威来源，不受容器挂载差异影响。
@@ -60,8 +60,8 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 	}
 	embyPathLinux := strings.TrimRight(pathhelper.ConvertToLinuxPath(embyPath), "/")
 
-	var paths []model.CloudPath
-	if err := s.db.Preload("CloudStorage").Where("user_id = ?", userID).Find(&paths).Error; err != nil {
+	var paths []model.MediaDirectory
+	if err := s.db.Preload("CloudStorage").Where("user_id = ?", userID).Scopes(model.MappingDirectories).Find(&paths).Error; err != nil {
 		return nil, err
 	}
 
@@ -75,7 +75,7 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 			ID:             p.ID,
 			CloudStorageID: p.CloudStorageID,
 			SourcePath:     p.SourcePath,
-			LocalPath:      p.LocalPath,
+			SavePath:       p.SavePath,
 			EmbyPathPrefix: p.EmbyPathPrefix,
 		}
 		if p.CloudStorage != nil {
@@ -95,21 +95,21 @@ func (s *EmbyMissingService) ResolveSeriesCloudPath(userID uint, seriesID string
 		return result, nil
 	}
 
-	// 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 LocalPath
+	// 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 SavePath
 	resolveByLocalPathPrefix(embyPathLinux, paths, result)
 
 	return result, nil
 }
 
 // resolveByEmbyPrefix 去掉 EmbyPathPrefix 后直接得到云端目录（取匹配前缀最长者）。
-// 该结果不依赖 LocalPath 或本地目录是否存在；本地可访问时仅补充诊断信息。
-func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []model.CloudPath, result *ResolveSeriesResult) bool {
+// 该结果不依赖 SavePath 或本地目录是否存在；本地可访问时仅补充诊断信息。
+func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []model.MediaDirectory, result *ResolveSeriesResult) bool {
 	if embyPathLinux == "" {
 		return false
 	}
 
 	var (
-		bestPath  *model.CloudPath
+		bestPath  *model.MediaDirectory
 		bestLocal string
 		bestRel   string // 去掉 EmbyPathPrefix 后的云端目录（带前导 /）
 		bestLen   = -1
@@ -135,10 +135,10 @@ func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []m
 			continue
 		}
 		localDir := ""
-		if strings.TrimSpace(p.LocalPath) != "" {
-			localDir = p.LocalPath
+		if strings.TrimSpace(p.SavePath) != "" {
+			localDir = p.SavePath
 			if rel != "" {
-				localDir = pathhelper.SafeFilePathJoin(p.LocalPath, rel)
+				localDir = pathhelper.SafeFilePathJoin(p.SavePath, rel)
 			}
 		}
 		bestLen = len(prefix)
@@ -173,9 +173,9 @@ func (s *EmbyMissingService) resolveByEmbyPrefix(embyPathLinux string, paths []m
 	return true
 }
 
-// resolveByLocalStrm 用 Emby 路径后缀在各映射 LocalPath 下定位本地剧集目录，
+// resolveByLocalStrm 用 Emby 路径后缀在各映射 SavePath 下定位本地剧集目录，
 // 读取目录内首个 .strm 文件并剥离 ContentPrefix 反推云端剧集目录。命中返回 true。
-func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []model.CloudPath, result *ResolveSeriesResult) bool {
+func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []model.MediaDirectory, result *ResolveSeriesResult) bool {
 	segs := splitPathSegments(embyPathLinux)
 	if len(segs) == 0 {
 		return false
@@ -183,19 +183,19 @@ func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []mo
 
 	// 在所有映射中选「匹配后缀最长（最具体）且本地真实存在」的剧集目录
 	var (
-		bestPath   *model.CloudPath
+		bestPath   *model.MediaDirectory
 		bestDir    string
 		bestSuffix string
 		bestLen    = -1
 	)
 	for i := range paths {
 		p := &paths[i]
-		if strings.TrimSpace(p.LocalPath) == "" {
+		if strings.TrimSpace(p.SavePath) == "" {
 			continue
 		}
 		for k := len(segs); k >= 1; k-- {
 			suffix := strings.Join(segs[len(segs)-k:], "/")
-			candidate := pathhelper.SafeFilePathJoin(p.LocalPath, suffix)
+			candidate := pathhelper.SafeFilePathJoin(p.SavePath, suffix)
 			info, statErr := os.Stat(candidate)
 			if statErr != nil || !info.IsDir() {
 				continue
@@ -221,9 +221,9 @@ func (s *EmbyMissingService) resolveByLocalStrm(embyPathLinux string, paths []mo
 }
 
 // fillResultFromLocalDir 已定位到本地剧集目录(localDir)后统一完成：写诊断信息、读取首个 .strm、
-// 剥离 ContentPrefix 反推云端目录；若无 strm/读取失败/剥离失败，则以 relSuffix(本地相对 LocalPath
+// 剥离 ContentPrefix 反推云端目录；若无 strm/读取失败/剥离失败，则以 relSuffix(本地相对 SavePath
 // 的子路径，带前导 /)作为云端目录兜底。
-func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, p *model.CloudPath, result *ResolveSeriesResult) {
+func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, p *model.MediaDirectory, result *ResolveSeriesResult) {
 	result.CloudPathID = p.ID
 
 	strmFile, strmContent := s.readLocalStrmDiagnostics(localDir, result)
@@ -241,7 +241,7 @@ func (s *EmbyMissingService) fillResultFromLocalDir(localDir, relSuffix string, 
 		}
 	}
 
-	// 无 strm / 读取失败 / 剥离失败：本地目录相对 LocalPath 的路径即云端目录（兜底）
+	// 无 strm / 读取失败 / 剥离失败：本地目录相对 SavePath 的路径即云端目录（兜底）
 	result.Matched = true
 	result.CloudDir = relSuffix
 }
@@ -270,7 +270,7 @@ func (s *EmbyMissingService) readLocalStrmDiagnostics(localDir string, result *R
 
 // deriveCloudDirFromStrm 由 strm 内容剥离 ContentPrefix 得到云端文件路径，
 // 再按 strmFile 相对 localDir 的层级数回退尾部段，得到剧集级云端目录。
-func deriveCloudDirFromStrm(localDir, strmFile, content string, p model.CloudPath) (string, bool) {
+func deriveCloudDirFromStrm(localDir, strmFile, content string, p model.MediaDirectory) (string, bool) {
 	content = strings.TrimSpace(content)
 	if content == "" {
 		return "", false
@@ -344,14 +344,14 @@ func stripContentPrefix(content, prefix string) (string, bool) {
 	return "", false
 }
 
-// resolveByLocalPathPrefix 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 LocalPath。
-func resolveByLocalPathPrefix(embyPathLinux string, paths []model.CloudPath, result *ResolveSeriesResult) {
+// resolveByLocalPathPrefix 兜底：Emby 与 FilmFusion 同挂载时，embyPath 直接前缀匹配 SavePath。
+func resolveByLocalPathPrefix(embyPathLinux string, paths []model.MediaDirectory, result *ResolveSeriesResult) {
 	if embyPathLinux == "" {
 		return
 	}
 	bestLen := -1
 	for _, p := range paths {
-		local := strings.TrimRight(pathhelper.ConvertToLinuxPath(p.LocalPath), "/")
+		local := strings.TrimRight(pathhelper.ConvertToLinuxPath(p.SavePath), "/")
 		if local == "" {
 			continue
 		}

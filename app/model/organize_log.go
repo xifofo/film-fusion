@@ -37,7 +37,7 @@ type OrganizeLog struct {
 	Trigger        string    `gorm:"size:32;index;comment:触发来源" json:"trigger"`
 	Source         string    `gorm:"size:1024;index;comment:云盘源路径" json:"source"`
 	Target         string    `gorm:"size:1024;comment:本地目标路径" json:"target"`
-	CloudPathID    uint      `gorm:"index;comment:关联 cloud_paths" json:"cloud_path_id"`
+	CloudPathID    uint      `gorm:"index;comment:关联媒体目录（映射用途）" json:"cloud_path_id"`
 	CloudStorageID uint      `gorm:"index;comment:关联 cloud_storages" json:"cloud_storage_id"`
 	PickCode       string    `gorm:"size:64;index;comment:115 PickCode" json:"pick_code"`
 	Message        string    `gorm:"size:512;comment:跳过原因或附加说明" json:"message"`

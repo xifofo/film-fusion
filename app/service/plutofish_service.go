@@ -123,7 +123,7 @@ func (s *PlutoFishService) Save(ctx context.Context, cfg PlutoFishConfig, userID
 		}
 		seen[*mapping] = true
 		var count int64
-		if err := s.db.WithContext(ctx).Model(&model.CloudPath{}).Where("id = ? AND user_id = ?", mapping.CloudPathID, userID).Count(&count).Error; err != nil {
+		if err := s.db.WithContext(ctx).Model(&model.MediaDirectory{}).Scopes(model.MappingDirectories).Where("id = ? AND user_id = ?", mapping.CloudPathID, userID).Count(&count).Error; err != nil {
 			return errors.New("无法校验云路径映射")
 		}
 		if count != 1 {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,16 +18,17 @@ func TestMoviePilotScopedCancellationIncludesFrozenPipeline(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 	defer server.Close()
 	root := NewMoviePilotService(&config.Config{MoviePilot: config.MoviePilotConfig{API: server.URL, Username: "user", Password: "test"}}, nil)
+	root.local = NewMediaRecognitionService(newMediaRecognitionTestDB(t), NewTMDBService(&config.Config{TMDB: config.TMDBConfig{Enabled: true, BaseURL: server.URL + "/3", APIKey: "test-key"}}, nil), nil)
 	root.accessToken = "test"
 	root.tokenExpiresAt = time.Now().Add(time.Hour)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	frozen, _, err := root.WithContext(ctx).FreezeMediaPipeline(MediaRecognitionSourceMoviePilot)
+	frozen, _, err := root.WithContext(ctx).FreezeMediaPipeline("moviepilot")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _, err = frozen.RecognizeFileWithSource("Example.2024.mkv", MediaRecognitionSourceMoviePilot)
-	if !errors.Is(err, context.DeadlineExceeded) {
+	_, _, err = frozen.RecognizeFileWithSource("Example.2024.mkv", "moviepilot")
+	if err == nil || !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) || frozen.requestContext().Err() == nil {
 		t.Fatalf("provider ignored cancellation: %v", err)
 	}
 	if root.requestContext().Err() != nil || root.accessToken != "test" {

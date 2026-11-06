@@ -76,13 +76,13 @@ func NewCD2NotifyService(log *logger.Logger, download115Svc *Download115Service)
 	}
 }
 
-func (s *CD2NotifyService) ProcessFileNotify(dataItems []Cd2FileNotifyRequestData, cloudPaths []model.CloudPath) {
+func (s *CD2NotifyService) ProcessFileNotify(dataItems []Cd2FileNotifyRequestData, cloudPaths []model.MediaDirectory) {
 	for _, data := range dataItems {
 		s.HandleFileNotify(data, cloudPaths)
 	}
 }
 
-func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloudPaths []model.CloudPath) {
+func (s *CD2NotifyService) HandleFileNotify(data Cd2FileNotifyRequestData, cloudPaths []model.MediaDirectory) {
 	strmSvc := NewStrmService(s.logger, s.download115Svc)
 	for _, cloudPath := range cloudPaths {
 		sourceInside := pathhelper.IsSubPath(data.SourceFile, cloudPath.SourcePath)

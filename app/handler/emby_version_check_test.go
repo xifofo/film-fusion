@@ -21,8 +21,8 @@ func TestScanEmbyVersionCloudPathsDetectsMovieAndEpisodeVersions(t *testing.T) {
 	writeTestVersionFile(t, root, "TV/Dark (2017) {tmdb-70523}/Season 01/Dark.S01E02.1080p.strm")
 	writeTestVersionFile(t, root, "Movies/The Matrix (1999) {tmdb-603}/Extras/trailer.mp4")
 
-	result := scanEmbyVersionCloudPaths([]model.CloudPath{
-		{ID: 7, SourcePath: "/media", LocalPath: root},
+	result := scanEmbyVersionCloudPaths([]model.MediaDirectory{
+		{MappingEnabled: true, ID: 7, SourcePath: "/media", SavePath: root},
 	}, "all")
 
 	if result.TotalFiles != 5 {
@@ -61,7 +61,7 @@ func TestEmbyVersionCheckJobRunsInBackgroundAndKeepsResult(t *testing.T) {
 	job, started := handler.startJob(42, EmbyVersionCheckRequest{
 		CloudPathIDs: []uint{7},
 		MediaType:    "movie",
-	}, "movie", []model.CloudPath{{ID: 7, SourcePath: "/movies", LocalPath: root}})
+	}, "movie", []model.MediaDirectory{{MappingEnabled: true, ID: 7, SourcePath: "/movies", SavePath: root}})
 	if !started || job == nil || !job.Running {
 		t.Fatalf("background job did not start: started=%v job=%+v", started, job)
 	}
@@ -94,7 +94,7 @@ func TestEmbyVersionCheckScheduleRunsSavedUserScope(t *testing.T) {
 	if err := db.AutoMigrate(
 		&model.User{},
 		&model.CloudStorage{},
-		&model.CloudPath{},
+		&model.MediaDirectory{},
 		&model.EmbyVersionCheckSetting{},
 	); err != nil {
 		t.Fatalf("migrate test database: %v", err)
@@ -103,7 +103,7 @@ func TestEmbyVersionCheckScheduleRunsSavedUserScope(t *testing.T) {
 	root := t.TempDir()
 	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.2160p.strm")
 	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.1080p.strm")
-	path := model.CloudPath{UserID: 42, SourcePath: "/movies", LocalPath: root, LinkType: model.LinkTypeStrm}
+	path := model.MediaDirectory{MappingEnabled: true, UserID: 42, SourcePath: "/movies", SavePath: root, LinkType: model.LinkTypeStrm}
 	if err := db.Create(&path).Error; err != nil {
 		t.Fatalf("create cloud path: %v", err)
 	}
@@ -185,8 +185,8 @@ func TestScanEmbyVersionCloudPathsParsesChineseSeasonEpisode(t *testing.T) {
 	writeTestVersionFile(t, root, "剧集/漫长的季节/第1季/第01集.1080p.strm")
 	writeTestVersionFile(t, root, "剧集/漫长的季节/第1季/第02集.1080p.strm")
 
-	result := scanEmbyVersionCloudPaths([]model.CloudPath{
-		{ID: 9, SourcePath: "/tv", LocalPath: root},
+	result := scanEmbyVersionCloudPaths([]model.MediaDirectory{
+		{MappingEnabled: true, ID: 9, SourcePath: "/tv", SavePath: root},
 	}, "tv")
 
 	if result.DuplicateEpisodeCount != 1 {

@@ -33,7 +33,7 @@ type MediaUpgradeRuleGroupInput struct {
 
 // upgradeRuleGroupReferences 仅读取配置中的引用标识，坏的独立规则不会影响其他规则组的管理。
 func upgradeRuleGroupReferences(db *gorm.DB, userID uint) (map[uint]int, error) {
-	var directories []model.CloudDirectory
+	var directories []model.MediaDirectory
 	if err := db.Select("upgrade_policy").Where("user_id = ? AND upgrade_policy <> ?", userID, "").Find(&directories).Error; err != nil {
 		return nil, err
 	}

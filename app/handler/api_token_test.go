@@ -61,6 +61,7 @@ func newAPITokenFixture(t *testing.T) *apiTokenFixture {
 	api.GET("/api-tokens", h.List)
 	api.GET("/api-tokens/scopes", h.Scopes)
 	api.POST("/api-tokens", h.Create)
+	api.PATCH("/api-tokens/:id", h.Update)
 	api.POST("/api-tokens/:id/revoke", h.Revoke)
 	ok := func(c *gin.Context) {
 		c.JSON(200, gin.H{"user_id": c.GetUint("user_id"), "username": c.GetString("username")})

@@ -23,7 +23,7 @@ import (
 type CloudFolderMoveStrmResult struct {
 	Status      string `json:"status"`
 	CloudPathID uint   `json:"cloud_path_id,omitempty"`
-	LocalPath   string `json:"local_path,omitempty"`
+	SavePath    string `json:"local_path,omitempty"`
 	Message     string `json:"message"`
 }
 
@@ -38,8 +38,8 @@ func (s *CloudFolderMoveService) createMovedFileSTRM(ctx context.Context, provid
 	if !cloudSTRMFileComponent(moved.FileName) {
 		return fail("文件已移动，但文件名无法安全用于本地 STRM 路径")
 	}
-	var mappings []model.CloudPath
-	if s.db == nil || s.db.WithContext(ctx).Where("user_id = ? AND cloud_storage_id = ? AND link_type = ?", userID, storageID, model.LinkTypeStrm).Find(&mappings).Error != nil {
+	var mappings []model.MediaDirectory
+	if s.db == nil || s.db.WithContext(ctx).Scopes(model.MappingDirectories).Where("user_id = ? AND cloud_storage_id = ? AND link_type = ?", userID, storageID, model.LinkTypeStrm).Find(&mappings).Error != nil {
 		return fail("文件已移动，但读取云路径映射失败，可重试生成 STRM")
 	}
 	if len(mappings) == 0 {
@@ -80,7 +80,7 @@ func (s *CloudFolderMoveService) createMovedFileSTRM(ctx context.Context, provid
 		result.Status, result.Message = "skipped", "文件被映射过滤规则排除或属于下载类扩展名，未生成 STRM"
 		return result
 	}
-	root := strings.TrimSpace(mapping.LocalPath)
+	root := strings.TrimSpace(mapping.SavePath)
 	if root == "" || !filepath.IsAbs(root) {
 		return fail("云路径映射未配置有效的本地绝对路径")
 	}
@@ -89,7 +89,7 @@ func (s *CloudFolderMoveService) createMovedFileSTRM(ctx context.Context, provid
 		return fail("目标文件无法安全映射到本地 STRM 路径")
 	}
 	localPath = strings.TrimSuffix(localPath, filepath.Ext(localPath)) + ".strm"
-	result.LocalPath = localPath
+	result.SavePath = localPath
 	relative, err := filepath.Rel(filepath.Clean(root), localPath)
 	if err != nil || !filepath.IsLocal(relative) {
 		return fail("目标文件无法安全映射到本地 STRM 路径")
@@ -139,8 +139,8 @@ func cloudSTRMFileComponent(name string) bool {
 // The mapping is selected in the real 115 path space. CD2's first source
 // component is only a mount alias; restore it for the existing local/content
 // path convention used by organize.upgradeBindings and StrmService.
-func cloudMovedSTRMMapping(mappings []model.CloudPath, cloudPath string) (*model.CloudPath, string, error) {
-	var selected *model.CloudPath
+func cloudMovedSTRMMapping(mappings []model.MediaDirectory, cloudPath string) (*model.MediaDirectory, string, error) {
+	var selected *model.MediaDirectory
 	selectedEvent, bestLength, ambiguous := "", -1, false
 	for i := range mappings {
 		mapping := &mappings[i]

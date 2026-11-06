@@ -310,11 +310,11 @@ func TestRescanSeriesKeepsSnapshotWhenEmbyFails(t *testing.T) {
 func TestResolveByEmbyPrefixDerivesCloudDirWithoutLocalMount(t *testing.T) {
 	svc := &EmbyMissingService{}
 	result := &ResolveSeriesResult{}
-	paths := []model.CloudPath{
-		{
+	paths := []model.MediaDirectory{
+		{MappingEnabled: true,
 			ID:             7,
 			EmbyPathPrefix: "/MediaSTRM_115LongTerm",
-			LocalPath:      "/path/that/does/not/exist",
+			SavePath:       "/path/that/does/not/exist",
 		},
 	}
 

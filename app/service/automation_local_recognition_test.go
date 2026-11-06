@@ -30,10 +30,10 @@ func (r *recordingAutomationLocalRecognizer) Recognize(
 	return MediaRecognitionResult{}, nil
 }
 
-func TestAutomationFilmFusionTitleRecognitionUsesLocalEngineAndSavedWords(t *testing.T) {
+func TestAutomationFilmFusionTitleRecognitionUsesMedianameAndSavedWords(t *testing.T) {
 	recognizer := &recordingAutomationLocalRecognizer{fn: func(input string, options MediaRecognitionOptions) (MediaRecognitionResult, error) {
 		return MediaRecognitionResult{
-			Engine: "local", Mode: options.Mode, TMDBStatus: "matched",
+			Engine: "medianame", Mode: options.Mode, TMDBStatus: "compatible",
 			WordResult: MediaRecognitionWordResult{Original: input, Processed: "示例剧.S01E01.2160p", AppliedWords: []string{"广告 => "}},
 			MetaInfo: MediaRecognitionMetaInfo{
 				OriginalInput: input, ProcessedInput: "示例剧.S01E01.2160p", Name: "示例剧",
@@ -44,7 +44,7 @@ func TestAutomationFilmFusionTitleRecognitionUsesLocalEngineAndSavedWords(t *tes
 				Source: "tmdb", MediaType: "tv", Title: "示例剧", Year: "2026", TMDBID: "1396",
 				Category: "国产剧", PosterPath: "/poster.jpg", Rating: 8.6,
 			},
-			Candidates: []MediaRecognitionCandidate{}, Raw: map[string]any{"engine": "local"},
+			Candidates: []MediaRecognitionCandidate{}, Raw: map[string]any{"engine": "medianame"},
 		}, nil
 	}}
 	automation := &AutomationService{localMedia: recognizer}
@@ -59,13 +59,13 @@ func TestAutomationFilmFusionTitleRecognitionUsesLocalEngineAndSavedWords(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recognizer.calls) != 1 || !strings.Contains(recognizer.calls[0].input, "{tmdb-1396}") {
+	if len(recognizer.calls) != 1 || !strings.Contains(recognizer.calls[0].input, "[tmdb=1396]") {
 		t.Fatalf("local recognition calls = %#v", recognizer.calls)
 	}
 	if recognizer.calls[0].options.Mode != MediaRecognitionModeTitle || !recognizer.calls[0].options.LookupTMDB || recognizer.calls[0].options.UseProvidedWords {
 		t.Fatalf("local recognition options = %#v", recognizer.calls[0].options)
 	}
-	if output["selected_port"] != "success" || output["engine"] != "local" || output["title"] != "示例剧" {
+	if output["selected_port"] != "success" || output["engine"] != "medianame" || output["title"] != "示例剧" {
 		t.Fatalf("unexpected local title output: %#v", output)
 	}
 	if output["processed_input"] != "示例剧.S01E01.2160p" || output["tmdb_id"] != "1396" || output["quality"] != "2160p" {
@@ -84,14 +84,14 @@ func TestAutomationFilmFusionFileRecognitionScansWait115Output(t *testing.T) {
 	}
 	recognizer := &recordingAutomationLocalRecognizer{fn: func(input string, options MediaRecognitionOptions) (MediaRecognitionResult, error) {
 		return MediaRecognitionResult{
-			Engine: "local", Mode: options.Mode, TMDBStatus: "skipped",
+			Engine: "medianame", Mode: options.Mode, TMDBStatus: "not_identified",
 			WordResult: MediaRecognitionWordResult{Original: input, Processed: input, AppliedWords: []string{}},
 			MetaInfo: MediaRecognitionMetaInfo{
 				OriginalInput: input, ProcessedInput: input, FileName: "S01E01.mkv", Name: "示例剧",
 				MediaType: "tv", TMDBID: "12345", SeasonEpisode: "S01E01", AppliedWords: []string{},
 			},
-			MediaInfo:  MediaRecognitionMediaInfo{Source: "local", MediaType: "tv", Title: "示例剧", TMDBID: "12345"},
-			Candidates: []MediaRecognitionCandidate{}, Raw: map[string]any{"engine": "local"},
+			MediaInfo:  MediaRecognitionMediaInfo{Source: "medianame", MediaType: "tv", Title: "示例剧", TMDBID: "12345"},
+			Candidates: []MediaRecognitionCandidate{}, Raw: map[string]any{"engine": "medianame"},
 		}, nil
 	}}
 	automation := &AutomationService{
@@ -119,13 +119,13 @@ func TestAutomationFilmFusionFileRecognitionScansWait115Output(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recognizer.calls) != 1 || recognizer.calls[0].input != "示例剧/Season 01/S01E01.{tmdb-12345}.mkv" {
+	if len(recognizer.calls) != 1 || recognizer.calls[0].input != "示例剧/Season 01/S01E01 [tmdb=12345].mkv" {
 		t.Fatalf("local file recognition calls = %#v", recognizer.calls)
 	}
 	if recognizer.calls[0].options.Mode != MediaRecognitionModeFile || recognizer.calls[0].options.LookupTMDB {
 		t.Fatalf("local file options = %#v", recognizer.calls[0].options)
 	}
-	if output["selected_port"] != "success" || output["engine"] != "local" || output["recognized_count"] != 1 || output["failed_count"] != 0 {
+	if output["selected_port"] != "success" || output["engine"] != "medianame" || output["recognized_count"] != 1 || output["failed_count"] != 0 {
 		t.Fatalf("unexpected local file output: %#v", output)
 	}
 	if output["directory_id"] != "download-dir" || output["tasks"] == nil || output["total_files"] != 1 || output["partial"] != false {

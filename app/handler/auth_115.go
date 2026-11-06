@@ -182,6 +182,12 @@ func (h *Auth115Handler) GetQrCode(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "请求参数错误")
 		return
 	}
+	req.ClientID = strings.TrimSpace(req.ClientID)
+	req.Name = strings.TrimSpace(req.Name)
+	if !database.Valid115ClientID(req.ClientID) || req.Name == "" {
+		h.error(c, http.StatusBadRequest, 400, "请填写有效的应用 ID 和存储名称")
+		return
+	}
 
 	// 获取当前用户ID
 	userID, exists := c.Get("user_id")

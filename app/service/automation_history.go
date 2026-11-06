@@ -189,8 +189,8 @@ func automationHistoryActionTypes() []string {
 		AutomationNodeOffline115, AutomationNodeOffline115OpenAPI,
 		AutomationNodeTorrentToMagnet, AutomationNodeTorrent115OpenAPI, AutomationNodeOffline115BTOpenAPI, AutomationNodeList115TasksOpenAPI,
 		AutomationNodeQuota115OpenAPI, AutomationNodeDelete115TaskOpenAPI, AutomationNodeClear115TasksOpenAPI,
-		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMoviePilotTitle, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
-		AutomationNodeMoviePilotRecognize, AutomationNodeOrganizeStrm,
+		AutomationNodeWait115, AutomationNodeRename115OpenAPI, AutomationNodeMediaTitleRecognize, AutomationNodeFilmFusionRecognize, AutomationNodeMoviePilotTransfer, AutomationNodeMediaExists,
+		AutomationNodeMediaFileRecognize, AutomationNodeOrganizeStrm,
 		AutomationNodeStrmVerify, AutomationNodeStrmRegenerate, AutomationNodeEmbyRefreshWait,
 		AutomationNodeHTTPRequest, AutomationNodeNotification,
 	}
@@ -208,7 +208,7 @@ func applyAutomationNodeHistory(item *AutomationEntryHistoryItem, nodeRuns []mod
 		if _, action := actionTypes[nodeRun.NodeType]; action && (nodeRun.Status == model.AutomationNodeSucceeded || nodeRun.Status == model.AutomationNodeFailed) {
 			item.Matched = true
 		}
-		if nodeRun.NodeType == AutomationNodeMoviePilotTitle || nodeRun.NodeType == AutomationNodeMoviePilotRecognize || nodeRun.NodeType == AutomationNodeFilmFusionRecognize {
+		if nodeRun.NodeType == AutomationNodeMediaTitleRecognize || nodeRun.NodeType == AutomationNodeMediaFileRecognize || nodeRun.NodeType == AutomationNodeFilmFusionRecognize {
 			applyAutomationRecognitionOutput(item, nodeRun)
 		}
 		if nodeRun.NodeType == AutomationNodeNotification {

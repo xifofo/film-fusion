@@ -149,10 +149,10 @@ func (s *PlutoFishStore) processOne(ctx context.Context, handle func(context.Con
 		return true, err
 	}
 	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.PlutoFishReceipt{Scope: s.scope, TransferID: row.TransferID, EventID: row.EventID, OutputPath: result.LocalPath}).Error; err != nil {
+		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.PlutoFishReceipt{Scope: s.scope, TransferID: row.TransferID, EventID: row.EventID, OutputPath: result.SavePath}).Error; err != nil {
 			return err
 		}
-		if err := tx.Model(&row).Updates(map[string]any{"state": "completed", "reason": result.Message, "output_path": result.LocalPath}).Error; err != nil {
+		if err := tx.Model(&row).Updates(map[string]any{"state": "completed", "reason": result.Message, "output_path": result.SavePath}).Error; err != nil {
 			return err
 		}
 		return tx.Model(&model.PlutoFishEvent{}).Where("scope = ? AND transfer_id = ? AND id <> ? AND type = ? AND schema_version = 1 AND status = ? AND state IN ?", s.scope, row.TransferID, row.ID, "transfer.succeeded", "succeeded", []string{"pending", "review"}).Updates(map[string]any{"state": "duplicate", "reason": "该转存任务的本地业务已经完成"}).Error

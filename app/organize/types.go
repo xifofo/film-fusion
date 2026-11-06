@@ -313,11 +313,10 @@ type buildPreviewChildTaskArgs struct {
 type processOrganizeArgs struct {
 	medianameOverrides     map[string]Organize115ItemResult
 	recognitionMode        string
-	dir                    model.CloudDirectory
+	dir                    model.MediaDirectory
 	storage                *model.CloudStorage
 	webClient              *driver.Pan115Client
 	categoryCfg            service.MoviePilotCategoryConfig
-	categoryError          string
 	includeExts            []string
 	excludeExts            []string
 	folderID               string
@@ -336,23 +335,6 @@ type filenameRegexProcessor struct {
 	enabled     bool
 	regex       *regexp.Regexp
 	replacement string
-}
-
-type organize115ShadowTargetInput struct {
-	DirectoryName       string
-	ClassifyByCategory  bool
-	CategoryOverride    string
-	CategoryConfig      service.MoviePilotCategoryConfig
-	RecognizeName       string
-	OriginalName        string
-	PrimaryTargetPath   string
-	PrimaryInfo         service.MoviePilotMediaInfo
-	PrimaryMediaType    string
-	PrimaryCategory     string
-	PrimaryTransferName string
-	LegacyOriginalName  string
-	RecognitionRaw      map[string]any
-	TransferRaw         map[string]any
 }
 
 type organizeAnnotateOptions struct {

@@ -24,7 +24,7 @@ func openPlutoFishTestDB(t *testing.T, path string) *gorm.DB {
 	pool, _ := db.DB()
 	pool.SetMaxOpenConns(1)
 	t.Cleanup(func() { pool.Close() })
-	if err := db.AutoMigrate(&model.PlutoFishEvent{}, &model.PlutoFishCursor{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.PlutoFishSTRMRepair{}, &model.SystemConfig{}, &model.CloudStorage{}, &model.CloudPath{}); err != nil {
+	if err := db.AutoMigrate(&model.PlutoFishEvent{}, &model.PlutoFishCursor{}, &model.PlutoFishReceipt{}, &model.PlutoFishBusinessPlan{}, &model.PlutoFishSTRMRepair{}, &model.SystemConfig{}, &model.CloudStorage{}, &model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	return db
@@ -60,7 +60,7 @@ func TestPlutoFishInboxRestartDedupeAndFailureThenSuccess(t *testing.T) {
 	calls := 0
 	handle := func(context.Context, string, plutofish.Event) (PlutoFishBusinessResult, error) {
 		calls++
-		return PlutoFishBusinessResult{LocalPath: "/test/file.strm", Message: "完成"}, nil
+		return PlutoFishBusinessResult{SavePath: "/test/file.strm", Message: "完成"}, nil
 	}
 	if ok, err := store.processOne(ctx, handle); !ok || err != nil {
 		t.Fatal(ok, err)
@@ -143,7 +143,7 @@ func TestPlutoFishReviewAndSideEffectRecovery(t *testing.T) {
 	calls := 0
 	handle := func(context.Context, string, plutofish.Event) (PlutoFishBusinessResult, error) {
 		calls++
-		return PlutoFishBusinessResult{LocalPath: "same-idempotent-path"}, nil
+		return PlutoFishBusinessResult{SavePath: "same-idempotent-path"}, nil
 	}
 	if _, err := store.processOne(ctx, handle); err == nil {
 		t.Fatal("expected receipt failure")

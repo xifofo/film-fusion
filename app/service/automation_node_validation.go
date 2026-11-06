@@ -291,12 +291,12 @@ func validateAutomationNodeConfig(node AutomationNode) error {
 				return err
 			}
 		}
-	case AutomationNodeMoviePilotTitle:
+	case AutomationNodeMediaTitleRecognize:
 		if automationConfigString(config, "input") == "" {
 			return errors.New("必须配置待识别标题")
 		}
 		fallthrough
-	case AutomationNodeMoviePilotRecognize:
+	case AutomationNodeMediaFileRecognize:
 		if source := automationConfigString(config, "recognition_source"); source != "" {
 			if _, err := NormalizeMediaRecognitionSource(source); err != nil {
 				return err

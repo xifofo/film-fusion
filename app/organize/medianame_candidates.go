@@ -55,8 +55,8 @@ func (h *Service) loadMedianameCandidatePlan(userID uint, id string) (Organize11
 	if json.Unmarshal([]byte(row.RequestJSON), &req) != nil || json.Unmarshal([]byte(row.ResultJSON), &result) != nil || !result.DryRun || result.Pipeline == nil || result.Pipeline.Schema != 1 {
 		return req, result, errors.New("候选计划缺少有效快照，请重新预览")
 	}
-	var dir model.CloudDirectory
-	if err := h.store().Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).First(&dir).Error; err != nil || organizeDirectoryConditions(dir) != row.DirectoryJSON {
+	var dir model.MediaDirectory
+	if err := h.store().Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil || organizeDirectoryConditions(dir) != row.DirectoryJSON {
 		return req, result, errors.New("媒体库目录或整理条件已变化，请重新预览")
 	}
 	return req, result, nil

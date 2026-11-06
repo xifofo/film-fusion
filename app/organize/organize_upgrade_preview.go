@@ -128,7 +128,7 @@ func (h *Service) upgradeList(client *driver.Pan115Client, id string) ([]service
 	return files, nil
 }
 
-func upgradeBindings(dir model.CloudDirectory, mappings []model.CloudPath, cloudPath string) []OrganizeUpgradeBinding {
+func upgradeBindings(dir model.MediaDirectory, mappings []model.MediaDirectory, cloudPath string) []OrganizeUpgradeBinding {
 	bindings := []OrganizeUpgradeBinding{}
 	seen := map[string]bool{}
 	add := func(root, prefix, eventPath string, encode bool) {
@@ -161,7 +161,7 @@ func upgradeBindings(dir model.CloudDirectory, mappings []model.CloudPath, cloud
 			eventPath = path.Join("/", mount, cloudPath)
 		}
 		if pathhelper.IsSubPath(eventPath, mapping.SourcePath) {
-			add(mapping.LocalPath, mapping.ContentPrefix, eventPath, mapping.ContentEncodeURI)
+			add(mapping.SavePath, mapping.ContentPrefix, eventPath, mapping.ContentEncodeURI)
 		}
 	}
 	return bindings
@@ -190,7 +190,7 @@ func upgradeAssociatedArtifact(videoStem, name string) bool {
 	return strings.EqualFold(stem, videoStem)
 }
 
-func planUpgradeLocalChanges(dir model.CloudDirectory, mappings []model.CloudPath, item Organize115ItemResult, group []Organize115ItemResult) error {
+func planUpgradeLocalChanges(dir model.MediaDirectory, mappings []model.MediaDirectory, item Organize115ItemResult, group []Organize115ItemResult) error {
 	decision := item.Upgrade
 	changes := map[string]service.UpgradeFileChange{}
 	oldPaths := map[string]string{}
@@ -266,7 +266,7 @@ func planUpgradeLocalChanges(dir model.CloudDirectory, mappings []model.CloudPat
 	return nil
 }
 
-func (h *Service) prepareUpgradePreview(dir model.CloudDirectory, result *Organize115CookieResult) error {
+func (h *Service) prepareUpgradePreview(dir model.MediaDirectory, result *Organize115CookieResult) error {
 	policy, err := service.ResolveMediaUpgradePolicy(h.store().WithContext(h.requestContext()), dir.UserID, dir.UpgradePolicy)
 	if err != nil || !policy.Enabled {
 		return err
@@ -286,8 +286,8 @@ func (h *Service) prepareUpgradePreview(dir model.CloudDirectory, result *Organi
 	if err != nil {
 		return err
 	}
-	var mappings []model.CloudPath
-	if err := h.store().WithContext(h.requestContext()).Where("user_id = ? AND cloud_storage_id = ?", dir.UserID, dir.CloudStorageID).Find(&mappings).Error; err != nil {
+	var mappings []model.MediaDirectory
+	if err := h.store().WithContext(h.requestContext()).Where("user_id = ? AND cloud_storage_id = ?", dir.UserID, dir.CloudStorageID).Scopes(model.MappingDirectories).Find(&mappings).Error; err != nil {
 		return err
 	}
 	type directoryFiles struct {

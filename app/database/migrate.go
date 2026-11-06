@@ -1,12 +1,17 @@
 package database
 
 import (
+	"film-fusion/app/database/migrations"
 	"film-fusion/app/directorymonitor"
 	"film-fusion/app/model"
 	"fmt"
 )
 
 func AutoMigrate() error {
+	if err := migrations.MergeMediaDirectories(DB); err != nil {
+		return fmt.Errorf("迁移媒体目录失败: %w", err)
+	}
+
 	if err := preserveLegacyAutomationTargets(); err != nil {
 		return fmt.Errorf("迁移下载器配置失败: %v", err)
 	}
@@ -44,11 +49,12 @@ func AutoMigrate() error {
 		&model.PlutoFishBusinessPlan{},
 		&model.PlutoFishSTRMRepair{},
 		&model.SystemConfig{},
+		&model.Dictionary{},
+		&model.DictionaryItem{},
 		&model.User{},
 		&model.APIToken{},
 		&model.CloudStorage{},
-		&model.CloudPath{},
-		&model.CloudDirectory{},
+		&model.MediaDirectory{},
 		&model.MediaUpgradeRuleGroup{},
 		&model.OrganizeSourceFolderDeletionTask{},
 		&model.Download115Queue{},

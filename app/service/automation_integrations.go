@@ -72,8 +72,8 @@ func (s *AutomationService) executeAutomationMediaExists(ctx context.Context, no
 		return nil, errors.New("媒体查重服务未初始化")
 	}
 	directoryID := automationConfigUint(node.Config, "cloud_directory_id")
-	var directory model.CloudDirectory
-	if err := s.db.First(&directory, directoryID).Error; err != nil {
+	var directory model.MediaDirectory
+	if err := s.db.Scopes(model.OrganizingDirectories).First(&directory, directoryID).Error; err != nil {
 		return nil, fmt.Errorf("目录配置不存在: %w", err)
 	}
 	resolve := func(key string) (string, error) {
@@ -136,8 +136,8 @@ func (s *AutomationService) executeAutomationStrmVerify(ctx context.Context, nod
 		return nil, err
 	}
 	directoryID := automationConfigUint(node.Config, "cloud_directory_id")
-	var directory model.CloudDirectory
-	if err := s.db.First(&directory, directoryID).Error; err != nil {
+	var directory model.MediaDirectory
+	if err := s.db.Scopes(model.OrganizingDirectories).First(&directory, directoryID).Error; err != nil {
 		return nil, fmt.Errorf("目录配置不存在: %w", err)
 	}
 	root := strings.TrimSpace(directory.SavePath)
@@ -195,8 +195,8 @@ func (s *AutomationService) executeAutomationStrmRegenerate(ctx context.Context,
 		return nil, fmt.Errorf("读取上游整理结果失败: %w", err)
 	}
 	directoryID := automationConfigUint(node.Config, "cloud_directory_id")
-	var directory model.CloudDirectory
-	if err := s.db.First(&directory, directoryID).Error; err != nil {
+	var directory model.MediaDirectory
+	if err := s.db.Scopes(model.OrganizingDirectories).First(&directory, directoryID).Error; err != nil {
 		return nil, fmt.Errorf("目录配置不存在: %w", err)
 	}
 	root := strings.TrimSpace(directory.SavePath)

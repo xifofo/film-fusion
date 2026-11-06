@@ -44,11 +44,8 @@ const (
 	NotificationEventAppSecurity         = "security.filmfusion_brute_force"
 	NotificationEventAutomationTriggered = "automation.triggered"
 	NotificationEventWeb115Invalid       = "storage.115_cookie_invalid"
-	MediaRecognitionSourceMoviePilot     = "moviepilot"
-	MediaRecognitionSourceLocal          = "local"
 	MediaRecognitionSourceMedianame      = "medianame"
-	MediaRecognitionSourceShadow         = "shadow"
-	DefaultMediaRecognitionSource        = MediaRecognitionSourceShadow
+	DefaultMediaRecognitionSource        = MediaRecognitionSourceMedianame
 )
 
 // MediaRecognitionConfig 保存系统级默认识别方式。它只持久化到
@@ -58,15 +55,15 @@ type MediaRecognitionConfig struct {
 }
 
 // NormalizeMediaRecognitionSource 将兼容别名转换成稳定的 API 值。
-// 空值用于首次初始化，因此采用产品默认的影子模式。
+// 历史引擎配置统一兼容为 medianame，不再提供引擎切换。
 func NormalizeMediaRecognitionSource(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "", "shadow", "shadow-mode", "shadow_mode", "影子", "影子模式":
-		return MediaRecognitionSourceShadow, nil
+		return MediaRecognitionSourceMedianame, nil
 	case "moviepilot", "movie-pilot", "mp", "mp2":
-		return MediaRecognitionSourceMoviePilot, nil
+		return MediaRecognitionSourceMedianame, nil
 	case "local", "filmfusion", "film-fusion":
-		return MediaRecognitionSourceLocal, nil
+		return MediaRecognitionSourceMedianame, nil
 	case "medianame":
 		return MediaRecognitionSourceMedianame, nil
 	default:

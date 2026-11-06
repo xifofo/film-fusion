@@ -32,7 +32,7 @@ const (
 
 var (
 	automationTMDBIDPattern     = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
-	automationTMDBMarkerPattern = regexp.MustCompile(`[\s._-]*` + localTMDBMarkerPattern)
+	automationTMDBMarkerPattern = regexp.MustCompile(`[\s._-]*` + `(?i:(?:\[\s*tmdb(?:id)?\s*[-_=]\s*([1-9][0-9]{0,19})\s*\]|\{\s*tmdb(?:id)?\s*[-_=]\s*([1-9][0-9]{0,19})\s*\}))`)
 	automationMediaExtensions   = map[string]struct{}{
 		".3gp": {}, ".asf": {}, ".avi": {}, ".divx": {}, ".flv": {},
 		".iso": {}, ".m2ts": {}, ".m4v": {}, ".mkv": {}, ".mov": {},
@@ -458,9 +458,9 @@ func (s *AutomationService) executeAutomationWait115(ctx context.Context, nodeRu
 	}
 }
 
-func (s *AutomationService) executeAutomationMoviePilotRecognize(ctx context.Context, node AutomationNode, definition AutomationDefinition, runContext map[string]any) (map[string]any, error) {
+func (s *AutomationService) executeAutomationMediaFileRecognize(ctx context.Context, node AutomationNode, definition AutomationDefinition, runContext map[string]any) (map[string]any, error) {
 	if s.moviePilot == nil {
-		return nil, errors.New("MoviePilot 媒体识别服务未初始化")
+		return nil, errors.New("FilmFusion 媒体识别服务未初始化")
 	}
 	_, sourceOutput, err := automationPredecessorOutput(node.ID, definition, runContext)
 	if err != nil {
@@ -553,9 +553,9 @@ func (s *AutomationService) executeAutomationMoviePilotRecognize(ctx context.Con
 			technicalErrors = append(technicalErrors, fmt.Errorf("%s: %w", file.Path, recognizeErr))
 		}
 		if strings.TrimSpace(info.TmdbID) == "" {
-			reason := "MoviePilot 未识别到 TMDB ID"
+			reason := "FilmFusion 未识别到 TMDB ID"
 			if tmdbID != "" && responded {
-				reason = "MoviePilot 没有识别为指定的 TMDB ID " + tmdbID
+				reason = "FilmFusion 没有识别为指定的 TMDB ID " + tmdbID
 			}
 			if recognizeErr != nil {
 				reason = recognizeErr.Error()
@@ -583,7 +583,7 @@ func (s *AutomationService) executeAutomationMoviePilotRecognize(ctx context.Con
 	}
 	if len(technicalErrors) > 0 {
 		output["partial"] = len(items) > 0
-		return output, fmt.Errorf("MoviePilot 媒体识别请求失败: %w", errors.Join(technicalErrors...))
+		return output, fmt.Errorf("FilmFusion 媒体识别请求失败: %w", errors.Join(technicalErrors...))
 	}
 	if len(failed) > 0 {
 		output["partial"] = len(items) > 0

@@ -18,7 +18,7 @@ func upgradeGroupDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.MediaUpgradeRuleGroup{}, &model.CloudDirectory{}); err != nil {
+	if err := db.AutoMigrate(&model.MediaUpgradeRuleGroup{}, &model.MediaDirectory{}); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sql, _ := db.DB(); _ = sql.Close() })
@@ -46,7 +46,7 @@ func TestUpgradeRuleGroupsOwnershipReuseAndRevision(t *testing.T) {
 			if err := LockMediaUpgradeRuleGroupReference(tx, 1, ref); err != nil {
 				return err
 			}
-			return tx.Create(&model.CloudDirectory{UserID: 1, CloudStorageID: 1, DirectoryName: name, DirectoryID: name, UpgradePolicy: ref}).Error
+			return tx.Create(&model.MediaDirectory{OrganizeEnabled: true, UserID: 1, CloudStorageID: 1, DirectoryName: name, DirectoryID: name, UpgradePolicy: ref}).Error
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -93,7 +93,7 @@ func TestUpgradeRuleGroupsOwnershipReuseAndRevision(t *testing.T) {
 	if err := DeleteMediaUpgradeRuleGroup(db, 2, group.ID, 2); !errors.Is(err, ErrUpgradeRuleGroupNotFound) {
 		t.Fatalf("cross-user delete: %v", err)
 	}
-	if err := db.Where("user_id = ?", 1).Delete(&model.CloudDirectory{}).Error; err != nil {
+	if err := db.Where("user_id = ?", 1).Delete(&model.MediaDirectory{}).Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := DeleteMediaUpgradeRuleGroup(db, 1, group.ID, 1); !errors.Is(err, ErrUpgradeRuleGroupConflict) {

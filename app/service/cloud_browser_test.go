@@ -34,20 +34,20 @@ func (f cloudBrowserRoundTripFunc) RoundTrip(req *http.Request) (*http.Response,
 	return f(req)
 }
 
-func newCloudBrowserTestService(t *testing.T) (*CloudBrowserService, model.CloudDirectory) {
+func newCloudBrowserTestService(t *testing.T) (*CloudBrowserService, model.MediaDirectory) {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "browser.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AutoMigrate(&model.CloudStorage{}, &model.CloudDirectory{}, &model.OrganizeManagedStrm{}, &model.OrganizeStorageLock{}); err != nil {
+	if err := db.AutoMigrate(&model.CloudStorage{}, &model.MediaDirectory{}, &model.OrganizeManagedStrm{}, &model.OrganizeStorageLock{}); err != nil {
 		t.Fatal(err)
 	}
 	storage := model.CloudStorage{ID: 1, UserID: 7, StorageType: model.StorageType115Open, StorageName: "test", Status: model.StatusActive, AccessToken: "offline-token", Cookie: "UID=7_A1; CID=offline; SEID=offline"}
 	if err := db.Create(&storage).Error; err != nil {
 		t.Fatal(err)
 	}
-	directory := model.CloudDirectory{ID: 10, UserID: 7, CloudStorageID: 1, DirectoryID: "10", DirectoryName: "影片", SavePath: t.TempDir(), ContentPrefix: "https://media.example/play", IncludeExtensions: `["mkv","mp4"]`}
+	directory := model.MediaDirectory{OrganizeEnabled: true, ID: 10, UserID: 7, CloudStorageID: 1, DirectoryID: "10", DirectoryName: "影片", SavePath: t.TempDir(), ContentPrefix: "https://media.example/play", IncludeExtensions: `["mkv","mp4"]`}
 	if err := db.Create(&directory).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestCloudBrowserActiveJobCapAndStop(t *testing.T) {
 			return nil, ctx.Err()
 		}), nil
 	}
-	configs := []model.CloudDirectory{first}
+	configs := []model.MediaDirectory{first}
 	for i := uint(2); i <= 3; i++ {
 		storage := model.CloudStorage{ID: i, UserID: 7, StorageType: model.StorageType115Open, Status: model.StatusActive, Cookie: "UID=7_A1; CID=offline; SEID=offline"}
 		if err := svc.db.Create(&storage).Error; err != nil {
@@ -342,7 +342,7 @@ func TestCloudBrowserActiveJobCapAndStop(t *testing.T) {
 		}
 		configs = append(configs, config)
 	}
-	start := func(config model.CloudDirectory) (*CloudBrowserOperationResult, error) {
+	start := func(config model.MediaDirectory) (*CloudBrowserOperationResult, error) {
 		token, err := svc.signSelection(cloudBrowserSelection{UserID: 7, EntryDirectoryID: config.ID, StorageID: config.CloudStorageID, Method: "cookie", Expires: time.Now().Add(time.Minute).Unix(), Ancestors: cloudBrowserTestPath("10"), Item: CloudBrowserEntry{FileID: "10", ParentID: "0", Name: "真实目录", Complete: true}})
 		if err != nil {
 			t.Fatal(err)

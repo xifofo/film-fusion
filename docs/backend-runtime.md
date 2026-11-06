@@ -16,8 +16,8 @@
 
 | 模块 | 入口与职责位置 |
 | --- | --- |
-| 整理 | `app/organize/organize.go` 串联整理流程；`recognition.go` 处理识别输入，`shadow.go` 处理影子对比，`paths.go` 生成路径，`library.go` 查询媒体库，`subtitles.go` 匹配和下载字幕，`files.go` 执行文件操作；版本规则集中在 `versions.go` |
-| MoviePilot | `moviepilot_service.go` 负责依赖与启停；`moviepilot_token.go` 维护共享认证，`moviepilot_http.go` 处理 HTTP，`moviepilot_recognition.go`、`moviepilot_categories.go`、`moviepilot_transfer.go` 分别负责识别、分类和重命名；响应解析与本地回退分别位于 `moviepilot_parser.go`、`moviepilot_fallback.go` |
+| 整理 | `app/organize/organize.go` 串联整理流程；`recognition.go` 处理识别输入，`organize_medianame.go` 与 `organize_local_plan.go` 分别构建两种内置引擎的计划，`paths.go` 生成路径，`library.go` 查询媒体库，`subtitles.go` 匹配和下载字幕，`files.go` 执行文件操作；版本规则集中在 `versions.go` |
+| MoviePilot | `moviepilot_service.go` 负责依赖与启停；`moviepilot_token.go` 维护共享认证，`moviepilot_http.go` 处理 HTTP，外部调用只保留 `moviepilot_transfer.go` 的手动整理。历史命名的识别、搜索、分类及转名方法仅路由到项目内置引擎；MP2 识别和回退模块已移除 |
 | 播放负载均衡 | `match302_balance_service.go` 负责服务入口与源文件信息；`match302_balance_playback.go` 决定播放策略，`match302_balance_assignments.go` 管理分配状态，`match302_balance_transfer.go` 执行转存，`match302_balance_directories.go` 处理云盘目录，`match302_balance_range_reader.go` 实现 HTTP 分段读取 |
 | 自动化服务 | `automation_service.go` 负责服务启停；`automation_workflows.go` 管理流程配置，`automation_targets.go` 管理执行目标，`automation_source_scheduler.go` 调度扫描，`automation_runs.go` 管理运行、重试和取消 |
 | 自动化引擎 | `automation_engine.go` 推进运行状态；`automation_graph.go` 处理图依赖与运行上下文，`automation_node_dispatch.go` 分派节点，`automation_conditions.go` 处理条件与比较，`automation_text_nodes.go` 执行文本节点；日期、列表、分支、取首个有效值和遍历操作各自维护校验与执行代码 |
@@ -33,7 +33,7 @@
 - 115 目录缓存每个实例最多保留 512 个完整父目录列表、8 MiB 估算数据，估算包含字符串和结构开销，不等于进程 RSS 上限。整理仍使用原有的 10 分钟 TTL；新增子目录不会延长 TTL。
 - 缓存按最近访问顺序淘汰，操作时定期回收过期项。超大目录跳过缓存，继续原有回源查询；不会返回被截断的目录列表。账号隔离、空目录缓存、返回副本语义保持不变。
 - 共享令牌状态的 MoviePilot 调用合并同时进行的登录。等待者可以独立取消；首个调用被取消后，仍存活的调用者可重新获取令牌，认证失败不会被永久缓存。
-- MoviePilot GET 遇到 401 时最多重新认证并重发一次，与原有手动整理接口一致；持续 401 返回认证错误，避免递归重试。业务任务的重试次数和识别回退规则不变。
+- MoviePilot GET 遇到 401 时最多重新认证并重发一次，与原有手动整理接口一致；持续 401 返回认证错误，避免递归重试。业务任务的重试次数不变；识别不再调用 MP2。
 
 ## SQLite
 

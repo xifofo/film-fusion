@@ -97,9 +97,6 @@ func (h *Service) enhanceEpisodeRecognizeInputWithTMDBEnglishSource(
 	currentInput string,
 	recognitionSource string,
 ) string {
-	if strings.TrimSpace(recognitionSource) == service.MediaRecognitionSourceLocal {
-		return currentInput
-	}
 	if h == nil || h.tmdbSvc == nil || h.moviePilotSvc == nil {
 		return currentInput
 	}

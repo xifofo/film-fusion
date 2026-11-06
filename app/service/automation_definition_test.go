@@ -267,7 +267,7 @@ func TestValidateAutomationDefinitionAccepts115WaitAndMoviePilotChain(t *testing
 			{ID: "wait", Type: AutomationNodeWait115, Config: map[string]any{
 				"poll_interval_seconds": 30, "max_wait_minutes": 10080,
 			}},
-			{ID: "mp", Type: AutomationNodeMoviePilotRecognize, Config: map[string]any{"tmdb_id": "{{item.tmdb_id}}"}},
+			{ID: "mp", Type: AutomationNodeMediaFileRecognize, Config: map[string]any{"tmdb_id": "{{item.tmdb_id}}"}},
 			{ID: "organize", Type: AutomationNodeOrganizeStrm, Config: map[string]any{"cloud_directory_id": 1, "media_type": "auto"}},
 			{ID: "end", Type: AutomationNodeEnd},
 		},
@@ -368,7 +368,7 @@ func TestValidateAutomationDefinitionRequiresMediaNodePredecessors(t *testing.T)
 			{ID: "trigger", Type: AutomationNodeTrigger},
 			{ID: "notify", Type: AutomationNodeNotification, Config: map[string]any{"message": "test"}},
 			{ID: "wait", Type: AutomationNodeWait115},
-			{ID: "mp", Type: AutomationNodeMoviePilotRecognize},
+			{ID: "mp", Type: AutomationNodeMediaFileRecognize},
 			{ID: "end", Type: AutomationNodeEnd},
 		},
 		Edges: []AutomationEdge{
@@ -389,7 +389,7 @@ func TestValidateAutomationDefinitionAllowsMoviePilotTitleBeforeDownload(t *test
 		SchemaVersion: AutomationSchemaVersion,
 		Nodes: []AutomationNode{
 			{ID: "trigger", Type: AutomationNodeTrigger},
-			{ID: "mp_title", Type: AutomationNodeMoviePilotTitle, Config: map[string]any{"input": "$item.title", "tmdb_id": "{{item.tmdb_id}}"}},
+			{ID: "mp_title", Type: AutomationNodeMediaTitleRecognize, Config: map[string]any{"input": "$item.title", "tmdb_id": "{{item.tmdb_id}}"}},
 			{ID: "end_success", Type: AutomationNodeEnd},
 			{ID: "end_failure", Type: AutomationNodeEnd},
 		},
@@ -482,7 +482,7 @@ func TestValidateAutomationDefinitionAcceptsDirectoryMonitorActionChain(t *testi
 		t.Fatalf("115 monitor action chain invalid: %#v", result.Errors)
 	}
 
-	definition.Nodes[1] = AutomationNode{ID: "recognize", Type: AutomationNodeMoviePilotRecognize}
+	definition.Nodes[1] = AutomationNode{ID: "recognize", Type: AutomationNodeMediaFileRecognize}
 	if result := ValidateAutomationDefinition(definition); !result.Valid {
 		t.Fatalf("MoviePilot monitor action chain invalid: %#v", result.Errors)
 	}
