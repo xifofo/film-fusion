@@ -130,6 +130,9 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 
 	// 尝试代理播放请求
 	redirectURL, logEntry, skip, fallbackReason := h.proxyPlay(c)
+	if c.IsAborted() {
+		return
+	}
 	if !skip {
 		h.log302Entry(logEntry)
 		c.Redirect(http.StatusFound, redirectURL)
