@@ -11,6 +11,7 @@ import (
 	"film-fusion/app/database"
 	"film-fusion/app/model"
 	"film-fusion/app/store/embyplayback"
+	"film-fusion/app/utils/embydebug"
 )
 
 var errNoBalanceCandidate = errors.New("no balance candidate")
@@ -50,7 +51,18 @@ type balanceCandidate struct {
 	SortOrder int
 }
 
-func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req BalancePlaybackRequest) (*BalancePlaybackDecision, error) {
+func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req BalancePlaybackRequest) (result *BalancePlaybackDecision, resultErr error) {
+	// 观察最终决策，所有原有返回值和兜底分支保持不变，不打印可能含上游凭据的错误文本。
+	defer func() {
+		if resultErr != nil {
+			embydebug.Logf(ctx, "account_decision", "result=failed error_type=%T", resultErr)
+			return
+		}
+		if result != nil && result.PlaybackStorage != nil {
+			embydebug.Logf(ctx, "account_decision", "result=selected bound_storage=%d actual_storage=%d account_type=%q status=%q has_fallback_reason=%t", req.ForcedStorageID, result.PlaybackStorage.ID, result.AccountType, result.Status, result.FallbackReason != "")
+		}
+	}()
+
 	if req.Match == nil {
 		return nil, fmt.Errorf("Match302 规则为空")
 	}
@@ -67,8 +79,10 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 
 	sourceInfo, err := s.ResolveSourceFileInfo(ctx, match, req.SourcePath, req.MatchedPath)
 	if err != nil {
+		embydebug.Logf(ctx, "source_file", "result=failed source_storage=%d error_type=%T", match.CloudStorageID, err)
 		return nil, err
 	}
+	embydebug.Logf(ctx, "source_file", "result=resolved source_storage=%d has_pickcode=%t has_sha1=%t size=%d", match.CloudStorageID, sourceInfo.PickCode != "", sourceInfo.SHA1 != "", sourceInfo.Size)
 
 	sourceDecision := func(status, reason string) *BalancePlaybackDecision {
 		return &BalancePlaybackDecision{
@@ -91,9 +105,11 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 		if decision, handled := s.resolveForcedPlayback(ctx, match, sourceInfo, req, playbackKey); handled {
 			return decision, nil
 		}
+		embydebug.Logf(ctx, "binding_fallback", "next=normal_route balance_enabled=%t source_storage=%d", match.BalanceEnabled, match.CloudStorageID)
 	}
 
 	if !match.BalanceEnabled {
+		embydebug.Logf(ctx, "normal_route", "reason=balance_disabled next=source_storage")
 		return sourceDecision("未启用负载均衡", "未启用负载均衡"), nil
 	}
 
@@ -228,14 +244,17 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, req BalancePlaybackRequest, playbackKey string) (*BalancePlaybackDecision, bool) {
 	forcedID := req.ForcedStorageID
 	if forcedID == 0 || match.CloudStorage == nil {
+		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=missing_binding_or_source bound_storage=%d", forcedID)
 		return nil, false
 	}
 
 	// 指定账号即源账号 -> 直接源播放(无需秒传)
 	if forcedID == match.CloudStorageID {
 		if !storageUsable(*match.CloudStorage) {
+			embydebug.Logf(ctx, "bound_storage", "result=unusable reason=source_storage_unusable bound_storage=%d", forcedID)
 			return nil, false
 		}
+		embydebug.Logf(ctx, "bound_storage", "result=ready reason=bound_to_source bound_storage=%d", forcedID)
 		return &BalancePlaybackDecision{
 			UseBalance:       true,
 			Status:           "指定账号播放(源)",
@@ -251,31 +270,37 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 
 	// 指定账号为其它存储 -> 需要从源账号秒传过去，源账号必须可用
 	if strings.TrimSpace(match.CloudStorage.Cookie) == "" || !storageUsable(*match.CloudStorage) {
+		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=source_not_transferable source_storage=%d has_cookie=%t usable=%t", match.CloudStorageID, strings.TrimSpace(match.CloudStorage.Cookie) != "", storageUsable(*match.CloudStorage))
 		return nil, false
 	}
 
 	var forcedStorage model.CloudStorage
 	if err := database.DB.First(&forcedStorage, forcedID).Error; err != nil {
+		embydebug.Logf(ctx, "bound_storage", "result=lookup_failed bound_storage=%d error_type=%T", forcedID, err)
 		return nil, false
 	}
 	if forcedStorage.StorageType != model.StorageType115Open ||
 		!storageUsable(forcedStorage) ||
 		strings.TrimSpace(forcedStorage.Cookie) == "" {
+		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=target_not_transferable bound_storage=%d correct_storage_type=%t has_cookie=%t usable=%t access_mode=%q", forcedID, forcedStorage.StorageType == model.StorageType115Open, strings.TrimSpace(forcedStorage.Cookie) != "", storageUsable(forcedStorage), forcedStorage.Match302AccessModeValue())
 		return nil, false
 	}
 
 	// 指定账号并发已满 -> 回退到正常负载均衡
-	if over, _, _ := s.accountOverLimit(match, forcedStorage.ID, playbackKey); over {
+	if over, active, limit := s.accountOverLimit(match, forcedStorage.ID, playbackKey); over {
+		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=concurrency_limit bound_storage=%d active=%d limit=%d", forcedID, active, limit)
 		return nil, false
 	}
 
 	assignment, err := s.ensureForcedAssignment(ctx, match, sourceInfo, forcedStorage, req.EmbyItemID, req.MediaSourceID)
 	if err != nil {
+		embydebug.Logf(ctx, "bound_assignment", "result=failed bound_storage=%d error_type=%T", forcedID, err)
 		if s.logger != nil {
 			s.logger.Warnf("[match302-balance] 绑定账号分配失败 match=%d storage=%d err=%v", match.ID, forcedStorage.ID, err)
 		}
 		return nil, false
 	}
+	embydebug.Logf(ctx, "bound_assignment", "result=resolved assignment=%d bound_storage=%d status=%q attempts=%d has_error=%t", assignment.ID, forcedID, assignment.Status, assignment.Attempts, assignment.LastError != "")
 
 	if assignment.Status == model.BalanceAssignmentStatusPending {
 		s.StartTransferAsync(assignment.ID)
@@ -283,8 +308,10 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 	if ready := s.waitReady(ctx, assignment.ID, 3*time.Second); ready != nil {
 		assignment = ready
 	}
+	embydebug.Logf(ctx, "bound_assignment", "result=wait_complete assignment=%d status=%q has_target_pickcode=%t has_error=%t", assignment.ID, assignment.Status, strings.TrimSpace(assignment.TargetPickcode) != "", assignment.LastError != "")
 
 	if assignment.Status != model.BalanceAssignmentStatusReady || strings.TrimSpace(assignment.TargetPickcode) == "" {
+		embydebug.Logf(ctx, "bound_assignment", "result=skipped reason=transfer_not_ready assignment=%d", assignment.ID)
 		// 秒传未就绪 / 失败 -> 回退到正常流程
 		return nil, false
 	}

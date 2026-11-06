@@ -2,15 +2,18 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
 
 	"film-fusion/app/database"
 	"film-fusion/app/model"
+	"film-fusion/app/utils/embydebug"
 	"film-fusion/app/utils/embyhelper"
 
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 // resolveBoundStorageID 解析当前播放的 Emby 用户并返回其绑定的 115 存储ID。
@@ -18,22 +21,31 @@ import (
 func (h *EmbyProxyHandler) resolveBoundStorageID(c *gin.Context, itemID string) uint {
 	// 无任何启用的绑定时直接跳过，避免每次播放都去解析 Emby 用户
 	var bindingCount int64
-	if err := database.DB.Model(&model.EmbyAccountBinding{}).Where("enabled = ?", true).Count(&bindingCount).Error; err != nil || bindingCount == 0 {
+	if err := database.DB.Model(&model.EmbyAccountBinding{}).Where("enabled = ?", true).Count(&bindingCount).Error; err != nil {
+		embydebug.Logf(c.Request.Context(), "binding", "result=query_failed error_type=%T", err)
+		return 0
+	}
+	if bindingCount == 0 {
+		embydebug.Logf(c.Request.Context(), "binding", "result=skipped reason=no_enabled_bindings")
 		return 0
 	}
 
 	userID := h.resolveEmbyUserID(c, itemID)
 	if userID == "" {
+		embydebug.Logf(c.Request.Context(), "binding", "result=skipped reason=user_unresolved enabled_bindings=%d", bindingCount)
 		return 0
 	}
 
 	var binding model.EmbyAccountBinding
 	if err := database.DB.Where("emby_user_id = ? AND enabled = ?", userID, true).First(&binding).Error; err != nil {
+		embydebug.Logf(c.Request.Context(), "binding", "result=not_selected user_id=%q not_found=%t error_type=%T", userID, errors.Is(err, gorm.ErrRecordNotFound), err)
 		return 0
 	}
 	if binding.CloudStorageID == 0 {
+		embydebug.Logf(c.Request.Context(), "binding", "result=invalid user_id=%q binding_id=%d reason=storage_id_zero", userID, binding.ID)
 		return 0
 	}
+	embydebug.Logf(c.Request.Context(), "binding", "result=matched user_id=%q binding_id=%d bound_storage=%d", userID, binding.ID, binding.CloudStorageID)
 	h.logger.Infof("[EMBY PROXY] 命中 Emby 账号绑定 user=%s -> storage=%d", userID, binding.CloudStorageID)
 	return binding.CloudStorageID
 }
@@ -43,31 +55,40 @@ func (h *EmbyProxyHandler) resolveBoundStorageID(c *gin.Context, itemID string) 
 func (h *EmbyProxyHandler) resolveEmbyUserID(c *gin.Context, itemID string) string {
 	ctx := c.Request.Context()
 	if id := h.resolveEmbyUserIDByToken(ctx, embyUserTokenFromRequest(c)); id != "" {
+		embydebug.Logf(ctx, "user_identity", "method=token user_id=%q", id)
 		return id
 	}
 	if ctx.Err() != nil {
+		embydebug.Logf(ctx, "user_identity", "result=cancelled")
 		return ""
 	}
-	return h.resolveEmbyUserIDBySession(ctx, itemID, c.ClientIP())
+	embydebug.Logf(ctx, "user_identity", "result=token_unresolved next=session_fallback")
+	id := h.resolveEmbyUserIDBySession(ctx, itemID, c.ClientIP())
+	embydebug.Logf(ctx, "user_identity", "method=session user_id=%q resolved=%t", id, id != "")
+	return id
 }
 
 // resolveEmbyUserIDByToken 方案A：用请求 token 调 /Users/Me，结果按 token 缓存。
 func (h *EmbyProxyHandler) resolveEmbyUserIDByToken(ctx context.Context, token string) string {
 	token = strings.TrimSpace(token)
 	if token == "" {
+		embydebug.Logf(ctx, "user_token", "result=skipped reason=missing_token")
 		return ""
 	}
 	// token 与管理员 APIKey 相同则无用户上下文，跳过(交给方案B)
 	if strings.TrimSpace(h.config.Emby.APIKey) != "" && token == strings.TrimSpace(h.config.Emby.APIKey) {
+		embydebug.Logf(ctx, "user_token", "result=skipped reason=admin_api_key")
 		return ""
 	}
 
 	cacheKey := "emby-user-id:token:" + token
 	if v, found := h.goCache.Get(cacheKey); found {
 		if s, ok := v.(string); ok {
+			embydebug.Logf(ctx, "user_token", "result=cache_hit user_id=%q resolved=%t", s, s != "")
 			return s
 		}
 	}
+	embydebug.Logf(ctx, "user_token", "result=cache_miss")
 	user, err := embyhelper.GetUserByTokenContext(ctx, h.config, token)
 	if err != nil {
 		h.logger.Warnf("[EMBY PROXY] 解析 Emby 用户(token)失败: %v", err)
@@ -78,6 +99,7 @@ func (h *EmbyProxyHandler) resolveEmbyUserIDByToken(ctx context.Context, token s
 		userID = user.ID
 	}
 	h.goCache.Set(cacheKey, userID, h.userResolveCacheTTL())
+	embydebug.Logf(ctx, "user_token", "result=lookup_complete user_id=%q resolved=%t", userID, userID != "")
 	return userID
 }
 
@@ -86,15 +108,18 @@ func (h *EmbyProxyHandler) resolveEmbyUserIDBySession(ctx context.Context, itemI
 	itemID = strings.TrimSpace(itemID)
 	remoteIP = strings.TrimSpace(remoteIP)
 	if itemID == "" && remoteIP == "" {
+		embydebug.Logf(ctx, "user_session", "result=skipped reason=no_item_or_ip")
 		return ""
 	}
 
 	cacheKey := "emby-user-id:session:" + itemID + "|" + remoteIP
 	if v, found := h.goCache.Get(cacheKey); found {
 		if s, ok := v.(string); ok {
+			embydebug.Logf(ctx, "user_session", "result=cache_hit user_id=%q resolved=%t", s, s != "")
 			return s
 		}
 	}
+	embydebug.Logf(ctx, "user_session", "result=cache_miss item_id=%q has_remote_ip=%t", itemID, remoteIP != "")
 	client := embyhelper.New(h.config)
 	defer client.Close()
 	user, err := client.WithContext(ctx).GetUserBySession(itemID, remoteIP)
@@ -108,6 +133,7 @@ func (h *EmbyProxyHandler) resolveEmbyUserIDBySession(ctx context.Context, itemI
 	}
 	// 会话状态会变化，命中/未命中都只短时间缓存
 	h.goCache.Set(cacheKey, userID, 60*time.Second)
+	embydebug.Logf(ctx, "user_session", "result=lookup_complete user_id=%q resolved=%t", userID, userID != "")
 	return userID
 }
 

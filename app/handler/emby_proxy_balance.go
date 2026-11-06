@@ -9,6 +9,7 @@ import (
 
 	"film-fusion/app/service"
 	"film-fusion/app/store/embyproxylog"
+	"film-fusion/app/utils/embydebug"
 	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
 
@@ -20,7 +21,7 @@ import (
 const code115FileNotFound = 430004
 
 // proxyPlay 代理播放请求，返回重定向URL、日志条目、是否跳过和跳过原因。
-func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry, bool, string) {
+func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (target string, entry embyproxylog.Entry, skip bool, reason string) {
 	currentURI := c.Request.RequestURI
 	baseEntry := embyproxylog.Entry{
 		Method:    c.Request.Method,
@@ -29,14 +30,22 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		RemoteIP:  c.ClientIP(),
 	}
 
-	h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求 URI: %s", currentURI)
+	h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求路径: %s", c.Request.URL.Path)
 	re := regexp.MustCompile(`/[Vv]ideos/(\S+)/(stream|original|master)`)
 	matches := re.FindStringSubmatch(currentURI)
 
 	if len(matches) < 1 {
-		h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求 URI 不匹配: %s", currentURI)
+		h.logger.Debugf("[EMBY PROXY] ProxyPlay 请求路径不匹配: %s", c.Request.URL.Path)
 		return "", baseEntry, true, "不是 Emby 视频播放请求"
 	}
+
+	// 只为播放流创建编号；内部身份查询共享取消信号，账号决策仍保留原 Background 生命周期。
+	ctx := embydebug.Start(c.Request.Context(), h.logger)
+	c.Request = c.Request.WithContext(ctx)
+	embydebug.Logf(ctx, "request", "method=%q path=%q", c.Request.Method, c.Request.URL.Path)
+	defer func() {
+		embydebug.Logf(ctx, "result", "redirect_ready=%t upstream_fallback=%t item_id=%q match=%d assignment=%d actual_storage=%d account_type=%q status=%q has_fallback_reason=%t", !skip, skip, entry.ItemID, entry.Match302ID, entry.AssignmentID, entry.ActualStorageID, entry.AccountType, entry.BalanceStatus, reason != "" || entry.FallbackReason != "")
+	}()
 
 	// 开始计时
 	start := time.Now()
@@ -46,14 +55,16 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	}()
 
 	itemInfoUri, itemId, etag, mediaSourceId, apiKey := embyhelper.GetItemPathInfo(c, h.config)
+	embydebug.Logf(ctx, "media_lookup", "item_id=%q media_source_id=%q", itemId, mediaSourceId)
 	embyRes, err := embyhelper.GetEmbyItemsContext(c.Request.Context(), itemInfoUri, itemId, etag, mediaSourceId, apiKey)
 
 	if err != nil {
+		embydebug.Logf(ctx, "media_lookup", "result=failed error_type=%T", err)
 		h.logger.Errorf("获取 EmbyItems 错误: %v", err)
 		return "", baseEntry, true, "获取 EmbyItems 失败: " + err.Error()
 	}
 
-	h.logger.Infof("[EMBY PROXY] Request URI: %s", currentURI)
+	h.logger.Debugf("[EMBY PROXY] Request path: %s", c.Request.URL.Path)
 
 	// EMBY 的播放地址, 兼容 Windows 的 Emby 路径
 	embyPlayPath := pathhelper.EnsureLeadingSlash(embyRes.Path)
@@ -61,6 +72,7 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 	h.logger.Infof("[EMBY PROXY] Emby 原地址: %s", embyPlayPath)
 
 	if strings.HasPrefix(embyPlayPath, "http") {
+		embydebug.Logf(ctx, "binding", "result=bypassed reason=external_media_url item_id=%q", itemId)
 		h.logger.Infof("[EMBY PROXY] Emby 播放地址是完整的 URL: %s", embyPlayPath)
 		baseEntry.Source = "proxyPlay"
 		baseEntry.Target = embyPlayPath
@@ -72,18 +84,22 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 
 	// Emby 账号绑定：命中则强制走指定 115 存储，跳过通用就绪缓存命中(避免被路由到非绑定账号)。
 	forcedStorageID := h.resolveBoundStorageID(c, itemId)
+	embydebug.Logf(ctx, "binding_route", "bound_storage=%d", forcedStorageID)
 
 	if forcedStorageID == 0 {
 		if redirectURL, entry, ok := h.proxyReadyBalanceCache(c, baseEntry, embyPlayPath, itemId, mediaSourceId); ok {
+			embydebug.Logf(ctx, "ready_cache", "result=hit assignment=%d actual_storage=%d", entry.AssignmentID, entry.ActualStorageID)
 			return redirectURL, entry, false, ""
 		}
 	}
 
 	match, matchedPath, err := h.balanceSvc.FindMatch(embyPlayPath)
 	if err != nil {
+		embydebug.Logf(ctx, "match302", "result=not_matched error_type=%T", err)
 		h.logger.Debugf("[EMBY PROXY] 路径 %s 未匹配任何 match302 规则", embyPlayPath)
 		return "", baseEntry, true, "路径未匹配任何 match302 规则: " + embyPlayPath
 	}
+	embydebug.Logf(ctx, "match302", "result=matched match=%d balance_enabled=%t source_storage=%d bound_storage=%d", match.ID, match.BalanceEnabled, match.CloudStorageID, forcedStorageID)
 
 	playbackReq := service.BalancePlaybackRequest{
 		Match:           match,
@@ -95,23 +111,28 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		RemoteIP:        c.ClientIP(),
 		ForcedStorageID: forcedStorageID,
 	}
-	decision, err := h.balanceSvc.ResolvePlayback(context.Background(), playbackReq)
+	decision, err := h.balanceSvc.ResolvePlayback(embydebug.Copy(context.Background(), ctx), playbackReq)
 	if err != nil {
+		embydebug.Logf(ctx, "decision", "result=failed error_type=%T", err)
 		h.logger.Errorf("[EMBY PROXY] Match302 负载均衡决策失败: %v", err)
 		return "", baseEntry, true, "Match302 负载均衡决策失败: " + err.Error()
 	}
 
+	embydebug.Logf(ctx, "download_url", "result=requesting actual_storage=%d account_type=%q", decision.PlaybackStorage.ID, decision.AccountType)
 	redirectURL, fromCache, err := h.getDownloadURLForStorage(*decision.PlaybackStorage, decision.ActualPickCode, c.Request.UserAgent())
 	if err != nil && decision.UseBalance && !decision.IsSourcePlayback {
+		embydebug.Logf(ctx, "download_url", "result=failed actual_storage=%d file_not_found=%t error_type=%T next=source_fallback", decision.PlaybackStorage.ID, is115FileNotFound(err), err)
 		if is115FileNotFound(err) && decision.Assignment != nil {
 			h.logger.Warnf("[EMBY PROXY] 子账号目标文件已删除(430004)，失效并重新秒传 assignment=%d", decision.Assignment.ID)
 			h.invalidateBalanceAssignment(decision.Assignment.Match302ID, decision.Assignment.ID)
 		}
 		if decision.SourceStorage == nil {
+			embydebug.Logf(ctx, "source_fallback", "result=blocked reason=missing_source_storage")
 			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，源账号信息缺失，无法回退: %v", err)
 			return "", baseEntry, true, "获取子账号直链失败，源账号信息缺失: " + err.Error()
 		}
 		if limitErr := h.balanceSvc.EnsureStrictStorageAllowed(decision.Match, decision.SourceStorage.ID, playbackReq); limitErr != nil {
+			embydebug.Logf(ctx, "source_fallback", "result=blocked reason=source_concurrency_limit source_storage=%d", decision.SourceStorage.ID)
 			h.logger.Warnf("[EMBY PROXY] 获取子账号直链失败，但严格模式不允许回退源账号: %v", limitErr)
 			return "", baseEntry, true, "获取子账号直链失败，严格模式不允许回退源账号: " + limitErr.Error()
 		}
@@ -122,14 +143,17 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (string, embyproxylog.Entry
 		decision.AccountType = "source"
 		decision.Status = "失败回退"
 		decision.FallbackReason = "获取子账号直链失败: " + err.Error()
+		embydebug.Logf(ctx, "source_fallback", "result=requesting source_storage=%d", decision.SourceStorage.ID)
 		redirectURL, fromCache, err = h.getDownloadURLForStorage(*decision.SourceStorage, decision.SourceFile.PickCode, c.Request.UserAgent())
 	}
 	if err != nil {
+		embydebug.Logf(ctx, "download_url", "result=failed actual_storage=%d error_type=%T", decision.PlaybackStorage.ID, err)
 		h.logger.Errorf("[EMBY PROXY] 获取下载URL失败: %v", err)
 		return "", baseEntry, true, "获取下载URL失败: " + err.Error()
 	}
 
-	entry := h.buildPlaybackLogEntry(baseEntry, redirectURL, fromCache, itemId, mediaSourceId, embyPlayPath, decision)
+	embydebug.Logf(ctx, "download_url", "result=ready actual_storage=%d from_cache=%t", decision.PlaybackStorage.ID, fromCache)
+	entry = h.buildPlaybackLogEntry(baseEntry, redirectURL, fromCache, itemId, mediaSourceId, embyPlayPath, decision)
 	h.logger.Infof("[EMBY PROXY] Match302 匹配成功，重定向到: %s", redirectURL)
 	return redirectURL, entry, false, ""
 }

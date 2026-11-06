@@ -2,11 +2,13 @@ package embyhelper
 
 import (
 	"context"
-	"film-fusion/app/config"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
+
+	"film-fusion/app/config"
+	"film-fusion/app/utils/embydebug"
 
 	"resty.dev/v3"
 )
@@ -33,6 +35,7 @@ func GetUserByToken(cfg *config.Config, token string) (*EmbyUser, error) {
 	return GetUserByTokenContext(context.Background(), cfg, token)
 }
 
+// GetUserByTokenContext 保留原有查询及空结果语义；播放诊断仅记录 HTTP 状态与用户 ID。
 func GetUserByTokenContext(ctx context.Context, cfg *config.Config, token string) (*EmbyUser, error) {
 	token = strings.TrimSpace(token)
 	if token == "" {
@@ -55,7 +58,14 @@ func GetUserByTokenContext(ctx context.Context, cfg *config.Config, token string
 		SetHeader("X-Emby-Token", token).
 		SetResult(&user).
 		Get("/Users/Me")
+	status := 0
+	if r != nil {
+		status = r.StatusCode()
+	}
+	// 即使 200 响应 JSON 解码失败，也保留状态码；不记录可能含 Token 的响应正文。
+	embydebug.Logf(ctx, "user_token_http", "endpoint=/Users/Me http_status=%d user_id=%q has_user=%t", status, user.ID, strings.TrimSpace(user.ID) != "")
 	if err != nil {
+		embydebug.Logf(ctx, "user_token_http", "endpoint=/Users/Me result=request_failed error_type=%T", err)
 		return nil, fmt.Errorf("请求 Emby 当前用户失败: %w", err)
 	}
 	if r.StatusCode() != http.StatusOK {
@@ -72,11 +82,18 @@ func GetUserByTokenContext(ctx context.Context, cfg *config.Config, token string
 // 作为 GetUserByToken 的兜底：优先按 NowPlayingItem.Id 匹配；匹配不到再按客户端 IP 唯一匹配。
 // 无法确定时返回 nil, nil。
 func (e *EmbyClient) GetUserBySession(itemID, remoteIP string) (*EmbyUser, error) {
+	ctx := e.requestContext()
 	var sessions []embySession
-	r, err := e.client.R().SetContext(e.requestContext()).
+	r, err := e.client.R().SetContext(ctx).
 		SetResult(&sessions).
 		Get("/Sessions")
+	status := 0
+	if r != nil {
+		status = r.StatusCode()
+	}
+	embydebug.Logf(ctx, "user_session_http", "endpoint=/Sessions http_status=%d session_count=%d", status, len(sessions))
 	if err != nil {
+		embydebug.Logf(ctx, "user_session_http", "endpoint=/Sessions result=request_failed error_type=%T", err)
 		return nil, fmt.Errorf("请求 Emby 会话失败: %w", err)
 	}
 	if r.StatusCode() != http.StatusOK {
@@ -94,6 +111,7 @@ func (e *EmbyClient) GetUserBySession(itemID, remoteIP string) (*EmbyUser, error
 				continue
 			}
 			if s.NowPlayingItem != nil && strings.TrimSpace(s.NowPlayingItem.ID) == itemID {
+				embydebug.Logf(ctx, "user_session_match", "method=item user_id=%q item_id=%q", s.UserID, itemID)
 				return &EmbyUser{ID: s.UserID, Name: s.UserName}, nil
 			}
 		}
@@ -114,10 +132,13 @@ func (e *EmbyClient) GetUserBySession(itemID, remoteIP string) (*EmbyUser, error
 			}
 		}
 		if count == 1 {
+			embydebug.Logf(ctx, "user_session_match", "method=ip user_id=%q matches=%d", matched.ID, count)
 			return matched, nil
 		}
+		embydebug.Logf(ctx, "user_session_match", "method=ip result=unresolved matches=%d", count)
 	}
 
+	embydebug.Logf(ctx, "user_session_match", "result=unresolved item_id=%q", itemID)
 	return nil, nil
 }
 

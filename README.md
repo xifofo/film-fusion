@@ -174,6 +174,19 @@ docker compose down
 
 ## 🔍 故障排除
 
+### Emby 绑定播放诊断
+
+在“系统设置 → 日志”将级别设为 `debug`，复现一次播放后，在“运行日志”搜索 `[EMBY PLAYBACK]`。同一次播放的 `trace` 相同，可继续按完整 `trace` 查找；本次增加日志不会自动调整服务器日志级别。
+
+- `user_token_http`：`/Users/Me` 的实际 HTTP 状态和是否返回用户 ID；非 200 不直接等同于 Token 失效。缓存命中时看 `user_token`，本次不会再发身份查询。
+- `user_identity` / `user_session_match`：是否使用 `/Sessions` 兜底，以及按影片还是客户端 IP 识别用户；IP 不唯一时保留未识别结果。
+- `binding` / `match302`：是否命中启用的绑定、绑定账号 ID、路径规则 ID 和负载均衡开关。媒体信息直接返回外部 URL 时会标记 `external_media_url`，这条路径不会进入绑定决策。
+- `bound_storage`：源账号/绑定账号的凭据可用性（仅布尔值）、Cookie 是否缺失、并发是否已满；`binding_fallback` 说明转入普通流程。
+- `bound_assignment`：绑定转存任务 ID、等待后的状态和目标文件凭据是否存在；后台任务可继续用 `assignment` ID 对照已有转存日志及队列错误详情。
+- `account_decision` / `download_url` / `result`：计划及最终使用的账号 ID、直链获取结果、是否回退默认反代。`redirect_ready=true` 只说明已取得重定向地址，不代表播放器完成播放。
+
+新增的 `[EMBY PLAYBACK]` 日志不输出 Token、Cookie、密码、完整 URL、签名参数或上游响应体，仅记录状态码、内部 ID 和固定原因。保留原有识别、缓存、等待及播放兜底逻辑。排查结束后可恢复原日志级别。
+
 ### 常见问题
 
 **Q: 无法访问Web界面**

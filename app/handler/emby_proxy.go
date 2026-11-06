@@ -15,6 +15,7 @@ import (
 	"film-fusion/app/config"
 	"film-fusion/app/logger"
 	"film-fusion/app/service"
+	"film-fusion/app/utils/embydebug"
 	"film-fusion/app/utils/embyhelper"
 
 	sdk115 "github.com/OpenListTeam/115-sdk-go"
@@ -147,6 +148,7 @@ func (h *EmbyProxyHandler) ProxyRequest(c *gin.Context) {
 
 	// 默认代理请求
 	h.proxy.ServeHTTP(c.Writer, c.Request)
+	embydebug.Logf(c.Request.Context(), "upstream_fallback", "http_status=%d", c.Writer.Status())
 }
 
 func (h *EmbyProxyHandler) modifyResponse(resp *http.Response) error {
