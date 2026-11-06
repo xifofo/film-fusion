@@ -48,6 +48,8 @@ func (m *Match302BalanceMember) NormalizeDefaults(matchID uint) {
 }
 
 type Match302BalanceAssignment struct {
+	// QueueClearedAt 仅清理失败队列的展示记录，保留播放分配及缓存追踪；后续更新会重新显示。
+	QueueClearedAt    *time.Time `json:"-"`
 	Retired           bool       `gorm:"default:false;index" json:"retired,omitempty"`
 	RetiredSourcePath string     `json:"retired_source_path,omitempty"`
 	ID                uint       `gorm:"primarykey" json:"id"`

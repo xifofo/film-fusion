@@ -415,6 +415,7 @@ func (s *Server) setupRoutes() {
 			embyProxyLog.GET("/302-logs", embyProxyLogHandler.List)
 			embyProxyLog.DELETE("/302-logs", embyProxyLogHandler.Clear)
 			embyProxyLog.GET("/balance-status", embyProxyLogHandler.BalanceStatus)
+			embyProxyLog.POST("/transfer-queue/clear", embyProxyLogHandler.ClearTransferQueue)
 			embyProxyLog.GET("/security-status", embyProxyLogHandler.SecurityStatus)
 			embyProxyLog.POST("/security-unblock", embyProxyLogHandler.SecurityUnblock)
 		}

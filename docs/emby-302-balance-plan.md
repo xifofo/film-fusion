@@ -632,6 +632,20 @@ GET /api/emby-proxy/balance-status
 }
 ```
 
+队列失败记录清理：
+
+```text
+POST /api/emby-proxy/transfer-queue/clear
+```
+
+请求明确传入 `{"ids":[1,2]}`（最多 200 个正整数 ID）或 `{"all":true}`，不能同时传入。
+响应 `data.cleared_count` 是执行时实际清理的数量；等待中、转存中、源账号分配及已清理记录会跳过。
+全部清理覆盖完整失败队列，不受看板最近 50 条的限制。
+
+清理仅通过 `queue_cleared_at` 隐藏当前失败记录，并从看板失败数中排除，保留分配、错误详情及缓存追踪，不请求 115 或删除网盘文件。
+后续分配更新使 `updated_at` 晚于清理时间时，新的失败会重新进入队列；Assignment 管理仍可查看和重试。
+前后端需同时更新，后端启动迁移会新增该可空时间字段。
+
 ### 12.3 Assignment 接口
 
 ```text

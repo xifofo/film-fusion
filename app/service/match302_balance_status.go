@@ -276,10 +276,10 @@ func (s *BalanceStatusService) transferSummary() BalanceTransferSummary {
 	var summary BalanceTransferSummary
 	database.DB.Model(&model.Match302BalanceAssignment{}).Where("status = ?", model.BalanceAssignmentStatusPending).Count(&summary.Pending)
 	database.DB.Model(&model.Match302BalanceAssignment{}).Where("status = ?", model.BalanceAssignmentStatusTransferring).Count(&summary.Transferring)
-	database.DB.Model(&model.Match302BalanceAssignment{}).Where("status = ?", model.BalanceAssignmentStatusFailed).Count(&summary.Failed)
+	visibleTransferQueue(database.DB.Model(&model.Match302BalanceAssignment{})).Where("status = ?", model.BalanceAssignmentStatusFailed).Count(&summary.Failed)
 
 	var assignments []model.Match302BalanceAssignment
-	_ = database.DB.Preload("SourceStorage").Preload("PlaybackStorage").
+	_ = visibleTransferQueue(database.DB.Preload("SourceStorage").Preload("PlaybackStorage")).
 		Where("is_source_playback = ? AND status IN ?", false, []string{
 			model.BalanceAssignmentStatusPending,
 			model.BalanceAssignmentStatusTransferring,
