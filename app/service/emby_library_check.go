@@ -51,6 +51,8 @@ type EmbyLibraryCheckResult struct {
 	Matches      []EmbyLibraryMatch `json:"matches"`
 	Error        string             `json:"error,omitempty"`
 	Truncated    bool               `json:"truncated,omitempty"`
+
+	query embyLibraryQuery
 }
 
 type EmbyLibraryCheckResponse struct {
@@ -110,7 +112,8 @@ func prepareEmbyLibraryCheck(names []string) (*EmbyLibraryCheckResponse, error) 
 			if len(original) > embyLibraryCheckMaxNameBytes {
 				return nil, fmt.Errorf("第 %d 行名称过长（最多 %d 字节）", rows, embyLibraryCheckMaxNameBytes)
 			}
-			name := cleanEmbyLibraryName(original)
+			query := parseEmbyLibraryQuery(original)
+			name := query.displayName()
 			if name == "" {
 				continue
 			}
@@ -118,13 +121,14 @@ func prepareEmbyLibraryCheck(names []string) (*EmbyLibraryCheckResponse, error) 
 			if key == "" {
 				return nil, fmt.Errorf("第 %d 行不包含有效名称", rows)
 			}
+			key = fmt.Sprintf("%s:%d:%t", key, query.year, query.series)
 			if _, exists := seen[key]; exists {
 				response.DuplicatesRemoved++
 				continue
 			}
 			seen[key] = struct{}{}
 			response.Results = append(response.Results, EmbyLibraryCheckResult{
-				OriginalName: original, Name: name, Matches: make([]EmbyLibraryMatch, 0),
+				OriginalName: original, Name: name, Matches: make([]EmbyLibraryMatch, 0), query: query,
 			})
 		}
 	}
@@ -144,7 +148,7 @@ var embyLibraryExtensions = map[string]bool{
 	"torrent": true,
 }
 
-func cleanEmbyLibraryName(value string) string {
+func stripEmbyLibraryName(value string) string {
 	name := strings.TrimSpace(value)
 	for {
 		before := name
@@ -162,8 +166,7 @@ func cleanEmbyLibraryName(value string) string {
 	}
 }
 
-// Separators are ignored only for equality. SearchTerm retains the cleaned
-// user's spelling and punctuation, including meaningful dotted title segments.
+// 普通片名保留原有标点；比较时统一 Unicode 并忽略大小写、空白和标点。
 func embyLibraryNameKey(name string) string {
 	var key strings.Builder
 	for _, r := range norm.NFKC.String(strings.ToLower(name)) {
@@ -196,13 +199,13 @@ func (s *EmbyLibraryCheckService) checkName(ctx context.Context, result EmbyLibr
 	if s.emby == nil {
 		return fail(errors.New("missing Emby client"))
 	}
-	key := embyLibraryNameKey(result.Name)
+	key := embyLibraryNameKey(result.query.title)
 	seen := make(map[string]struct{})
 	for start := 0; start < embyLibraryCheckMaxCandidates; {
 		if err := ctx.Err(); err != nil {
 			return fail(err)
 		}
-		page, err := s.emby.SearchLibraryPage(ctx, result.Name, start, embyLibraryCheckPageSize)
+		page, err := s.emby.SearchLibraryPage(ctx, result.query.title, start, embyLibraryCheckPageSize)
 		if err != nil {
 			return fail(err)
 		}
@@ -215,11 +218,20 @@ func (s *EmbyLibraryCheckService) checkName(ctx context.Context, result EmbyLibr
 				continue
 			}
 			seen[item.ID] = struct{}{}
+			// 季集编号明确指向剧集，不能用同名电影或搜索命中的其他电影代替。
+			if result.query.series && item.Type != "Series" {
+				continue
+			}
+			nameMatches := key == embyLibraryNameKey(item.Name) || (item.OriginalTitle != "" && key == embyLibraryNameKey(item.OriginalTitle))
+			if !nameMatches && !relatedEmbyLibraryTitle(result.query.title, item.Name) && !relatedEmbyLibraryTitle(result.query.title, item.OriginalTitle) {
+				continue
+			}
 			match := EmbyLibraryMatch{ID: item.ID, Name: item.Name, Type: item.Type, Year: item.ProductionYear, Path: item.Path}
 			if links, ok := s.emby.(interface{ LibrarySearchItemWebURL(string) string }); ok {
 				match.EmbyURL = links.LibrarySearchItemWebURL(item.ID)
 			}
-			if key == embyLibraryNameKey(item.Name) || (item.OriginalTitle != "" && key == embyLibraryNameKey(item.OriginalTitle)) {
+			// 有明确年份时，同名但年份不同或缺失的候选仍需人工确认。
+			if nameMatches && (result.query.year == 0 || result.query.year == item.ProductionYear) {
 				if len(exact) < embyLibraryCheckMaxMatches {
 					exact = append(exact, match)
 				}
@@ -249,8 +261,12 @@ func (s *EmbyLibraryCheckService) checkName(ctx context.Context, result EmbyLibr
 		}
 	}
 	result.Status = "missing"
-	if len(result.Matches) > 0 || result.Truncated {
+	if len(result.Matches) > 0 {
 		result.Status = "possible"
+	} else if result.Truncated {
+		// 尚未查完不能断言未入库，也不能把无关结果包装成疑似匹配。
+		result.Status = "error"
+		result.Error = "Emby 搜索结果过多，尚未找到相关候选，请使用更完整的片名重查"
 	}
 	return result
 }
