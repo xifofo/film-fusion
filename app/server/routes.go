@@ -476,6 +476,8 @@ func (s *Server) setupRoutes() {
 		// Emby 观看记录（多用户隔离：配置统计用户 + 历史回填 + 实时采集）
 		embyWatch := protected.Group("/emby-watch")
 		{
+			embyWatch.GET("/now-playing", embyWatchHandler.NowPlaying)
+			embyWatch.GET("/playback-history", embyWatchHandler.PlaybackHistory)
 			embyWatch.GET("/users", embyWatchHandler.ListUsers)
 			embyWatch.PUT("/users", embyWatchHandler.SaveTrackedUsers)
 			embyWatch.GET("/setting", embyWatchHandler.GetSetting)
