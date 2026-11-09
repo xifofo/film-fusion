@@ -1,13 +1,14 @@
+// 云存储读取、归属校验及删除入口；普通写入、排序与账户资料各自维护完整职责。
 package handler
 
 import (
 	"errors"
+	"net/http"
+	"strconv"
+
 	"film-fusion/app/database"
 	"film-fusion/app/model"
 	"film-fusion/app/service"
-	"net/http"
-	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -39,85 +40,16 @@ func (h *CloudStorageHandler) error(c *gin.Context, statusCode int, errorCode in
 	})
 }
 
-// CreateCloudStorage 创建网盘存储配置
-func (h *CloudStorageHandler) CreateCloudStorage(c *gin.Context) {
-	// 仅绑定允许由客户端设置的字段，避免越权写入 user_id / provider_uid / status 等服务端控制字段
-	var req struct {
-		StorageType        string `json:"storage_type"`
-		StorageName        string `json:"storage_name"`
-		AppID              string `json:"app_id"`
-		AppSecret          string `json:"app_secret"`
-		AccessToken        string `json:"access_token"`
-		RefreshToken       string `json:"refresh_token"`
-		Cookie             string `json:"cookie"`
-		AutoRefresh        *bool  `json:"auto_refresh"`
-		RefreshBeforeMin   *int   `json:"refresh_before_min"`
-		Config             string `json:"config"`
-		SortOrder          int    `json:"sort_order"`
-		Match302AccessMode string `json:"match302_access_mode"`
-		Match302MaxActive  int    `json:"match302_max_active"`
-		Match302CacheMaxGB int64  `json:"match302_cache_max_gb"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
-	}
-	if !model.IsValidMatch302AccessMode(req.Match302AccessMode) {
-		h.error(c, http.StatusBadRequest, 400, "Match302 访问方式无效")
-		return
-	}
-
-	// 获取当前用户ID（从JWT中间件获取）
-	userID, exists := c.Get("user_id")
-	if !exists {
-		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
-		return
-	}
-
-	storage := model.CloudStorage{
-		UserID:             userID.(uint),
-		StorageType:        req.StorageType,
-		StorageName:        req.StorageName,
-		AppID:              req.AppID,
-		AppSecret:          req.AppSecret,
-		AccessToken:        req.AccessToken,
-		RefreshToken:       req.RefreshToken,
-		Cookie:             req.Cookie,
-		Config:             req.Config,
-		SortOrder:          req.SortOrder,
-		Match302AccessMode: model.NormalizeMatch302AccessMode(req.Match302AccessMode),
-		Match302MaxActive:  req.Match302MaxActive,
-		Match302CacheMaxGB: req.Match302CacheMaxGB,
-		Status:             model.StatusActive,
-		AutoRefresh:        true,
-		RefreshBeforeMin:   30,
-	}
-	if req.AutoRefresh != nil {
-		storage.AutoRefresh = *req.AutoRefresh
-	}
-	if req.RefreshBeforeMin != nil {
-		storage.RefreshBeforeMin = *req.RefreshBeforeMin
-	}
-	storage.NormalizeMatch302Defaults()
-
-	if err := database.DB.Create(&storage).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "创建存储配置失败")
-		return
-	}
-
-	h.success(c, storage, "创建存储配置成功")
-}
-
 // GetCloudStorages 获取网盘存储列表
 func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
+	userID := c.GetUint("user_id")
+	if userID == 0 {
 		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
 		return
 	}
 
 	var storages []model.CloudStorage
-	query := database.DB.Where("user_id = ?", userID.(uint))
+	query := database.DB.WithContext(c.Request.Context()).Where("user_id = ?", userID)
 
 	// 分页参数
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -153,158 +85,37 @@ func (h *CloudStorageHandler) GetCloudStorages(c *gin.Context) {
 	}, "获取存储列表成功")
 }
 
-// GetCloudStorage 获取单个网盘存储配置
+// GetCloudStorage 获取当前用户的单条存储记录。
 func (h *CloudStorageHandler) GetCloudStorage(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "无效的ID")
-		return
+	if storage, ok := h.loadStorage(c); ok {
+		h.success(c, storage, "获取存储配置成功")
 	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
-		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
-		return
-	}
-
-	var storage model.CloudStorage
-	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
-		First(&storage).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
-			return
-		}
-		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
-		return
-	}
-
-	h.success(c, storage, "获取存储配置成功")
 }
 
-// UpdateCloudStorage 更新网盘存储配置
-func (h *CloudStorageHandler) UpdateCloudStorage(c *gin.Context) {
+// loadStorage 统一校验有效 ID、当前用户与记录归属，查询响应请求取消。
+func (h *CloudStorageHandler) loadStorage(c *gin.Context) (*model.CloudStorage, bool) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err != nil {
+	if err != nil || id == 0 {
 		h.error(c, http.StatusBadRequest, 400, "无效的ID")
-		return
+		return nil, false
 	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
+	userID := c.GetUint("user_id")
+	if userID == 0 {
 		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
-		return
+		return nil, false
 	}
 
 	var storage model.CloudStorage
-	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
-		First(&storage).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
-			return
+	if err := database.DB.WithContext(c.Request.Context()).Where("id = ? AND user_id = ?", id, userID).First(&storage).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			h.error(c, http.StatusNotFound, 404, "存储配置不存在或无权限")
+		} else {
+			h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
 		}
-		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
-		return
+		return nil, false
 	}
 
-	var req struct {
-		StorageName        *string    `json:"storage_name"`
-		AppID              *string    `json:"app_id"`
-		AppSecret          *string    `json:"app_secret"`
-		AccessToken        *string    `json:"access_token"`
-		RefreshToken       *string    `json:"refresh_token"`
-		Cookie             *string    `json:"cookie"`
-		TokenExpiresAt     *time.Time `json:"token_expires_at"`
-		RefreshExpiresAt   *time.Time `json:"refresh_expires_at"`
-		AutoRefresh        *bool      `json:"auto_refresh"`
-		RefreshBeforeMin   *int       `json:"refresh_before_min"`
-		Status             *string    `json:"status"`
-		Config             *string    `json:"config"`
-		SortOrder          *int       `json:"sort_order"`
-		Match302AccessMode *string    `json:"match302_access_mode"`
-		Match302MaxActive  *int       `json:"match302_max_active"`
-		Match302CacheMaxGB *int64     `json:"match302_cache_max_gb"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		h.error(c, http.StatusBadRequest, 400, err.Error())
-		return
-	}
-
-	// 构建更新数据
-	updates := make(map[string]interface{})
-	if req.StorageName != nil {
-		updates["storage_name"] = *req.StorageName
-	}
-	if req.AppID != nil {
-		updates["app_id"] = *req.AppID
-	}
-	if req.AppSecret != nil {
-		updates["app_secret"] = *req.AppSecret
-	}
-	if req.AccessToken != nil {
-		updates["access_token"] = *req.AccessToken
-	}
-	if req.RefreshToken != nil {
-		updates["refresh_token"] = *req.RefreshToken
-	}
-	if req.Cookie != nil {
-		updates["cookie"] = *req.Cookie
-	}
-	if req.TokenExpiresAt != nil {
-		updates["token_expires_at"] = *req.TokenExpiresAt
-	}
-	if req.RefreshExpiresAt != nil {
-		updates["refresh_expires_at"] = *req.RefreshExpiresAt
-	}
-	if req.AutoRefresh != nil {
-		updates["auto_refresh"] = *req.AutoRefresh
-	}
-	if req.RefreshBeforeMin != nil {
-		updates["refresh_before_min"] = *req.RefreshBeforeMin
-	}
-	if req.Status != nil {
-		updates["status"] = *req.Status
-	}
-	if req.Config != nil {
-		updates["config"] = *req.Config
-	}
-	if req.SortOrder != nil {
-		updates["sort_order"] = *req.SortOrder
-	}
-	if req.Match302AccessMode != nil {
-		if !model.IsValidMatch302AccessMode(*req.Match302AccessMode) {
-			h.error(c, http.StatusBadRequest, 400, "Match302 访问方式无效")
-			return
-		}
-		updates["match302_access_mode"] = model.NormalizeMatch302AccessMode(*req.Match302AccessMode)
-	}
-	if req.Match302MaxActive != nil {
-		maxActive := *req.Match302MaxActive
-		if maxActive < 0 {
-			maxActive = 0
-		}
-		updates["match302_max_active"] = maxActive
-	}
-	if req.Match302CacheMaxGB != nil {
-		cacheMaxGB := *req.Match302CacheMaxGB
-		if cacheMaxGB < 0 {
-			cacheMaxGB = 0
-		}
-		updates["match302_cache_max_gb"] = cacheMaxGB
-	}
-
-	// 更新字段
-	if err := database.DB.Model(&storage).Updates(updates).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "更新存储配置失败")
-		return
-	}
-
-	// 重新查询更新后的数据
-	if err := database.DB.Where("id = ?", id).First(&storage).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "获取更新后的数据失败")
-		return
-	}
-
-	h.success(c, storage, "更新存储配置成功")
+	return &storage, true
 }
 
 // DeleteCloudStorage 删除网盘存储配置
@@ -337,86 +148,18 @@ func (h *CloudStorageHandler) DeleteCloudStorage(c *gin.Context) {
 	h.success(c, nil, "删除成功")
 }
 
-// RefreshToken 刷新存储令牌
+// RefreshToken 保留旧路由，但不再将未执行的令牌刷新报告为成功。
 func (h *CloudStorageHandler) RefreshToken(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "无效的ID")
-		return
+	if _, ok := h.loadStorage(c); ok {
+		h.error(c, http.StatusNotImplemented, 501, "手动令牌刷新尚未实现，请使用重新授权")
 	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
-		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
-		return
-	}
-
-	var storage model.CloudStorage
-	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
-		First(&storage).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
-			return
-		}
-		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
-		return
-	}
-
-	// TODO: 这里需要根据不同的存储类型实现具体的令牌刷新逻辑
-	// 示例：根据存储类型调用相应的API刷新令牌
-	switch storage.StorageType {
-	case model.StorageType115Open:
-		// 调用115的令牌刷新API
-		// newAccessToken, newRefreshToken, expiresIn := refresh115Token(storage.RefreshToken)
-		// storage.UpdateTokens(newAccessToken, newRefreshToken, expiresIn)
-	default:
-		h.error(c, http.StatusBadRequest, 400, "不支持的存储类型")
-		return
-	}
-
-	// 更新最后刷新时间
-	now := time.Now()
-	storage.LastRefreshAt = &now
-
-	if err := database.DB.Save(&storage).Error; err != nil {
-		h.error(c, http.StatusInternalServerError, 500, "更新令牌失败")
-		return
-	}
-
-	h.success(c, storage, "令牌刷新成功")
 }
 
-// TestConnection 测试存储连接
+// TestConnection 保留旧路由，不以空实现伪造连接测试成功。
 func (h *CloudStorageHandler) TestConnection(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 32)
-	if err != nil {
-		h.error(c, http.StatusBadRequest, 400, "无效的ID")
-		return
+	if _, ok := h.loadStorage(c); ok {
+		h.error(c, http.StatusNotImplemented, 501, "连接测试尚未实现")
 	}
-
-	userID, exists := c.Get("user_id")
-	if !exists {
-		h.error(c, http.StatusUnauthorized, 401, "用户未认证")
-		return
-	}
-
-	var storage model.CloudStorage
-	if err := database.DB.Where("id = ? AND user_id = ?", id, userID.(uint)).
-		First(&storage).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
-			h.error(c, http.StatusNotFound, 404, "存储配置不存在")
-			return
-		}
-		h.error(c, http.StatusInternalServerError, 500, "获取存储配置失败")
-		return
-	}
-
-	// TODO: 实现具体的连接测试逻辑
-	// 这里应该根据存储类型调用相应的API测试连接
-
-	h.success(c, gin.H{
-		"status": "success",
-	}, "连接测试成功")
 }
 
 // GetStorageTypes 获取支持的存储类型

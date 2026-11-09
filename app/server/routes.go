@@ -231,6 +231,7 @@ func (s *Server) setupRoutes() {
 			// 额外功能
 			storage.POST("/:id/refresh", cloudStorageHandler.RefreshToken)
 			storage.POST("/:id/test", cloudStorageHandler.TestConnection)
+			storage.POST("/:id/account-info", cloudStorageHandler.RefreshAccountInfo)
 			storage.GET("/:id/files", cloudFolderMoveHandler.Browse)
 			storage.POST("/:id/folder-move", cloudFolderMoveHandler.Move)
 			storage.GET("/types", cloudStorageHandler.GetStorageTypes)
