@@ -211,17 +211,18 @@ func (c TelegramConfig) IsZero() bool {
 }
 
 type EmbyConfig struct {
-	Enabled             bool                        `mapstructure:"enabled" json:"enabled"`                               // 是否启用 EMBY 服务
-	URL                 string                      `mapstructure:"url" json:"url"`                                       // EMBY 服务器地址
-	APIKey              string                      `mapstructure:"api_key" json:"api_key"`                               // EMBY API 密钥
-	AdminUserID         string                      `mapstructure:"admin_user_id" json:"admin_user_id"`                   // EMBY 管理员用户 ID
-	CacheTime           int                         `mapstructure:"cache_time" json:"cache_time"`                         // API 请求超时时间（秒）
-	AddCurrentMediaInfo bool                        `mapstructure:"add_current_media_info" json:"add_current_media_info"` // 是否在开始播放时补充当前媒体信息
-	AddNextMediaInfo    bool                        `mapstructure:"add_next_media_info" json:"add_next_media_info"`       // 是否添加下一部媒体信息
-	RunProxyPort        int                         `mapstructure:"run_proxy_port" json:"run_proxy_port"`                 // 运行 Emby 代理端口
-	Security            LoginSecurityConfig         `mapstructure:"security" json:"security"`                             // Emby 登录防爆破配置
-	Cover               EmbyCoverConfig             `mapstructure:"cover" json:"cover"`                                   // 媒体库封面生成器配置
-	ImageOptimization   EmbyImageOptimizationConfig `mapstructure:"image_optimization" json:"image_optimization"`         // Emby 图片尺寸与质量控制
+	Enabled                 bool                        `mapstructure:"enabled" json:"enabled"`                                       // 是否启用 EMBY 服务
+	URL                     string                      `mapstructure:"url" json:"url"`                                               // EMBY 服务器地址
+	APIKey                  string                      `mapstructure:"api_key" json:"api_key"`                                       // EMBY API 密钥
+	AdminUserID             string                      `mapstructure:"admin_user_id" json:"admin_user_id"`                           // EMBY 管理员用户 ID
+	CacheTime               int                         `mapstructure:"cache_time" json:"cache_time"`                                 // API 请求超时时间（秒）
+	BoundAccountWaitSeconds int                         `mapstructure:"bound_account_wait_seconds" json:"bound_account_wait_seconds"` // 指定账号秒传等待上限（秒）
+	AddCurrentMediaInfo     bool                        `mapstructure:"add_current_media_info" json:"add_current_media_info"`         // 是否在开始播放时补充当前媒体信息
+	AddNextMediaInfo        bool                        `mapstructure:"add_next_media_info" json:"add_next_media_info"`               // 是否添加下一部媒体信息
+	RunProxyPort            int                         `mapstructure:"run_proxy_port" json:"run_proxy_port"`                         // 运行 Emby 代理端口
+	Security                LoginSecurityConfig         `mapstructure:"security" json:"security"`                                     // Emby 登录防爆破配置
+	Cover                   EmbyCoverConfig             `mapstructure:"cover" json:"cover"`                                           // 媒体库封面生成器配置
+	ImageOptimization       EmbyImageOptimizationConfig `mapstructure:"image_optimization" json:"image_optimization"`                 // Emby 图片尺寸与质量控制
 }
 
 // LoginSecurityConfig 控制登录接口的失败计数与临时封禁。
@@ -406,6 +407,7 @@ func Save(c *Config) error {
 	viper.Set("emby.api_key", c.Emby.APIKey)
 	viper.Set("emby.admin_user_id", c.Emby.AdminUserID)
 	viper.Set("emby.cache_time", c.Emby.CacheTime)
+	viper.Set("emby.bound_account_wait_seconds", c.Emby.BoundAccountWaitSeconds)
 	viper.Set("emby.add_current_media_info", c.Emby.AddCurrentMediaInfo)
 	viper.Set("emby.add_next_media_info", c.Emby.AddNextMediaInfo)
 	viper.Set("emby.run_proxy_port", c.Emby.RunProxyPort)
@@ -535,6 +537,7 @@ func setDefaults() {
 	viper.SetDefault("jwt.issuer", "film-fusion")
 
 	// Emby 默认配置
+	viper.SetDefault("emby.bound_account_wait_seconds", DefaultBoundAccountWaitSeconds)
 	viper.SetDefault("emby.add_current_media_info", true)
 	setDefaultLoginSecurity("emby.security")
 	viper.SetDefault("emby.image_optimization.enabled", false)
@@ -910,6 +913,9 @@ func validateConfig(config *Config) error {
 		return err
 	}
 	if err := ValidateEmbySecurity(config.Emby.Security); err != nil {
+		return err
+	}
+	if err := ValidateBoundAccountWaitSeconds(config.Emby.BoundAccountWaitSeconds); err != nil {
 		return err
 	}
 	if err := ValidateNotifications(config.Notifications); err != nil {

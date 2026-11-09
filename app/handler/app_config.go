@@ -95,6 +95,7 @@ func (h *AppConfigHandler) GetPublic(c *gin.Context) {
 // Get GET /api/app-config 返回当前配置（密钥脱敏，仅返回是否已设置）。
 func (h *AppConfigHandler) Get(c *gin.Context) {
 	v := *h.cfg // 浅拷贝；仅清空字符串密钥，不影响原配置
+	v.Emby.BoundAccountWaitSeconds = v.Emby.EffectiveBoundAccountWaitSeconds()
 	v.Site = h.currentSiteConfig()
 	v.Server.Cookie115DefaultApp, v.Server.Web115UserAgent = h.current115Settings()
 	v.MediaRecognition = h.currentMediaRecognitionSettings()
@@ -129,6 +130,7 @@ func (h *AppConfigHandler) Get(c *gin.Context) {
 type appConfigUpdatePayload struct {
 	Config                       config.Config `json:"config"`
 	web115UserAgentFieldPresent  bool
+	boundAccountWaitFieldPresent bool
 	mediaRecognitionFieldPresent bool
 	notificationsFieldPresent    bool
 	telegramFieldPresent         bool
@@ -150,6 +152,7 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 
 	var fields struct {
 		Server           map[string]json.RawMessage `json:"server"`
+		Emby             map[string]json.RawMessage `json:"emby"`
 		MediaRecognition json.RawMessage            `json:"media_recognition"`
 		Notifications    json.RawMessage            `json:"notifications"`
 		Telegram         json.RawMessage            `json:"telegram"`
@@ -158,6 +161,7 @@ func (p *appConfigUpdatePayload) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	_, p.web115UserAgentFieldPresent = fields.Server["web_115_user_agent"]
+	_, p.boundAccountWaitFieldPresent = fields.Emby["bound_account_wait_seconds"]
 	p.mediaRecognitionFieldPresent = len(fields.MediaRecognition) > 0 && string(fields.MediaRecognition) != "null"
 	p.notificationsFieldPresent = len(fields.Notifications) > 0 && string(fields.Notifications) != "null"
 	p.telegramFieldPresent = len(fields.Telegram) > 0 && string(fields.Telegram) != "null"
@@ -172,6 +176,14 @@ func (h *AppConfigHandler) Update(c *gin.Context) {
 		return
 	}
 	in := payload.Config
+	// 旧版前端未携带等待时长时保留现值；显式传入 0 等无效值仍需报错。
+	if !payload.boundAccountWaitFieldPresent {
+		in.Emby.BoundAccountWaitSeconds = h.cfg.Emby.EffectiveBoundAccountWaitSeconds()
+	}
+	if err := config.ValidateBoundAccountWaitSeconds(in.Emby.BoundAccountWaitSeconds); err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 	current115App, current115UserAgent := h.current115Settings()
 	currentMediaRecognition := h.currentMediaRecognitionSettings()
 	if strings.TrimSpace(in.Server.Cookie115DefaultApp) == "" {

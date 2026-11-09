@@ -72,6 +72,7 @@ emby:
   run_proxy_port: 8097
   api_key: ""
   cache_time: 30 # 缓存直链时间，单位：分钟
+  bound_account_wait_seconds: 10 # 指定账号秒传等待上限（1–20 秒），超时按正常路由回退
   # EMBY 管理员用户 ID, add_next_media_info 为 false 时可不配置
   admin_user_id: ""
   # 开始播放时同步补充当前媒体的播放信息（提前预热直链/缓存），关闭可降低 Emby 压力

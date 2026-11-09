@@ -63,6 +63,10 @@ func NewEmbyProxyHandler(cfg *config.Config, log *logger.Logger, loginProtection
 		// 添加自定义逻辑，比如修改请求头等
 		req.Header.Set("X-Forwarded-Proto", "http")
 		req.Header.Set("X-Forwarded-Host", req.Host)
+		if isEmbyAuthenticationRequest(req) {
+			// 让 Transport 自动解压响应，避免沿用浏览器的 br/zstd 编码。
+			req.Header.Del("Accept-Encoding")
+		}
 	}
 
 	// 错误处理
@@ -156,6 +160,7 @@ func (h *EmbyProxyHandler) modifyResponse(resp *http.Response) error {
 		attempt, _ := resp.Request.Context().Value(embyLoginAttemptContextKey{}).(*service.EmbyLoginAttempt)
 		h.loginProtection.ObserveResponse(attempt, resp.StatusCode)
 	}
+	h.observeEmbyIdentityResponse(resp)
 	if resp == nil || resp.Request == nil || !embyhelper.IsPlaybackInfoURI(resp.Request.RequestURI) {
 		return nil
 	}

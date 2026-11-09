@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"film-fusion/app/config"
 	"film-fusion/app/database"
 	"film-fusion/app/model"
 	"film-fusion/app/store/embyplayback"
@@ -27,6 +28,8 @@ type BalancePlaybackRequest struct {
 	// ForcedStorageID 非 0 时表示该 Emby 账号被绑定到指定 115 存储，强制走该存储播放，
 	// 不依赖 Match302 的负载均衡开关；不可用/并发满/秒传未就绪时回退到正常流程。
 	ForcedStorageID uint
+	// ForcedWaitSeconds 是本次指定账号秒传等待上限；未传时使用系统默认 10 秒。
+	ForcedWaitSeconds int
 }
 
 type BalancePlaybackDecision struct {
@@ -52,13 +55,24 @@ type balanceCandidate struct {
 }
 
 func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req BalancePlaybackRequest) (result *BalancePlaybackDecision, resultErr error) {
-	// 观察最终决策，所有原有返回值和兜底分支保持不变，不打印可能含上游凭据的错误文本。
+	var bindingFallbackReason string
+	// 保留指定账号回退的起因，避免被后续正常路由的原因覆盖。
 	defer func() {
 		if resultErr != nil {
 			embydebug.Logf(ctx, "account_decision", "result=failed error_type=%T", resultErr)
 			return
 		}
 		if result != nil && result.PlaybackStorage != nil {
+			if bindingFallbackReason != "" {
+				if result.FallbackReason != "" {
+					result.FallbackReason = bindingFallbackReason + "；后续路由：" + result.FallbackReason
+				} else {
+					result.FallbackReason = bindingFallbackReason
+				}
+				if result.IsSourcePlayback {
+					result.Status = "指定账号回退"
+				}
+			}
 			embydebug.Logf(ctx, "account_decision", "result=selected bound_storage=%d actual_storage=%d account_type=%q status=%q has_fallback_reason=%t", req.ForcedStorageID, result.PlaybackStorage.ID, result.AccountType, result.Status, result.FallbackReason != "")
 		}
 	}()
@@ -102,10 +116,12 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 	// Emby 账号绑定：强制走指定 115 存储，不依赖负载均衡开关。
 	// 命中则直接返回；不可用/并发满/秒传未就绪时返回 handled=false，继续走下方正常流程(负载均衡或源播放)。
 	if req.ForcedStorageID != 0 {
-		if decision, handled := s.resolveForcedPlayback(ctx, match, sourceInfo, req, playbackKey); handled {
+		decision, handled, reason := s.resolveForcedPlayback(ctx, match, sourceInfo, req, playbackKey)
+		if handled {
 			return decision, nil
 		}
-		embydebug.Logf(ctx, "binding_fallback", "next=normal_route balance_enabled=%t source_storage=%d", match.BalanceEnabled, match.CloudStorageID)
+		bindingFallbackReason = reason
+		embydebug.Logf(ctx, "binding_fallback", "next=normal_route reason=%q balance_enabled=%t source_storage=%d", reason, match.BalanceEnabled, match.CloudStorageID)
 	}
 
 	if !match.BalanceEnabled {
@@ -240,19 +256,19 @@ func (s *BalanceAssignmentService) ResolvePlayback(ctx context.Context, req Bala
 }
 
 // resolveForcedPlayback 处理 Emby 账号绑定的强制存储播放。
-// 返回 handled=false 表示指定账号不可用/并发满/秒传未就绪，调用方应回退到正常流程。
-func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, req BalancePlaybackRequest, playbackKey string) (*BalancePlaybackDecision, bool) {
+// 返回 handled=false 及原因表示调用方应回退到正常流程，并记录指定账号未被选用的原因。
+func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, match *model.Match302, sourceInfo BalanceSourceFile, req BalancePlaybackRequest, playbackKey string) (*BalancePlaybackDecision, bool, string) {
 	forcedID := req.ForcedStorageID
 	if forcedID == 0 || match.CloudStorage == nil {
 		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=missing_binding_or_source bound_storage=%d", forcedID)
-		return nil, false
+		return nil, false, "指定账号绑定或源账号缺失"
 	}
 
 	// 指定账号即源账号 -> 直接源播放(无需秒传)
 	if forcedID == match.CloudStorageID {
 		if !storageUsable(*match.CloudStorage) {
 			embydebug.Logf(ctx, "bound_storage", "result=unusable reason=source_storage_unusable bound_storage=%d", forcedID)
-			return nil, false
+			return nil, false, "指定账号不可用（绑定源账号）"
 		}
 		embydebug.Logf(ctx, "bound_storage", "result=ready reason=bound_to_source bound_storage=%d", forcedID)
 		return &BalancePlaybackDecision{
@@ -265,31 +281,31 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 			ActualPickCode:   sourceInfo.PickCode,
 			IsSourcePlayback: true,
 			AccountType:      "binding",
-		}, true
+		}, true, ""
 	}
 
 	// 指定账号为其它存储 -> 需要从源账号秒传过去，源账号必须可用
 	if strings.TrimSpace(match.CloudStorage.Cookie) == "" || !storageUsable(*match.CloudStorage) {
 		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=source_not_transferable source_storage=%d has_cookie=%t usable=%t", match.CloudStorageID, strings.TrimSpace(match.CloudStorage.Cookie) != "", storageUsable(*match.CloudStorage))
-		return nil, false
+		return nil, false, "源账号凭据缺失或不可用，无法向指定账号秒传"
 	}
 
 	var forcedStorage model.CloudStorage
 	if err := database.DB.First(&forcedStorage, forcedID).Error; err != nil {
 		embydebug.Logf(ctx, "bound_storage", "result=lookup_failed bound_storage=%d error_type=%T", forcedID, err)
-		return nil, false
+		return nil, false, "指定账号查询失败或不存在"
 	}
 	if forcedStorage.StorageType != model.StorageType115Open ||
 		!storageUsable(forcedStorage) ||
 		strings.TrimSpace(forcedStorage.Cookie) == "" {
 		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=target_not_transferable bound_storage=%d correct_storage_type=%t has_cookie=%t usable=%t access_mode=%q", forcedID, forcedStorage.StorageType == model.StorageType115Open, strings.TrimSpace(forcedStorage.Cookie) != "", storageUsable(forcedStorage), forcedStorage.Match302AccessModeValue())
-		return nil, false
+		return nil, false, "指定账号类型不支持秒传、凭据缺失或不可用"
 	}
 
 	// 指定账号并发已满 -> 回退到正常负载均衡
 	if over, active, limit := s.accountOverLimit(match, forcedStorage.ID, playbackKey); over {
 		embydebug.Logf(ctx, "bound_storage", "result=skipped reason=concurrency_limit bound_storage=%d active=%d limit=%d", forcedID, active, limit)
-		return nil, false
+		return nil, false, "指定账号并发已满"
 	}
 
 	assignment, err := s.ensureForcedAssignment(ctx, match, sourceInfo, forcedStorage, req.EmbyItemID, req.MediaSourceID)
@@ -298,22 +314,42 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 		if s.logger != nil {
 			s.logger.Warnf("[match302-balance] 绑定账号分配失败 match=%d storage=%d err=%v", match.ID, forcedStorage.ID, err)
 		}
-		return nil, false
+		return nil, false, "指定账号秒传任务创建或查询失败"
 	}
 	embydebug.Logf(ctx, "bound_assignment", "result=resolved assignment=%d bound_storage=%d status=%q attempts=%d has_error=%t", assignment.ID, forcedID, assignment.Status, assignment.Attempts, assignment.LastError != "")
 
 	if assignment.Status == model.BalanceAssignmentStatusPending {
 		s.StartTransferAsync(assignment.ID)
 	}
-	if ready := s.waitReady(ctx, assignment.ID, 3*time.Second); ready != nil {
+	waitStarted := time.Now()
+	waitSeconds := req.ForcedWaitSeconds
+	if waitSeconds <= 0 {
+		waitSeconds = config.DefaultBoundAccountWaitSeconds
+	}
+	waitTimeout := time.Duration(waitSeconds) * time.Second
+	ready := s.waitReady(ctx, assignment.ID, waitTimeout)
+	if ready != nil {
 		assignment = ready
 	}
 	embydebug.Logf(ctx, "bound_assignment", "result=wait_complete assignment=%d status=%q has_target_pickcode=%t has_error=%t", assignment.ID, assignment.Status, strings.TrimSpace(assignment.TargetPickcode) != "", assignment.LastError != "")
 
 	if assignment.Status != model.BalanceAssignmentStatusReady || strings.TrimSpace(assignment.TargetPickcode) == "" {
-		embydebug.Logf(ctx, "bound_assignment", "result=skipped reason=transfer_not_ready assignment=%d", assignment.ID)
+		reason := "指定账号秒传未就绪"
+		switch {
+		case ctx.Err() != nil:
+			reason = "指定账号秒传等待被取消"
+		case ready == nil && time.Since(waitStarted) >= waitTimeout:
+			reason = fmt.Sprintf("指定账号秒传等待超时（%d秒），目标文件未就绪", waitSeconds)
+		case ready == nil:
+			reason = "指定账号秒传状态查询失败"
+		case assignment.Status == model.BalanceAssignmentStatusFailed:
+			reason = "指定账号秒传失败"
+		case assignment.Status == model.BalanceAssignmentStatusReady:
+			reason = "指定账号秒传已就绪但目标 pickcode 缺失"
+		}
+		embydebug.Logf(ctx, "bound_assignment", "result=skipped reason=transfer_not_ready fallback_reason=%q assignment=%d wait_timeout_seconds=%d", reason, assignment.ID, waitSeconds)
 		// 秒传未就绪 / 失败 -> 回退到正常流程
-		return nil, false
+		return nil, false, reason
 	}
 
 	s.markPlayed(assignment.ID)
@@ -328,7 +364,7 @@ func (s *BalanceAssignmentService) resolveForcedPlayback(ctx context.Context, ma
 		ActualPickCode:   assignment.TargetPickcode,
 		IsSourcePlayback: false,
 		AccountType:      "binding",
-	}, true
+	}, true, ""
 }
 
 func (s *BalanceAssignmentService) PreheatAssignment(ctx context.Context, req BalancePlaybackRequest) error {

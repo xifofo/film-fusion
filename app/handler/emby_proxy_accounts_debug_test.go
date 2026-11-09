@@ -16,73 +16,101 @@ import (
 	"github.com/patrickmn/go-cache"
 )
 
-type playbackDebugCapture struct {
-	lines []string
-}
+type playbackDebugCapture struct{ lines []string }
 
 func (capture *playbackDebugCapture) Debugf(format string, args ...interface{}) {
 	capture.lines = append(capture.lines, fmt.Sprintf(format, args...))
 }
 
-// 真实 HTTP 模拟接口不支持 /Users/Me 的情况：新日志必须说明状态，并保留会话兜底与缓存。
-func TestEmbyUserDebugRetainsSessionFallbackAndCache(t *testing.T) {
-	var tokenCalls, sessionCalls int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/Users/Me":
-			tokenCalls++
-			if r.Header.Get("X-Emby-Token") != "private-user-token" {
-				t.Error("missing user credential on identity request")
-			}
-			w.WriteHeader(http.StatusNotFound)
-			fmt.Fprint(w, `{"message":"private-response-body"}`)
-		case "/Sessions":
-			sessionCalls++
-			fmt.Fprint(w, `[{"UserId":"user-1","UserName":"private-name","RemoteEndPoint":"192.0.2.1","NowPlayingItem":{"Id":"item-1"}}]`)
-		default:
-			t.Errorf("unexpected request: %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
+func identityTestHandler(t *testing.T, base string) *EmbyProxyHandler {
+	t.Helper()
 	log := logger.New(config.LogConfig{Output: "stdout", Level: "error"})
 	t.Cleanup(func() { _ = log.Close() })
-	h := &EmbyProxyHandler{
-		config:  &config.Config{Emby: config.EmbyConfig{URL: server.URL, APIKey: "private-admin-key"}},
-		logger:  log,
-		goCache: cache.New(cache.DefaultExpiration, 0),
-	}
-	capture := &playbackDebugCapture{}
-	ctx := embydebug.Start(context.Background(), capture)
+	return &EmbyProxyHandler{config: &config.Config{Emby: config.EmbyConfig{URL: base, APIKey: "private-admin-key"}}, logger: log, goCache: cache.New(cache.DefaultExpiration, 0)}
+}
+
+func identityTestContext(token, device string) *gin.Context {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-	c.Request = httptest.NewRequest(http.MethodGet, "/emby/Videos/item-1/stream.mkv", nil).WithContext(ctx)
-	c.Request.Header.Set("X-Emby-Token", "private-user-token")
+	c.Request = httptest.NewRequest(http.MethodGet, "/emby/Videos/same-film/stream.mkv?UserId=forged-user", nil)
+	c.Request.RemoteAddr = "192.0.2.1:1234"
+	c.Request.Header.Set("X-Emby-Token", token)
+	c.Request.Header.Set("X-Emby-Device-Id", device)
+	return c
+}
+
+func TestEmbyUserDebugDeviceLookupAndCache(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/Sessions" {
+			t.Error("must not call /Users/Me")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `[{"DeviceId":"private-device","UserId":"user-1","UserName":"private-name"}]`)
+	}))
+	defer server.Close()
+	h := identityTestHandler(t, server.URL)
+	capture := &playbackDebugCapture{}
+	c := identityTestContext("private-user-token", "private-device")
+	c.Request = c.Request.WithContext(embydebug.Start(context.Background(), capture))
 	for range 2 {
-		if got := h.resolveEmbyUserID(c, "item-1"); got != "user-1" {
-			t.Fatalf("session fallback user = %q", got)
+		if got := h.resolveEmbyUserID(c, "same-film"); got != "user-1" {
+			t.Fatalf("user=%q", got)
 		}
 	}
-	if tokenCalls != 1 || sessionCalls != 1 {
-		t.Fatalf("cache behavior changed: token=%d sessions=%d", tokenCalls, sessionCalls)
+	if calls != 1 {
+		t.Fatalf("session calls=%d", calls)
 	}
-
 	output := strings.Join(capture.lines, "\n")
-	for _, want := range []string{"http_status=404", "next=session_fallback", "method=item", `method=session user_id="user-1"`, "result=cache_hit"} {
+	for _, want := range []string{"http_status=200", "method=device", "method=device_cache"} {
 		if !strings.Contains(output, want) {
 			t.Errorf("missing diagnostic %q", want)
 		}
 	}
-	trace := strings.Fields(capture.lines[0])[2]
-	for _, line := range capture.lines {
-		if !strings.Contains(line, trace) {
-			t.Error("identity stages lost playback trace")
+	for _, secret := range []string{"private-user-token", "private-admin-key", "private-name", "private-device", "192.0.2.1"} {
+		if strings.Contains(output, secret) {
+			t.Errorf("diagnostic leaked %q", secret)
+		}
+		for key := range h.goCache.Items() {
+			if strings.Contains(key, secret) {
+				t.Errorf("cache key leaked %q", secret)
+			}
 		}
 	}
-	for _, secret := range []string{"private-user-token", "private-admin-key", "private-response-body", "private-name", "192.0.2.1"} {
-		if strings.Contains(output, secret) {
-			t.Errorf("debug output leaked %q", secret)
+}
+
+func TestEmbyIdentityDoesNotCacheFailureOrUnresolved(t *testing.T) {
+	for _, status := range []int{200, 401, 500} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			var calls int
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 1 {
+					w.WriteHeader(status)
+					fmt.Fprint(w, `[]`)
+					return
+				}
+				fmt.Fprint(w, `[{"DeviceId":"device","UserId":"user"}]`)
+			}))
+			defer server.Close()
+			h := identityTestHandler(t, server.URL)
+			c := identityTestContext("token", "device")
+			if got := h.resolveEmbyUserID(c, "same-film"); got != "" {
+				t.Fatalf("unexpected identity %q", got)
+			}
+			if got := h.resolveEmbyUserID(c, "same-film"); got != "user" || calls != 2 {
+				t.Fatalf("user=%q calls=%d", got, calls)
+			}
+		})
+	}
+}
+
+func TestEmbyIdentityRequiresTokenAndDevice(t *testing.T) {
+	h := identityTestHandler(t, "http://unused.invalid")
+	for _, pair := range [][2]string{{"", "device"}, {"private-admin-key", "device"}, {"token", ""}} {
+		if got := h.resolveEmbyUserID(identityTestContext(pair[0], pair[1]), "same-film"); got != "" {
+			t.Fatalf("guessed identity %q", got)
 		}
 	}
 }

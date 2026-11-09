@@ -12,7 +12,7 @@ import (
 )
 
 func TestEmbyReadsHonorCallerCancellation(t *testing.T) {
-	for _, kind := range []string{"items", "playback", "scoped-playback", "library", "user-token", "session"} {
+	for _, kind := range []string{"items", "playback", "scoped-playback", "library", "device-session"} {
 		t.Run(kind, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { <-r.Context().Done() }))
 			defer server.Close()
@@ -30,10 +30,8 @@ func TestEmbyReadsHonorCallerCancellation(t *testing.T) {
 				_, err = client.WithContext(ctx).GetPlaybackInfo("1")
 			case "library":
 				_, err = client.WithContext(ctx).FindItemByTmdbID("1", "movie")
-			case "user-token":
-				_, err = GetUserByTokenContext(ctx, &config.Config{Emby: config.EmbyConfig{URL: server.URL}}, "user-token")
-			case "session":
-				_, err = client.WithContext(ctx).GetUserBySession("1", "127.0.0.1")
+			case "device-session":
+				_, err = GetUserByDeviceContext(ctx, &config.Config{Emby: config.EmbyConfig{URL: server.URL}}, "user-token", "device-1")
 			}
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("cancellation not propagated: %v", err)

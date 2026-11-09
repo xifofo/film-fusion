@@ -1,8 +1,8 @@
 package handler
 
 import (
-	"context"
 	"errors"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -50,91 +50,44 @@ func (h *EmbyProxyHandler) resolveBoundStorageID(c *gin.Context, itemID string) 
 	return binding.CloudStorageID
 }
 
-// resolveEmbyUserID 解析当前播放用户ID：
-// 方案A 用请求 token 调 /Users/Me；A 取不到时用方案B 通过 /Sessions 反查兜底。
+// resolveEmbyUserID 优先使用真实登录响应建立的 Token 映射；已有登录按设备会话定位。
+// 不调用 Emby 不支持的 /Users/Me，也不使用共享 IP、影片或客户端自报 UserId 猜测身份。
 func (h *EmbyProxyHandler) resolveEmbyUserID(c *gin.Context, itemID string) string {
 	ctx := c.Request.Context()
-	if id := h.resolveEmbyUserIDByToken(ctx, embyUserTokenFromRequest(c)); id != "" {
-		embydebug.Logf(ctx, "user_identity", "method=token user_id=%q", id)
+	token := embyUserTokenFromRequest(c)
+	if token == "" || token == strings.TrimSpace(h.config.Emby.APIKey) {
+		embydebug.Logf(ctx, "user_identity", "result=skipped reason=missing_user_token")
+		return ""
+	}
+	if id := h.cachedEmbyUserID(h.embyIdentityKey("login", token)); id != "" {
+		embydebug.Logf(ctx, "user_identity", "method=login_token user_id=%q", id)
 		return id
 	}
-	if ctx.Err() != nil {
-		embydebug.Logf(ctx, "user_identity", "result=cancelled")
+	deviceID := embyDeviceIDFromRequest(c.Request)
+	if deviceID == "" {
+		embydebug.Logf(ctx, "user_identity", "result=unresolved reason=missing_device_id")
 		return ""
 	}
-	embydebug.Logf(ctx, "user_identity", "result=token_unresolved next=session_fallback")
-	id := h.resolveEmbyUserIDBySession(ctx, itemID, c.ClientIP())
-	embydebug.Logf(ctx, "user_identity", "method=session user_id=%q resolved=%t", id, id != "")
-	return id
-}
-
-// resolveEmbyUserIDByToken 方案A：用请求 token 调 /Users/Me，结果按 token 缓存。
-func (h *EmbyProxyHandler) resolveEmbyUserIDByToken(ctx context.Context, token string) string {
-	token = strings.TrimSpace(token)
-	if token == "" {
-		embydebug.Logf(ctx, "user_token", "result=skipped reason=missing_token")
-		return ""
+	key := h.embyIdentityKey("device", token, deviceID)
+	if id := h.cachedEmbyUserID(key); id != "" {
+		embydebug.Logf(ctx, "user_identity", "method=device_cache user_id=%q", id)
+		return id
 	}
-	// token 与管理员 APIKey 相同则无用户上下文，跳过(交给方案B)
-	if strings.TrimSpace(h.config.Emby.APIKey) != "" && token == strings.TrimSpace(h.config.Emby.APIKey) {
-		embydebug.Logf(ctx, "user_token", "result=skipped reason=admin_api_key")
-		return ""
-	}
-
-	cacheKey := "emby-user-id:token:" + token
-	if v, found := h.goCache.Get(cacheKey); found {
-		if s, ok := v.(string); ok {
-			embydebug.Logf(ctx, "user_token", "result=cache_hit user_id=%q resolved=%t", s, s != "")
-			return s
-		}
-	}
-	embydebug.Logf(ctx, "user_token", "result=cache_miss")
-	user, err := embyhelper.GetUserByTokenContext(ctx, h.config, token)
+	user, err := embyhelper.GetUserByDeviceContext(ctx, h.config, token, deviceID)
 	if err != nil {
-		h.logger.Warnf("[EMBY PROXY] 解析 Emby 用户(token)失败: %v", err)
-		return "" // 出错不缓存，下次重试
-	}
-	userID := ""
-	if user != nil {
-		userID = user.ID
-	}
-	h.goCache.Set(cacheKey, userID, h.userResolveCacheTTL())
-	embydebug.Logf(ctx, "user_token", "result=lookup_complete user_id=%q resolved=%t", userID, userID != "")
-	return userID
-}
-
-// resolveEmbyUserIDBySession 方案B：通过 /Sessions 反查正在播放的用户(兜底)，按 item+IP 短时缓存。
-func (h *EmbyProxyHandler) resolveEmbyUserIDBySession(ctx context.Context, itemID, remoteIP string) string {
-	itemID = strings.TrimSpace(itemID)
-	remoteIP = strings.TrimSpace(remoteIP)
-	if itemID == "" && remoteIP == "" {
-		embydebug.Logf(ctx, "user_session", "result=skipped reason=no_item_or_ip")
+		embydebug.Logf(ctx, "user_identity", "method=device result=failed error_type=%T", err)
 		return ""
 	}
-
-	cacheKey := "emby-user-id:session:" + itemID + "|" + remoteIP
-	if v, found := h.goCache.Get(cacheKey); found {
-		if s, ok := v.(string); ok {
-			embydebug.Logf(ctx, "user_session", "result=cache_hit user_id=%q resolved=%t", s, s != "")
-			return s
-		}
-	}
-	embydebug.Logf(ctx, "user_session", "result=cache_miss item_id=%q has_remote_ip=%t", itemID, remoteIP != "")
-	client := embyhelper.New(h.config)
-	defer client.Close()
-	user, err := client.WithContext(ctx).GetUserBySession(itemID, remoteIP)
-	if err != nil {
-		h.logger.Warnf("[EMBY PROXY] 解析 Emby 用户(session)失败: %v", err)
+	if user == nil || strings.TrimSpace(user.ID) == "" {
+		embydebug.Logf(ctx, "user_identity", "method=device result=unresolved")
 		return ""
 	}
-	userID := ""
-	if user != nil {
-		userID = user.ID
+	// 设备识别仅短时缓存到 Token+DeviceId，不能升级为长期 Token 身份映射。
+	if h.goCache != nil {
+		h.goCache.Set(key, user.ID, 15*time.Second)
 	}
-	// 会话状态会变化，命中/未命中都只短时间缓存
-	h.goCache.Set(cacheKey, userID, 60*time.Second)
-	embydebug.Logf(ctx, "user_session", "result=lookup_complete user_id=%q resolved=%t", userID, userID != "")
-	return userID
+	embydebug.Logf(ctx, "user_identity", "method=device user_id=%q", user.ID)
+	return user.ID
 }
 
 func (h *EmbyProxyHandler) userResolveCacheTTL() time.Duration {
@@ -150,15 +103,22 @@ var authTokenRegex = regexp.MustCompile(`(?i)Token="?([^",\s]+)"?`)
 
 // embyUserTokenFromRequest 从请求中提取 Emby 用户 token(兼容 header / Authorization / query)。
 func embyUserTokenFromRequest(c *gin.Context) string {
-	if v := strings.TrimSpace(c.GetHeader("X-Emby-Token")); v != "" {
+	return embyTokenFromHTTPRequest(c.Request)
+}
+
+func embyTokenFromHTTPRequest(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if v := strings.TrimSpace(req.Header.Get("X-Emby-Token")); v != "" {
 		return v
 	}
-	if v := strings.TrimSpace(c.GetHeader("X-MediaBrowser-Token")); v != "" {
+	if v := strings.TrimSpace(req.Header.Get("X-MediaBrowser-Token")); v != "" {
 		return v
 	}
 	// 标准头：Authorization: MediaBrowser Token="xxx" / X-Emby-Authorization
 	for _, header := range []string{"Authorization", "X-Emby-Authorization"} {
-		if raw := strings.TrimSpace(c.GetHeader(header)); raw != "" {
+		if raw := strings.TrimSpace(req.Header.Get(header)); raw != "" {
 			if m := authTokenRegex.FindStringSubmatch(raw); len(m) == 2 {
 				if token := strings.TrimSpace(m[1]); token != "" {
 					return token
@@ -166,7 +126,7 @@ func embyUserTokenFromRequest(c *gin.Context) string {
 			}
 		}
 	}
-	query := c.Request.URL.Query()
+	query := req.URL.Query()
 	if v := strings.TrimSpace(query.Get("X-Emby-Token")); v != "" {
 		return v
 	}

@@ -110,6 +110,8 @@ func (h *EmbyProxyHandler) proxyPlay(c *gin.Context) (target string, entry embyp
 		UserAgent:       c.Request.UserAgent(),
 		RemoteIP:        c.ClientIP(),
 		ForcedStorageID: forcedStorageID,
+		// 每次请求读取共享配置，系统设置保存后对新的播放请求立即生效。
+		ForcedWaitSeconds: h.config.Emby.EffectiveBoundAccountWaitSeconds(),
 	}
 	decision, err := h.balanceSvc.ResolvePlayback(embydebug.Copy(context.Background(), ctx), playbackReq)
 	if err != nil {
