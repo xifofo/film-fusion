@@ -70,19 +70,11 @@ func PreviewMediaDirectoryMerge(db *gorm.DB, userID, targetID, mappingID uint) (
 	if strings.TrimRight(target.ContentPrefix, "/") != strings.TrimRight(pathhelper.SafeFilePathJoin(mapping.ContentPrefix, contentMount), "/") {
 		return nil, fmt.Errorf("STRM 内容前缀不等价，不能无损合并")
 	}
-	// 整理预览和恢复任务的快照不可重写；有未完成任务时拒绝合并，先完成或取消任务。
-	for _, table := range []string{"organize_plans", "organize_preview_tasks", "organize_upgrade_jobs"} {
-		if !db.Migrator().HasTable(table) {
-			continue
-		}
-		var count int64
-		if err := db.Table(table).Where("cloud_directory_id IN ? AND status NOT IN ?", []uint{targetID, mappingID}, []string{"completed", "applied", "cancelled", "canceled"}).Count(&count).Error; err != nil {
-			return nil, err
-		}
-		if count > 0 {
-			return nil, fmt.Errorf("目录仍有未完成的整理预览或恢复任务，请先处理任务后合并")
-		}
+	// 两侧都检查；历史快照保留原值，未完成的计划和恢复任务仍阻止合并。
+	if err := checkMediaDirectoryOrganizeTasks(db, []uint{targetID, mappingID}); err != nil {
+		return nil, err
 	}
+
 	data, err := json.Marshal([]model.MediaDirectory{target, mapping})
 	if err != nil {
 		return nil, err

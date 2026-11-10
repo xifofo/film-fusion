@@ -66,19 +66,8 @@ func CheckMediaDirectoryReferences(db *gorm.DB, directory model.MediaDirectory) 
 			}
 		}
 	}
-	for _, table := range []string{"organize_plans", "organize_preview_tasks", "organize_upgrade_jobs"} {
-		if !db.Migrator().HasTable(table) {
-			continue
-		}
-		var count int64
-		if err := db.Table(table).Where("cloud_directory_id = ? AND status NOT IN ?", directory.ID, []string{"completed", "applied", "cancelled", "canceled"}).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
-			return fmt.Errorf("该媒体目录仍有关联的整理预览或恢复任务，请先处理任务")
-		}
-	}
-	return nil
+
+	return checkMediaDirectoryOrganizeTasks(db, []uint{directory.ID})
 }
 
 func directoryJSONReferences(raw string, id uint) bool {
