@@ -227,6 +227,21 @@ func (h *EmbyWatchHandler) Summary(c *gin.Context) {
 	h.success(c, res, "获取总览成功")
 }
 
+// Overview GET /api/emby-watch/overview 跨用户总览
+// 参数：start_date/end_date 为闭区间 YYYY-MM-DD（可省略），emby_user_id 为空表示全部被统计用户。
+func (h *EmbyWatchHandler) Overview(c *gin.Context) {
+	res, err := h.svc.Overview(service.WatchOverviewParams{
+		EmbyUserID: strings.TrimSpace(c.Query("emby_user_id")),
+		StartDate:  c.Query("start_date"),
+		EndDate:    c.Query("end_date"),
+	})
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
+	h.success(c, res, "获取观影总览成功")
+}
+
 // AnnualReport GET /api/emby-watch/annual-report 年度报告
 func (h *EmbyWatchHandler) AnnualReport(c *gin.Context) {
 	year, _ := strconv.Atoi(c.Query("year"))

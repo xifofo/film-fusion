@@ -492,6 +492,7 @@ func (s *Server) setupRoutes() {
 			embyWatch.GET("/gallery", embyWatchHandler.Gallery)
 			embyWatch.GET("/calendar", embyWatchHandler.Calendar)
 			embyWatch.GET("/summary", embyWatchHandler.Summary)
+			embyWatch.GET("/overview", embyWatchHandler.Overview)
 			embyWatch.GET("/annual-report", embyWatchHandler.AnnualReport)
 			embyWatch.GET("/annual-report/share-image", embyWatchHandler.AnnualShareImage)
 			embyWatch.GET("/image", embyWatchHandler.Image)
