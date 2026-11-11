@@ -268,6 +268,7 @@ func (s *Server) setupRoutes() {
 			directories.POST("/:id/strm/replace", mediaDirectoryHandler.ReplaceStrmContent)
 			directories.GET("/:id/browser", cloudBrowserHandler.Browse)
 			directories.POST("/:id/browser/strm", cloudBrowserHandler.GenerateSTRM)
+			directories.POST("/:id/browser/strm/preview", cloudBrowserHandler.PreviewSTRM)
 			directories.GET("/:id/browser/jobs", cloudBrowserHandler.ActiveJob)
 			directories.GET("/:id/browser/jobs/:job_id", cloudBrowserHandler.JobStatus)
 			directories.DELETE("/:id/browser/jobs/:job_id", cloudBrowserHandler.CancelJob)

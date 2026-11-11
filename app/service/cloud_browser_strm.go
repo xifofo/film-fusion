@@ -206,41 +206,33 @@ func cloudBrowserSTRMPaths(config *model.MediaDirectory, depth int, ancestry []C
 	return parts, filepath.Clean(strings.TrimSpace(config.SavePath)), localRelative, nil
 }
 
-// writeSTRM is deliberately local-only. The enclosing job holds the organize
-// storage lock; invoking StrmService here could perform hidden 115 lookups.
-func (s *CloudBrowserService) writeSTRM(ctx context.Context, configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) CloudBrowserSTRMItemResult {
-	result := CloudBrowserSTRMItemResult{FileID: item.FileID, Name: item.Name, Status: "failed"}
-	fail := func(message string) CloudBrowserSTRMItemResult { result.Message = message; return result }
-	if err := ctx.Err(); err != nil {
-		return fail("STRM 生成已取消或超时")
-	}
+// cloudBrowserSTRMPlan is the local target and content for one cloud file.
+// Generation and preview share it so a preview always matches what is written.
+type cloudBrowserSTRMPlan struct {
+	config    *model.MediaDirectory
+	root      string
+	relative  string
+	localPath string
+	content   string
+}
+
+// planCloudBrowserSTRM is pure: it touches neither the provider nor the local
+// filesystem. A non-empty skip reason means the configuration excludes the file;
+// an error means the selection or mapping is unsafe.
+func planCloudBrowserSTRM(configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) (*cloudBrowserSTRMPlan, string, error) {
 	if !item.IsFile || len(ancestry) == 0 || item.ParentID != ancestry[len(ancestry)-1].ID {
-		return fail("文件不属于已确认的目录，已停止生成 STRM")
+		return nil, "", errors.New("文件不属于已确认的目录，已停止生成 STRM")
 	}
 	config, depth, err := cloudBrowserMatchDirectory(configs, ancestry)
 	if err != nil {
-		return fail(err.Error())
+		return nil, "", err
 	}
 	if reason := cloudBrowserSTRMUnavailable(config, item); reason != "" {
-		result.Status = "skipped"
-		return fail(reason)
+		return nil, reason, nil
 	}
-	result.DirectoryID = config.ID
 	parts, root, localRelative, err := cloudBrowserSTRMPaths(config, depth, ancestry, item)
 	if err != nil {
-		return fail("文件无法安全映射到本地 STRM 路径")
-	}
-	result.LocalPath = filepath.Join(root, localRelative)
-	if s.db == nil {
-		return fail("无法确认本地 STRM 的管理状态")
-	}
-	var managed int64
-	if err := s.db.WithContext(ctx).Model(&model.OrganizeManagedStrm{}).Where("path = ?", result.LocalPath).Count(&managed).Error; err != nil {
-		return fail("无法确认本地 STRM 的管理状态")
-	}
-	if managed > 0 {
-		result.Status = "skipped"
-		return fail("本地 STRM 由整理任务管理，已保留原文件")
+		return nil, "", errors.New("文件无法安全映射到本地 STRM 路径")
 	}
 	nextPath := "/" + strings.Join(parts, "/")
 	if config.ContentEncodeURI {
@@ -250,8 +242,55 @@ func (s *CloudBrowserService) writeSTRM(ctx context.Context, configs []model.Med
 		}
 		nextPath = "/" + strings.Join(encoded, "/")
 	}
-	content := pathhelper.SafeFilePathJoin(strings.TrimSpace(config.ContentPrefix), nextPath)
-	status, err := writeCloudBrowserSTRM(ctx, root, localRelative, content)
+	return &cloudBrowserSTRMPlan{
+		config:    config,
+		root:      root,
+		relative:  localRelative,
+		localPath: filepath.Join(root, localRelative),
+		content:   pathhelper.SafeFilePathJoin(strings.TrimSpace(config.ContentPrefix), nextPath),
+	}, "", nil
+}
+
+// managedSTRM reports whether an organize job owns the local path; such files
+// are never replaced by the browser.
+func (s *CloudBrowserService) managedSTRM(ctx context.Context, localPath string) (bool, error) {
+	if s.db == nil {
+		return false, errors.New("database unavailable")
+	}
+	var managed int64
+	if err := s.db.WithContext(ctx).Model(&model.OrganizeManagedStrm{}).Where("path = ?", localPath).Count(&managed).Error; err != nil {
+		return false, err
+	}
+	return managed > 0, nil
+}
+
+// writeSTRM is deliberately local-only. The enclosing job holds the organize
+// storage lock; invoking StrmService here could perform hidden 115 lookups.
+func (s *CloudBrowserService) writeSTRM(ctx context.Context, configs []model.MediaDirectory, ancestry []CloudBrowserBreadcrumb, item CloudBrowserEntry) CloudBrowserSTRMItemResult {
+	result := CloudBrowserSTRMItemResult{FileID: item.FileID, Name: item.Name, Status: "failed"}
+	fail := func(message string) CloudBrowserSTRMItemResult { result.Message = message; return result }
+	if err := ctx.Err(); err != nil {
+		return fail("STRM 生成已取消或超时")
+	}
+	plan, reason, err := planCloudBrowserSTRM(configs, ancestry, item)
+	if err != nil {
+		return fail(err.Error())
+	}
+	if reason != "" {
+		result.Status = "skipped"
+		return fail(reason)
+	}
+	result.DirectoryID = plan.config.ID
+	result.LocalPath = plan.localPath
+	managed, err := s.managedSTRM(ctx, plan.localPath)
+	if err != nil {
+		return fail("无法确认本地 STRM 的管理状态")
+	}
+	if managed {
+		result.Status = "skipped"
+		return fail("本地 STRM 由整理任务管理，已保留原文件")
+	}
+	status, err := writeCloudBrowserSTRM(ctx, plan.root, plan.relative, plan.content)
 	if err != nil {
 		if ctx.Err() != nil {
 			return fail("STRM 生成已取消或超时")

@@ -40,34 +40,9 @@ func (s *CloudBrowserService) GenerateSTRM(ctx context.Context, userID, director
 	if stopped {
 		return nil, cloudMoveError(503, "服务正在关闭，请稍后重试")
 	}
-	selected, err := s.parseSelection(req.SelectionToken, userID, directoryID)
+	selected, storage, configs, err := s.prepareSelection(ctx, userID, directoryID, req.SelectionToken)
 	if err != nil {
 		return nil, err
-	}
-	directory, err := s.directory(ctx, userID, directoryID)
-	if err != nil {
-		return nil, err
-	}
-	if directory.CloudStorageID != selected.StorageID {
-		return nil, cloudMoveError(409, "目录配置的存储账号已变更，请刷新后重试")
-	}
-	storage, err := s.storage(ctx, userID, selected.StorageID, selected.Method)
-	if err != nil {
-		return nil, err
-	}
-	configs, err := s.directories(ctx, userID, selected.StorageID)
-	if err != nil {
-		return nil, err
-	}
-	match, _, err := cloudBrowserMatchDirectory(configs, selected.Ancestors)
-	if err != nil {
-		return nil, cloudMoveError(409, "所选路径匹配多个重复目录配置，请修正后重试")
-	}
-	if match == nil {
-		return nil, cloudMoveError(409, "所选路径未匹配当前账号的目录配置，无法生成 STRM")
-	}
-	if reason := cloudBrowserSTRMUnavailable(match, selected.Item); reason != "" {
-		return nil, cloudMoveError(409, reason)
 	}
 	if !selected.Item.IsFile {
 		return s.startJob(ctx, selected, storage)
@@ -83,6 +58,42 @@ func (s *CloudBrowserService) GenerateSTRM(ctx context.Context, userID, director
 	result := &CloudBrowserOperationResult{Name: selected.Item.Name, Status: "completed", Finished: true, ScannedFiles: 1, Errors: []string{}, Results: []CloudBrowserSTRMItemResult{item}}
 	cloudBrowserCountResult(result, item)
 	return result, nil
+}
+
+// prepareSelection verifies a signed selection against the current database
+// state. Generation and preview share these checks and their error messages.
+func (s *CloudBrowserService) prepareSelection(ctx context.Context, userID, directoryID uint, token string) (cloudBrowserSelection, model.CloudStorage, []model.MediaDirectory, error) {
+	var storage model.CloudStorage
+	selected, err := s.parseSelection(token, userID, directoryID)
+	if err != nil {
+		return selected, storage, nil, err
+	}
+	directory, err := s.directory(ctx, userID, directoryID)
+	if err != nil {
+		return selected, storage, nil, err
+	}
+	if directory.CloudStorageID != selected.StorageID {
+		return selected, storage, nil, cloudMoveError(409, "目录配置的存储账号已变更，请刷新后重试")
+	}
+	storage, err = s.storage(ctx, userID, selected.StorageID, selected.Method)
+	if err != nil {
+		return selected, storage, nil, err
+	}
+	configs, err := s.directories(ctx, userID, selected.StorageID)
+	if err != nil {
+		return selected, storage, nil, err
+	}
+	match, _, err := cloudBrowserMatchDirectory(configs, selected.Ancestors)
+	if err != nil {
+		return selected, storage, nil, cloudMoveError(409, "所选路径匹配多个重复目录配置，请修正后重试")
+	}
+	if match == nil {
+		return selected, storage, nil, cloudMoveError(409, "所选路径未匹配当前账号的目录配置，无法生成 STRM")
+	}
+	if reason := cloudBrowserSTRMUnavailable(match, selected.Item); reason != "" {
+		return selected, storage, nil, cloudMoveError(409, reason)
+	}
+	return selected, storage, configs, nil
 }
 
 func cloudBrowserCountResult(result *CloudBrowserOperationResult, item CloudBrowserSTRMItemResult) {

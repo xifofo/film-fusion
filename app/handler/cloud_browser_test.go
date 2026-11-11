@@ -13,11 +13,11 @@ import (
 )
 
 type cloudBrowserHandlerStub struct {
-	calls, browseCalls, generateCalls int
-	userID, directoryID               uint
-	method, cid, jobID                string
-	offset, limit                     int
-	err                               error
+	calls, browseCalls, generateCalls, previewCalls int
+	userID, directoryID                             uint
+	method, cid, jobID                              string
+	offset, limit                                   int
+	err                                             error
 }
 
 func (s *cloudBrowserHandlerStub) Browse(_ context.Context, userID, directoryID uint, method, cid string, offset, limit int) (*service.CloudBrowserPage, error) {
@@ -31,6 +31,12 @@ func (s *cloudBrowserHandlerStub) GenerateSTRM(_ context.Context, userID, direct
 	s.generateCalls++
 	s.userID, s.directoryID = userID, directoryID
 	return &service.CloudBrowserOperationResult{Status: "completed", Finished: true}, s.err
+}
+func (s *cloudBrowserHandlerStub) PreviewSTRM(_ context.Context, userID, directoryID uint, _ service.CloudBrowserGenerateRequest) (*service.CloudBrowserSTRMPreview, error) {
+	s.calls++
+	s.previewCalls++
+	s.userID, s.directoryID = userID, directoryID
+	return &service.CloudBrowserSTRMPreview{Status: "create"}, s.err
 }
 func (s *cloudBrowserHandlerStub) JobStatus(_ context.Context, userID, directoryID uint, jobID string) (*service.CloudBrowserOperationResult, error) {
 	s.calls++
@@ -56,6 +62,7 @@ func cloudBrowserHandlerRouter(stub *cloudBrowserHandlerStub, user any) *gin.Eng
 	h := NewCloudBrowserHandler(stub)
 	router.GET("/api/directories/:id/browser", h.Browse)
 	router.POST("/api/directories/:id/browser/strm", h.GenerateSTRM)
+	router.POST("/api/directories/:id/browser/strm/preview", h.PreviewSTRM)
 	router.GET("/api/directories/:id/browser/jobs", h.ActiveJob)
 	router.GET("/api/directories/:id/browser/jobs/:job_id", h.JobStatus)
 	router.DELETE("/api/directories/:id/browser/jobs/:job_id", h.CancelJob)
@@ -121,8 +128,22 @@ func TestCloudBrowserHandlerRejectsBeforeService(t *testing.T) {
 			}
 		}
 	}
+	for _, body := range []string{`{}`, `{"selection_token":"signed","extra":1}`} {
+		if w := cloudBrowserHandlerRequest(r, http.MethodPost, "/api/directories/2/browser/strm/preview", body); w.Code != http.StatusBadRequest {
+			t.Fatalf("preview body validation: %d", w.Code)
+		}
+	}
 	if s.calls != 0 {
 		t.Fatalf("invalid input invoked service %d times", s.calls)
+	}
+}
+
+func TestCloudBrowserHandlerPreviewReachesPreviewOnly(t *testing.T) {
+	s := &cloudBrowserHandlerStub{}
+	r := cloudBrowserHandlerRouter(s, uint(7))
+	w := cloudBrowserHandlerRequest(r, http.MethodPost, "/api/directories/2/browser/strm/preview", `{"selection_token":"signed"}`)
+	if w.Code != http.StatusOK || s.previewCalls != 1 || s.generateCalls != 0 || s.userID != 7 || s.directoryID != 2 || !strings.Contains(w.Body.String(), `"status":"create"`) {
+		t.Fatalf("preview routing: %d %s %+v", w.Code, w.Body.String(), s)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 type cloudBrowserOperations interface {
 	Browse(context.Context, uint, uint, string, string, int, int) (*service.CloudBrowserPage, error)
 	GenerateSTRM(context.Context, uint, uint, service.CloudBrowserGenerateRequest) (*service.CloudBrowserOperationResult, error)
+	PreviewSTRM(context.Context, uint, uint, service.CloudBrowserGenerateRequest) (*service.CloudBrowserSTRMPreview, error)
 	ActiveJob(context.Context, uint, uint) (*service.CloudBrowserOperationResult, error)
 	JobStatus(context.Context, uint, uint, string) (*service.CloudBrowserOperationResult, error)
 	CancelJob(context.Context, uint, uint, string) (*service.CloudBrowserOperationResult, error)
@@ -61,11 +62,9 @@ func (h *CloudBrowserHandler) Browse(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("ok", result))
 }
 
-func (h *CloudBrowserHandler) GenerateSTRM(c *gin.Context) {
-	userID, directoryID, ok := cloudBrowserIdentity(c)
-	if !ok {
-		return
-	}
+// decodeCloudBrowserSelection reads exactly one bounded JSON body carrying a
+// selection token; it writes the error response itself when decoding fails.
+func decodeCloudBrowserSelection(c *gin.Context) (service.CloudBrowserGenerateRequest, bool) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64<<10)
 	decoder := json.NewDecoder(c.Request.Body)
 	decoder.DisallowUnknownFields()
@@ -86,13 +85,44 @@ func (h *CloudBrowserHandler) GenerateSTRM(c *gin.Context) {
 		} else {
 			c.JSON(http.StatusBadRequest, NewErrorResponse("STRM 请求格式无效", ""))
 		}
-		return
+		return request, false
 	}
 	if request.SelectionToken == "" || len(request.SelectionToken) > 32<<10 {
 		c.JSON(http.StatusBadRequest, NewErrorResponse("请先手动加载目录并选择文件或文件夹", ""))
+		return request, false
+	}
+	return request, true
+}
+
+func (h *CloudBrowserHandler) GenerateSTRM(c *gin.Context) {
+	userID, directoryID, ok := cloudBrowserIdentity(c)
+	if !ok {
+		return
+	}
+	request, ok := decodeCloudBrowserSelection(c)
+	if !ok {
 		return
 	}
 	result, err := h.svc.GenerateSTRM(c.Request.Context(), userID, directoryID, request)
+	if err != nil {
+		writeCloudBrowserError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("ok", result))
+}
+
+// PreviewSTRM reports the target path, content and expected outcome for one
+// sample file without writing anything.
+func (h *CloudBrowserHandler) PreviewSTRM(c *gin.Context) {
+	userID, directoryID, ok := cloudBrowserIdentity(c)
+	if !ok {
+		return
+	}
+	request, ok := decodeCloudBrowserSelection(c)
+	if !ok {
+		return
+	}
+	result, err := h.svc.PreviewSTRM(c.Request.Context(), userID, directoryID, request)
 	if err != nil {
 		writeCloudBrowserError(c, err)
 		return
