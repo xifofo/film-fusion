@@ -33,6 +33,18 @@ func (h *EmbyStatsHandler) GetStats(c *gin.Context) {
 	c.JSON(http.StatusOK, NewSuccessResponse("ok", stats))
 }
 
+// Insights GET /api/emby-stats/insights?refresh=1
+// 返回集数、近 7 天新增、画质、类型与最近入库；默认使用 10 分钟内存缓存。
+func (h *EmbyStatsHandler) Insights(c *gin.Context) {
+	refresh := c.Query("refresh") == "1" || c.Query("refresh") == "true"
+	insights, err := h.svc.Insights(c.Request.Context(), refresh)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, NewErrorResponse("获取 Emby 媒体库洞察失败", err.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, NewSuccessResponse("ok", insights))
+}
+
 // Image GET /api/emby-stats/image 代理媒体库封面（前端 <img> 通过 ?token= 鉴权）。
 func (h *EmbyStatsHandler) Image(c *gin.Context) {
 	maxWidth, _ := strconv.Atoi(c.Query("max_width"))

@@ -408,6 +408,7 @@ func (s *Server) setupRoutes() {
 		embyStats := protected.Group("/emby-stats")
 		{
 			embyStats.GET("", embyStatsHandler.GetStats)
+			embyStats.GET("/insights", embyStatsHandler.Insights)
 			embyStats.GET("/image", embyStatsHandler.Image)
 		}
 
