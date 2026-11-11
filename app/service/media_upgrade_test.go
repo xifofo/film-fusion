@@ -10,6 +10,8 @@ import (
 func TestMediaUpgradePolicies(t *testing.T) {
 	quality := MediaUpgradePresets()["quality"]
 	quality.Enabled = true
+	// 预设默认开启同档加分；先关闭以验证同档保留旧版的基础语义。
+	quality.SameTier = false
 	for _, tc := range []struct{ name, incoming, existing, action string }{
 		{"higher resolution", "Example.2160p.WEB-DL.H265.mkv", "Example.1080p.REMUX.H264.mkv", "replace"},
 		{"better source", "Example.1080p.REMUX.H264.mkv", "Example.1080p.WEB-DL.H264.mkv", "replace"},
@@ -62,6 +64,68 @@ func TestMediaUpgradePolicies(t *testing.T) {
 		if _, err := ParseMediaUpgradePolicy(raw); err == nil {
 			t.Fatalf("invalid policy accepted: %s", raw)
 		}
+	}
+}
+
+func TestMediaUpgradePresetTemplates(t *testing.T) {
+	presets := MediaUpgradePresets()
+	for key, policy := range presets {
+		policy.Enabled = true
+		if err := ValidateMediaUpgradePolicy(policy); err != nil {
+			t.Fatalf("preset %s invalid: %v", key, err)
+		}
+		if len(policy.Bonuses) > 0 && !policy.SameTier {
+			t.Fatalf("preset %s has bonuses that can never apply", key)
+		}
+	}
+
+	quality := presets["quality"]
+	proper := ParseMediaUpgradeFacts("Example.1080p.WEB-DL.PROPER.H264.mkv", 1000)
+	plain := ParseMediaUpgradeFacts("Example.1080p.WEB-DL.H264.mkv", 1000)
+	if action, _ := CompareMediaUpgrade(quality, proper, plain); action != "replace" {
+		t.Fatal("preset fix bonus did not apply")
+	}
+
+	dolby := presets["dolby_vision"]
+	for _, tc := range []struct{ incoming, existing, action string }{
+		{"Example.2160p.WEB-DL.DV.H265.mkv", "Example.2160p.BluRay.HDR10.H265.mkv", "replace"},
+		{"Example.2160p.WEB-DL.HDR10.H265.mkv", "Example.2160p.WEB-DL.H265.mkv", "replace"},
+		{"Example.1080p.WEB-DL.DV.H265.mkv", "Example.2160p.WEB-DL.H265.mkv", "keep"},
+	} {
+		if action, reason := CompareMediaUpgrade(dolby, ParseMediaUpgradeFacts(tc.incoming, 1000), ParseMediaUpgradeFacts(tc.existing, 1000)); action != tc.action {
+			t.Fatalf("%s vs %s: %s (%s)", tc.incoming, tc.existing, action, reason)
+		}
+	}
+
+	clean := presets["clean"]
+	if !RankMediaUpgrade(clean, ParseMediaUpgradeFacts("Example.1080p.HDTV.H264.mkv", 1000)).Rejected {
+		t.Fatal("low quality source accepted")
+	}
+}
+
+func TestMediaUpgradeUnmatchedAction(t *testing.T) {
+	policy := MediaUpgradePolicy{Enabled: true, Rules: []MediaUpgradeRule{{Name: "4K", Resolutions: []string{"2160p"}}}}
+	for _, value := range []string{"", MediaUpgradeUnmatchedReview, MediaUpgradeUnmatchedAdd} {
+		policy.UnmatchedAction = value
+		if err := ValidateMediaUpgradePolicy(policy); err != nil {
+			t.Fatalf("unmatched %q rejected: %v", value, err)
+		}
+	}
+	policy.UnmatchedAction = "replace"
+	if err := ValidateMediaUpgradePolicy(policy); err == nil {
+		t.Fatal("unknown unmatched action accepted")
+	}
+	if err := ValidateMediaUpgradePolicy(MediaUpgradePolicy{Enabled: true, GroupID: 3, UnmatchedAction: MediaUpgradeUnmatchedAdd}); err == nil {
+		t.Fatal("group reference mixed inline unmatched action")
+	}
+
+	// 允许直接入库只影响无旧版本的新增；有旧版本时仍不能凭未知档位替换。
+	policy.UnmatchedAction = MediaUpgradeUnmatchedAdd
+	if action, _ := CompareMediaUpgrade(policy, ParseMediaUpgradeFacts("Example.1080p.mkv", 1000), ParseMediaUpgradeFacts("Example.720p.mkv", 1000)); action != "review" {
+		t.Fatal("unmatched incoming replaced an old version")
+	}
+	if MediaUpgradeTierOrder(0) <= MediaUpgradeTierOrder(50) {
+		t.Fatal("unmatched tier sorted before real tiers")
 	}
 }
 

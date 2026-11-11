@@ -341,9 +341,14 @@ func (h *Service) prepareUpgradePreview(dir model.MediaDirectory, result *Organi
 				decision.Action, decision.Reason = "keep", decision.Rank.Label
 				continue
 			}
-			if decision.Rank.Tier == 0 {
+			// 未命中档位默认待确认；策略允许时继续查找库内版本，没有旧版本才直接入库，
+			// 有旧版本时由 CompareMediaUpgrade 因无法比较而返回待确认。
+			if decision.Rank.Tier == 0 && !policy.AllowsUnmatchedAdd() {
 				decision.Action, decision.Reason = "review", decision.Rank.Label
 				continue
+			}
+			if decision.Rank.Tier == 0 {
+				decision.Reason = "未命中任何档位，库内没有旧版本，按设置直接入库"
 			}
 			var records []model.OrganizeMediaFile
 			if err := h.store().WithContext(h.requestContext()).Where("user_id = ? AND cloud_storage_id = ? AND cloud_directory_id = ? AND media_key = ?", dir.UserID, dir.CloudStorageID, dir.ID, decision.MediaKey).Find(&records).Error; err != nil {
@@ -459,7 +464,9 @@ func (h *Service) prepareUpgradePreview(dir model.MediaDirectory, result *Organi
 				continue
 			}
 			if prior, ok := winners[decision.MediaKey]; ok {
-				better := decision.Rank.Tier < prior.Rank.Tier || (decision.Rank.Tier == prior.Rank.Tier && policy.SameTier && decision.Rank.Score > prior.Rank.Score)
+				// 未命中档位的候选排在所有档位之后，不能因 Tier 为 0 被当作最高档。
+				current, previous := service.MediaUpgradeTierOrder(decision.Rank.Tier), service.MediaUpgradeTierOrder(prior.Rank.Tier)
+				better := current < previous || (current == previous && policy.SameTier && decision.Rank.Score > prior.Rank.Score)
 				if better {
 					prior.Action, prior.Reason = "keep", "本批有更优候选"
 					winners[decision.MediaKey] = decision

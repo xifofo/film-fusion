@@ -389,6 +389,41 @@ func TestOrganizeUpgradeIdentityAndBlockedSelection(t *testing.T) {
 	}
 }
 
+func TestOrganizeUpgradeUnmatchedActionOnlyAddsWithoutOldVersion(t *testing.T) {
+	e := newUpgradeTestEnv(t, false, false)
+	f := e.files["101"]
+	f.Name = "Example.2024.mkv"
+	e.files["101"] = f
+	e.result.Groups[0].Items[0].FileName = f.Name
+	e.syncManifest()
+	policy, err := service.ResolveMediaUpgradePolicy(e.db, 1, e.dir.UpgradePolicy)
+	e.must(err)
+
+	// 默认策略：未命中档位的新文件待确认，不进入执行计划。
+	e.must(e.h.prepareUpgradePreview(e.dir, &e.result))
+	if e.result.Items[0].Upgrade.Action != "review" {
+		t.Fatalf("default unmatched action: %+v", e.result.Items[0].Upgrade)
+	}
+
+	// 允许直接入库但库内已有旧版本时，仍不能替换。
+	policy.UnmatchedAction = service.MediaUpgradeUnmatchedAdd
+	e.dir.UpgradePolicy = planJSON(policy)
+	e.result.Groups[0].Items[0].Upgrade = nil
+	e.must(e.h.prepareUpgradePreview(e.dir, &e.result))
+	if e.result.Items[0].Upgrade.Action != "review" {
+		t.Fatalf("unmatched file replaced old version: %+v", e.result.Items[0].Upgrade)
+	}
+
+	// 库内没有旧版本时按设置直接入库。
+	delete(e.files, "201")
+	e.result.Groups[0].Items[0].Upgrade = nil
+	e.result.UpgradeDirectories = nil
+	e.must(e.h.prepareUpgradePreview(e.dir, &e.result))
+	if e.result.Items[0].Upgrade.Action != "add" {
+		t.Fatalf("unmatched file without old version: %+v", e.result.Items[0].Upgrade)
+	}
+}
+
 func TestOrganizeUpgradeRemembersOriginalQualityAfterRenaming(t *testing.T) {
 	e := newUpgradeTestEnv(t, true, false)
 	e.preview()

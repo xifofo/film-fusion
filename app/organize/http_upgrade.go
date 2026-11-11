@@ -3,6 +3,7 @@ package organize
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"film-fusion/app/model"
@@ -43,9 +44,26 @@ func (h *Handler) TestUpgradePolicy(c *gin.Context) {
 	}
 	req.Policy = resolved
 	newFacts := service.ParseMediaUpgradeFacts(req.Incoming, req.IncomingSizeMB*1024*1024)
+	newRank := service.RankMediaUpgrade(req.Policy, newFacts)
+
+	// 未填写已有文件时模拟「库内没有旧版本」，与整理预览的新增判断保持一致。
+	if strings.TrimSpace(req.Existing) == "" {
+		action, reason := "add", "库内没有旧版本，命中 "+newRank.Label
+		switch {
+		case newRank.Rejected:
+			action, reason = "keep", newRank.Label
+		case newRank.Tier == 0 && req.Policy.AllowsUnmatchedAdd():
+			reason = "未命中任何档位，按设置直接入库"
+		case newRank.Tier == 0:
+			action, reason = "review", newRank.Label
+		}
+		h.success(c, gin.H{"action": action, "reason": reason, "incoming": newRank, "existing": nil, "incoming_facts": newFacts, "existing_facts": nil}, "质量规则测试；未核对媒体身份")
+		return
+	}
+
 	oldFacts := service.ParseMediaUpgradeFacts(req.Existing, req.ExistingSizeMB*1024*1024)
 	action, reason := service.CompareMediaUpgrade(req.Policy, newFacts, oldFacts)
-	h.success(c, gin.H{"action": action, "reason": reason, "incoming": service.RankMediaUpgrade(req.Policy, newFacts), "existing": service.RankMediaUpgrade(req.Policy, oldFacts), "incoming_facts": newFacts, "existing_facts": oldFacts}, "质量规则测试；未核对媒体身份")
+	h.success(c, gin.H{"action": action, "reason": reason, "incoming": newRank, "existing": service.RankMediaUpgrade(req.Policy, oldFacts), "incoming_facts": newFacts, "existing_facts": oldFacts}, "质量规则测试；未核对媒体身份")
 }
 
 func (h *Handler) ListUpgradeJobs(c *gin.Context) {

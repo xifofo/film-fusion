@@ -23,6 +23,28 @@ type MediaUpgradePolicy struct {
 	GroupID          uint                   `json:"group_id,omitempty"`
 	GroupRevision    uint                   `json:"group_revision,omitempty"`
 	ExcludeCondition *MediaUpgradeCondition `json:"exclude_condition,omitempty"`
+	// UnmatchedAction 决定没有命中任何档位的新文件如何处理：空值或 review 标为待确认、不入库；
+	// add 仅在库内没有同一媒体的旧版本时照常入库，存在旧版本时仍因无法比较而待确认。
+	UnmatchedAction string `json:"unmatched_action,omitempty"`
+}
+
+// 未命中档位的处理方式；空字符串与 review 等价，保持旧策略原有的保守行为。
+const (
+	MediaUpgradeUnmatchedReview = "review"
+	MediaUpgradeUnmatchedAdd    = "add"
+)
+
+// AllowsUnmatchedAdd 表示库内没有旧版本时，未命中档位的新文件是否可以直接入库。
+func (policy MediaUpgradePolicy) AllowsUnmatchedAdd() bool {
+	return policy.UnmatchedAction == MediaUpgradeUnmatchedAdd
+}
+
+// MediaUpgradeTierOrder 把未命中档位（0）排在所有档位之后，便于同批候选择优。
+func MediaUpgradeTierOrder(tier int) int {
+	if tier <= 0 {
+		return int(^uint(0) >> 1)
+	}
+	return tier
 }
 
 type MediaUpgradeRule struct {
@@ -89,10 +111,15 @@ func ParseMediaUpgradeFacts(name string, size int64) MediaUpgradeFacts {
 	return facts
 }
 
+// MediaUpgradePresets 返回编辑器可选的起点模板；同档加分需要 SameTier 才会参与比较，因此预设一并开启。
 func MediaUpgradePresets() map[string]MediaUpgradePolicy {
-	quality := MediaUpgradePolicy{Name: "画质优先", MinScoreGain: 10, Exclude: []string{"CAM", "TS", "DVDScr"}, Bonuses: []MediaUpgradeRule{
-		{Name: "修正版", Effects: []string{"PROPER", "REPACK"}, Score: 10},
-	}}
+	lowQuality := []string{"CAM", "TS", "DVDScr"}
+	fixes := []MediaUpgradeRule{{Name: "修正版", Effects: []string{"PROPER", "REPACK"}, Score: 10}}
+	base := func(name string) MediaUpgradePolicy {
+		return MediaUpgradePolicy{Name: name, MinScoreGain: 10, SameTier: true, Exclude: append([]string{}, lowQuality...), Bonuses: append([]MediaUpgradeRule{}, fixes...)}
+	}
+
+	quality := base("画质优先")
 	for _, resolution := range []string{"2160p", "1080p", "720p"} {
 		for _, source := range []struct {
 			label  string
@@ -101,17 +128,40 @@ func MediaUpgradePresets() map[string]MediaUpgradePolicy {
 			quality.Rules = append(quality.Rules, MediaUpgradeRule{Name: resolution + " " + source.label, Resolutions: []string{resolution}, Sources: source.values})
 		}
 	}
-	compatible := MediaUpgradePolicy{Name: "兼容优先", MinScoreGain: 10, Exclude: []string{"CAM", "TS", "DVDScr", "Dolby Vision"}, Bonuses: quality.Bonuses}
+
+	// 杜比视界优先只在同分辨率内调整顺序，避免 1080p DV 压过 2160p HDR。
+	dolby := base("优先杜比视界")
+	for _, resolution := range []string{"2160p", "1080p"} {
+		dolby.Rules = append(dolby.Rules,
+			MediaUpgradeRule{Name: resolution + " 杜比视界", Resolutions: []string{resolution}, Effects: []string{"Dolby Vision"}},
+			MediaUpgradeRule{Name: resolution + " HDR", Resolutions: []string{resolution}, Effects: []string{"HDR10+", "HDR10", "HDR", "HLG"}},
+			MediaUpgradeRule{Name: resolution, Resolutions: []string{resolution}},
+		)
+	}
+	dolby.Rules = append(dolby.Rules, MediaUpgradeRule{Name: "720p", Resolutions: []string{"720p"}})
+
+	compatible := base("兼容播放")
+	compatible.Exclude = append(compatible.Exclude, "Dolby Vision")
 	for _, resolution := range []string{"1080p", "720p", "2160p"} {
 		compatible.Rules = append(compatible.Rules, MediaUpgradeRule{Name: resolution + " H.264", Resolutions: []string{resolution}, Codecs: []string{"H.264"}})
 	}
-	space := MediaUpgradePolicy{Name: "节省空间", MinScoreGain: 10, MaxSizeMB: 20480, Exclude: quality.Exclude, Bonuses: quality.Bonuses}
+
+	space := base("节省空间")
+	space.MaxSizeMB = 20480
 	for _, resolution := range []string{"1080p", "720p", "2160p"} {
 		for _, codec := range []string{"H.265", "AV1", "H.264"} {
 			space.Rules = append(space.Rules, MediaUpgradeRule{Name: resolution + " " + codec, Resolutions: []string{resolution}, Codecs: []string{codec}})
 		}
 	}
-	return map[string]MediaUpgradePolicy{"quality": quality, "compatible": compatible, "space": space}
+
+	// 文件名无法反映码率，这里用片源排除近似「避开低质量」，不承诺码率判断。
+	clean := base("避开低质片源")
+	clean.Exclude = append(clean.Exclude, "HDTV", "UHDTV", "DVD")
+	for _, resolution := range []string{"2160p", "1080p", "720p"} {
+		clean.Rules = append(clean.Rules, MediaUpgradeRule{Name: resolution, Resolutions: []string{resolution}})
+	}
+
+	return map[string]MediaUpgradePolicy{"quality": quality, "dolby_vision": dolby, "compatible": compatible, "space": space, "clean": clean}
 }
 
 func ParseMediaUpgradePolicy(raw string) (MediaUpgradePolicy, error) {
@@ -141,7 +191,7 @@ func ValidateMediaUpgradePolicy(policy MediaUpgradePolicy) error {
 	if policy.GroupRevision > 0 && len(policy.Rules) == 0 {
 		return errors.New("规则组快照缺少优先级规则")
 	}
-	if policy.GroupID > 0 && policy.GroupRevision == 0 && (len(policy.Rules) > 0 || len(policy.Bonuses) > 0 || len(policy.Exclude) > 0 || policy.ExcludeCondition != nil || policy.MaxSizeMB != 0 || policy.SameTier || policy.MinScoreGain != 0) {
+	if policy.GroupID > 0 && policy.GroupRevision == 0 && (len(policy.Rules) > 0 || len(policy.Bonuses) > 0 || len(policy.Exclude) > 0 || policy.ExcludeCondition != nil || policy.MaxSizeMB != 0 || policy.SameTier || policy.MinScoreGain != 0 || policy.UnmatchedAction != "") {
 		return errors.New("规则组引用不能混用内联规则；请使用规则组或目录独立策略")
 	}
 	if policy.Enabled && len(policy.Rules) == 0 && !(policy.GroupID > 0 && policy.GroupRevision == 0) {
@@ -149,6 +199,9 @@ func ValidateMediaUpgradePolicy(policy MediaUpgradePolicy) error {
 	}
 	if len([]rune(policy.Name)) > 120 || len(policy.Rules) > 50 || len(policy.Bonuses) > 30 || len(policy.Exclude) > 30 || policy.MinScoreGain < 0 || policy.MinScoreGain > 10000 || policy.MaxSizeMB < 0 || policy.MaxSizeMB > 100*1024*1024 {
 		return errors.New("洗版策略数量或数值超出范围")
+	}
+	if policy.UnmatchedAction != "" && policy.UnmatchedAction != MediaUpgradeUnmatchedReview && policy.UnmatchedAction != MediaUpgradeUnmatchedAdd {
+		return fmt.Errorf("不支持的未命中处理方式 %q", policy.UnmatchedAction)
 	}
 	if err := validateUpgradeCondition(policy.ExcludeCondition); err != nil {
 		return fmt.Errorf("全局排除条件: %w", err)
