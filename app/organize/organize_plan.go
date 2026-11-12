@@ -45,6 +45,11 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return Organize115CookieResult{}, errors.New("云盘目录不存在或无权限")
 	}
+	configuredConditions := organizeDirectoryConditions(dir)
+	dir, err := h.organizeRuntimeDirectory(dir)
+	if err != nil {
+		return Organize115CookieResult{}, err
+	}
 	if req.RecognitionSource == "" {
 		req.RecognitionSource = dir.RecognitionSource
 	}
@@ -61,7 +66,7 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 		worker.tmdbSvc = tmdb
 	}
 	req.RecognitionSource = snapshot.Source
-	result, err := worker.computeOrganize115CookieResult(userID, req)
+	result, err := worker.computeOrganize115CookieResult(dir, req)
 	if err != nil {
 		return result, err
 	}
@@ -81,7 +86,21 @@ func (h *Service) buildOrganize115CookieResult(userID uint, req Organize115Cooki
 	}
 	result.PlanID = hex.EncodeToString(token)
 	saved := model.OrganizePlan{ID: result.PlanID, UserID: userID, CloudDirectoryID: req.CloudDirectoryID, RequestJSON: planJSON(req), ResultJSON: planJSON(result), DirectoryJSON: organizeDirectoryConditions(dir), Status: "ready"}
-	if err = h.store().Create(&saved).Error; err != nil {
+	// 在同一事务内重查目录和保存预览，避免目录已删除、合并或修改后才写入旧草稿。
+	err = h.store().WithContext(h.requestContext()).Transaction(func(tx *gorm.DB) error {
+		var current model.MediaDirectory
+		if err := tx.Where("id = ? AND user_id = ?", dir.ID, userID).Scopes(model.OrganizingDirectories).First(&current).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return errors.New("整理目录已不可用，请重新预览")
+			}
+			return err
+		}
+		if organizeDirectoryConditions(current) != configuredConditions {
+			return errors.New("媒体库目录或整理条件已变化，请重新预览")
+		}
+		return tx.Create(&saved).Error
+	})
+	if err != nil {
 		return result, fmt.Errorf("保存预览计划失败: %w", err)
 	}
 	return result, nil
@@ -245,7 +264,7 @@ func (h *Service) applyOrganizePlan(userID uint, req Organize115CookieRequest) (
 		return Organize115CookieResult{}, errors.New("预览计划不存在或无权限，请重新预览")
 	}
 	if row.Status != "ready" {
-		return Organize115CookieResult{}, errors.New("预览计划已执行或执行中，请重新预览")
+		return Organize115CookieResult{}, errors.New("预览计划已失效、已执行或正在执行，请重新预览")
 	}
 	var result Organize115CookieResult
 	var saved Organize115CookieRequest
@@ -263,13 +282,16 @@ func (h *Service) applyOrganizePlan(userID uint, req Organize115CookieRequest) (
 	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return result, errors.New("目录不可用，请重新预览")
 	}
+	dir, err := h.organizeRuntimeDirectory(dir)
+	if err != nil {
+		return result, err
+	}
 	if organizeDirectoryConditions(dir) != row.DirectoryJSON {
 		return result, errors.New("媒体库根目录或整理条件已改变，请重新预览")
 	}
 	if err := service.ValidateMediaUpgradeRuleGroupSnapshot(h.store().WithContext(h.requestContext()), userID, result.UpgradePolicy); err != nil {
 		return result, err
 	}
-	var err error
 	result, err = selectOrganizePlan(result, req)
 	if err != nil {
 		return result, err

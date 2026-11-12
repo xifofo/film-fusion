@@ -2,14 +2,71 @@ package organize
 
 import (
 	"fmt"
+	"net/url"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"film-fusion/app/model"
 	"film-fusion/app/service"
+	"film-fusion/app/utils/pathhelper"
 )
+
+// organizeRuntimeDirectory 校验同时用作目录名称的 CloudDrive2 源路径。
+// 只有去掉挂载名后仍对应已配置的 115 目录 ID，才将该挂载名移到 STRM 的输出根。
+func (h *Service) organizeRuntimeDirectory(dir model.MediaDirectory) (model.MediaDirectory, error) {
+	if !dir.MappingEnabled || dir.SourceType != model.SourceTypeCloudDrive2 || dir.MappingPathPrefix != "" {
+		return dir, nil
+	}
+
+	configuredPath := "/" + strings.Trim(dir.DirectoryName, "/")
+	if configuredPath != dir.SourcePath {
+		return dir, nil
+	}
+	if normalized, err := pathhelper.NormalizeUntrustedPath(configuredPath); err != nil || normalized != configuredPath {
+		return dir, fmt.Errorf("CloudDrive2 源路径无效，请检查媒体目录配置")
+	}
+	mount, relative, ok := strings.Cut(strings.TrimPrefix(configuredPath, "/"), "/")
+	if !ok {
+		return dir, nil
+	}
+
+	var storage model.CloudStorage
+	if err := h.store().WithContext(h.requestContext()).
+		Where("id = ? AND user_id = ?", dir.CloudStorageID, dir.UserID).First(&storage).Error; err != nil {
+		return dir, fmt.Errorf("云存储不存在或无权限")
+	}
+	client, err := h.organizeClient(storage.Cookie)
+	if err != nil {
+		return dir, err
+	}
+
+	cloudPath := "/" + relative
+	cid, found, cloudErr := h.web115Svc.ResolveDirPathWithClient(client, cloudPath)
+	if !found || cid != dir.DirectoryID {
+		// 115 中确实可能有一个与挂载同名的目录，保留能匹配所选 ID 的实际路径。
+		cid, found, err = h.web115Svc.ResolveDirPathWithClient(client, configuredPath)
+		if found && cid == dir.DirectoryID {
+			return dir, nil
+		}
+		if cloudErr != nil || err != nil {
+			return dir, fmt.Errorf("无法校验 115 整理路径，请重新读取云盘目录后再试")
+		}
+		return dir, fmt.Errorf("整理路径与所选 115 目录不一致，请检查媒体目录配置")
+	}
+
+	dir.DirectoryName = cloudPath
+	if savePath := strings.TrimSpace(dir.SavePath); savePath != "" {
+		dir.SavePath = pathhelper.SafeFilePathJoin(savePath, "/"+mount)
+	}
+	if dir.ContentEncodeURI {
+		mount = url.PathEscape(mount)
+	}
+	dir.ContentPrefix = pathhelper.SafeFilePathJoin(strings.TrimSpace(dir.ContentPrefix), "/"+mount)
+	return dir, nil
+}
 
 func (h *Service) buildTargetPathWithDirectory(directoryName, category string, input service.MediaRenameInput) (string, error) {
 	base, err := h.moviePilotSvc.BuildOrganizeTargetPath(category, input)

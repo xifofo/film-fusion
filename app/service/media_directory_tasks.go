@@ -1,13 +1,15 @@
-// 目录删除、停用、换账号和合并共用整理任务生命周期检查，历史记录不作改写。
+// 目录删除、停用、换账号和合并共用整理任务保护和预览作废逻辑。
 package service
 
 import (
 	"fmt"
 
+	"film-fusion/app/model"
 	"gorm.io/gorm"
 )
 
-// checkMediaDirectoryOrganizeTasks 由调用方在目录事务中执行；仅放行各类任务的已知终态。
+// checkMediaDirectoryOrganizeTasks 检查必须处理完的任务。ready 仅是尚未开始的预览，
+// 目录操作提交时会将它作废，因此预览合并时也无需拦截。
 func checkMediaDirectoryOrganizeTasks(db *gorm.DB, directoryIDs []uint) error {
 	checks := []struct {
 		table    string
@@ -18,8 +20,7 @@ func checkMediaDirectoryOrganizeTasks(db *gorm.DB, directoryIDs []uint) error {
 		// failed 洗版可能已经移动文件，必须继续或恢复；rolled_back 才是恢复完成。
 		{"organize_upgrade_jobs", "洗版恢复任务", []string{"completed", "rolled_back", "cancelled", "canceled"}},
 		// 普通整理失败后不可续跑原计划；洗版失败是否仍需恢复由独立任务检查。
-		// ready 计划仍可能被用户提交，继续保护。
-		{"organize_plans", "整理计划", []string{"executed", "failed", "completed", "applied", "cancelled", "canceled"}},
+		{"organize_plans", "整理计划", []string{"ready", "executed", "failed", "completed", "applied", "cancelled", "canceled"}},
 		// 预览失败没有执行文件变更。
 		{"organize_preview_tasks", "预整理任务", []string{"completed", "failed", "cancelled", "canceled"}},
 	}
@@ -47,4 +48,15 @@ func checkMediaDirectoryOrganizeTasks(db *gorm.DB, directoryIDs []uint) error {
 	}
 
 	return nil
+}
+
+// CancelReadyOrganizePlans 在已取得写锁的目录事务中调用，只作废还未执行的计划，保留快照。
+func CancelReadyOrganizePlans(tx *gorm.DB, userID uint, directoryIDs ...uint) error {
+	if !tx.Migrator().HasTable(&model.OrganizePlan{}) {
+		return nil
+	}
+
+	return tx.Model(&model.OrganizePlan{}).
+		Where("user_id = ? AND cloud_directory_id IN ? AND status = ?", userID, directoryIDs, "ready").
+		Update("status", "cancelled").Error
 }

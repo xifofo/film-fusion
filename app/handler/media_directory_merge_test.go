@@ -155,7 +155,7 @@ func TestMediaDirectoryMergeRejectsStaleUnsafeAndBusyConfigurations(t *testing.T
 			case "source":
 				db.Model(&mapping).Update("source_path", "/115LongTerm/other")
 			case "busy":
-				db.Create(&model.OrganizePlan{ID: "active", UserID: 1, CloudDirectoryID: target.ID, Status: "ready"})
+				db.Create(&model.OrganizePlan{ID: "active", UserID: 1, CloudDirectoryID: target.ID, Status: "executing"})
 			case "missing-preview":
 				p.Revision = ""
 			}
@@ -179,6 +179,10 @@ func TestMediaDirectoryMergeRollsBackReferencesOnSaveFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := mergePreviewRequest(t, router, target.ID, mapping.ID)
+	plan := model.OrganizePlan{ID: "ready-plan", UserID: 1, CloudDirectoryID: target.ID, Status: "ready"}
+	if err := db.Create(&plan).Error; err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Exec(`CREATE TRIGGER reject_directory_merge BEFORE UPDATE ON media_directories WHEN NEW.id = 8 AND NEW.mapping_enabled = 1 BEGIN SELECT RAISE(ABORT, 'injected failure'); END`).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +197,9 @@ func TestMediaDirectoryMergeRollsBackReferencesOnSaveFailure(t *testing.T) {
 	var source model.MediaDirectory
 	if err := db.First(&source, mapping.ID).Error; err != nil || source.MergedIntoID != 0 {
 		t.Fatal("source deletion partially committed")
+	}
+	if err := db.First(&plan, "id = ?", plan.ID).Error; err != nil || plan.Status != "ready" {
+		t.Fatalf("draft cancellation partially committed: %+v err=%v", plan, err)
 	}
 }
 

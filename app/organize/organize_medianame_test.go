@@ -31,6 +31,8 @@ type planTestEnv struct {
 	db               *gorm.DB
 	sourceName       string
 	additionalFiles  []map[string]any
+	onResolveTarget  func()
+	resolveTargetCID func(path string) string
 	calls, mutations int
 	tmdbFail         bool
 	mutationsBody    []string
@@ -107,7 +109,14 @@ func setupOrganizePlanTest(t *testing.T) *planTestEnv {
 			encoded, _ := json.Marshal(data)
 			body = string(encoded)
 		case r.Method == http.MethodGet && r.URL.Path == "/files/getid":
-			body = `{"state":true,"id":"900"}`
+			if e.onResolveTarget != nil {
+				e.onResolveTarget()
+			}
+			cid := "900"
+			if e.resolveTargetCID != nil {
+				cid = e.resolveTargetCID(r.URL.Query().Get("path"))
+			}
+			body = fmt.Sprintf(`{"state":true,"id":%q}`, cid)
 		case r.Method == http.MethodPost && (strings.Contains(r.URL.Path, "rename") || strings.Contains(r.URL.Path, "move")):
 			e.mutations++
 			raw, _ := io.ReadAll(r.Body)
@@ -249,7 +258,7 @@ func TestOrganizeLegacySourceAndConfirmedExecutionUseFrozenLocalPlan(t *testing.
 	}
 }
 func TestOrganizePlanRejectsStaleAndHistoricalPreviews(t *testing.T) {
-	for _, change := range []string{"source", "root", "options", "foreign-user", "historical", "selection"} {
+	for _, change := range []string{"source", "root", "options", "foreign-user", "historical", "selection", "cancelled"} {
 		t.Run(change, func(t *testing.T) {
 			e := setupOrganizePlanTest(t)
 			preview, err := e.handler.buildOrganize115CookieResult(1, e.req)
@@ -273,6 +282,10 @@ func TestOrganizePlanRejectsStaleAndHistoricalPreviews(t *testing.T) {
 				req.PlanID = ""
 			case "selection":
 				req.FileIDs = []string{"outside-plan"}
+			case "cancelled":
+				if err := e.db.Model(&model.OrganizePlan{}).Where("id = ?", preview.PlanID).Update("status", "cancelled").Error; err != nil {
+					t.Fatal(err)
+				}
 			}
 			if _, err = e.handler.buildOrganize115CookieResult(user, req); err == nil {
 				t.Fatal("invalid plan accepted")
@@ -283,6 +296,25 @@ func TestOrganizePlanRejectsStaleAndHistoricalPreviews(t *testing.T) {
 		})
 	}
 }
+
+func TestOrganizePreviewRejectsDirectoryChangeDuringRecognition(t *testing.T) {
+	e := setupOrganizePlanTest(t)
+	e.onResolveTarget = func() {
+		if err := e.db.Model(&model.MediaDirectory{}).Where("id = ?", e.req.CloudDirectoryID).Update("directory_name", "New root").Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, err := e.handler.buildOrganize115CookieResult(1, e.req)
+	if err == nil || !strings.Contains(err.Error(), "整理条件已变化") {
+		t.Fatalf("stale preview was accepted: %v", err)
+	}
+	var count int64
+	if err := e.db.Model(&model.OrganizePlan{}).Count(&count).Error; err != nil || count != 0 || e.mutations != 0 {
+		t.Fatalf("stale preview was saved or mutated 115: plans=%d mutations=%d err=%v", count, e.mutations, err)
+	}
+}
+
 func TestOrganizeMedianameFailureStopsPlan(t *testing.T) {
 	e := setupOrganizePlanTest(t)
 	e.tmdbFail = true

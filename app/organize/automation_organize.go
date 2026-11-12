@@ -93,6 +93,11 @@ func (h *Service) CheckAutomationMediaStatus(
 	if err := h.store().WithContext(h.requestContext()).Where("id = ? AND user_id = ?", request.CloudDirectoryID, request.UserID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
 		return status, errors.New("云盘目录不存在或无权限")
 	}
+	dir, err := h.organizeRuntimeDirectory(dir)
+	if err != nil {
+		return status, err
+	}
+
 	info := service.MoviePilotMediaInfo{
 		MediaType: strings.TrimSpace(request.MediaType), Title: strings.TrimSpace(request.Title),
 		Year: strings.TrimSpace(request.Year), TmdbID: tmdbID, Category: strings.TrimSpace(request.Category),

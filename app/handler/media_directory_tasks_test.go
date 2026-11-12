@@ -1,4 +1,4 @@
-// 验证真实目录接口按不同任务的生命周期放行历史记录，并保留未完成任务与快照。
+// 验证目录操作只作废未执行的预览，并保留任务快照和恢复保护。
 package handler
 
 import (
@@ -29,7 +29,8 @@ func TestMediaDirectoryTaskLifecycle(t *testing.T) {
 		{name: "legacy completed", plan: "completed"},
 		{name: "cancelled", plan: "cancelled", preview: "cancelled", upgrade: "cancelled"},
 		{name: "canceled", plan: "canceled", preview: "canceled", upgrade: "canceled"},
-		{name: "ready plan", plan: "ready", blocked: true, label: "整理计划 #task-1", status: "ready"},
+		{name: "ready plan", plan: "ready"},
+		{name: "ready plan with active recovery", plan: "ready", upgrade: "failed", blocked: true, label: "洗版恢复任务 #task-1", status: "failed"},
 		{name: "executing plan", plan: "executing", blocked: true, label: "整理计划 #task-1", status: "executing"},
 		{name: "queued preview", preview: "pending", blocked: true, label: "预整理任务 #31", status: "pending"},
 		{name: "running preview", preview: "processing", blocked: true, label: "预整理任务 #31", status: "processing"},
@@ -81,8 +82,9 @@ func TestMediaDirectoryTaskLifecycle(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				// 另一个目录的活动任务不能阻止本次操作。
-				if err := db.Create(&model.OrganizePlan{ID: "unrelated", CloudDirectoryID: 99, Status: "executing"}).Error; err != nil {
+				// 另一个目录的草稿不受影响。
+				unrelated := model.OrganizePlan{ID: "unrelated", UserID: 1, CloudDirectoryID: 99, Status: "ready"}
+				if err := db.Create(&unrelated).Error; err != nil {
 					t.Fatal(err)
 				}
 
@@ -117,12 +119,19 @@ func TestMediaDirectoryTaskLifecycle(t *testing.T) {
 					}
 				}
 
-				// 成功放行也不删除记录、不改状态、不覆盖历史快照。
+				// 只有实际变更目录才会作废待执行计划。
 				if tc.plan != "" {
+					wantStatus := tc.plan
+					if wantStatus == "ready" && !tc.blocked && operation != "merge-preview" {
+						wantStatus = "cancelled"
+					}
 					var saved model.OrganizePlan
-					if err := db.First(&saved, "id = ?", "task-1").Error; err != nil || saved.Status != tc.plan || saved.CloudDirectoryID != directoryID || saved.DirectoryJSON != `{"snapshot":"unchanged"}` {
+					if err := db.First(&saved, "id = ?", "task-1").Error; err != nil || saved.Status != wantStatus || saved.CloudDirectoryID != directoryID || saved.DirectoryJSON != `{"snapshot":"unchanged"}` {
 						t.Fatalf("plan changed: %+v err=%v", saved, err)
 					}
+				}
+				if err := db.First(&unrelated, "id = ?", unrelated.ID).Error; err != nil || unrelated.Status != "ready" {
+					t.Fatalf("unrelated plan changed: %+v err=%v", unrelated, err)
 				}
 				if tc.upgrade != "" {
 					var saved model.OrganizeUpgradeJob

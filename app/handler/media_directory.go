@@ -187,6 +187,11 @@ func (h *MediaDirectoryHandler) Save(c *gin.Context) {
 				status = 409
 				return err
 			}
+			if referenced.OrganizeEnabled {
+				if err := service.CancelReadyOrganizePlans(tx, uid, previous.ID); err != nil {
+					return err
+				}
+			}
 		}
 		if err := service.LockMediaUpgradeRuleGroupReference(tx, uid, row.UpgradePolicy); err != nil {
 			status = 400
@@ -309,6 +314,9 @@ func (h *MediaDirectoryHandler) Delete(c *gin.Context) {
 		}
 		if err := service.CheckMediaDirectoryReferences(tx, row); err != nil {
 			status = 409
+			return err
+		}
+		if err := service.CancelReadyOrganizePlans(tx, uid, row.ID); err != nil {
 			return err
 		}
 		return tx.Delete(&row).Error

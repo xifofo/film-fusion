@@ -70,7 +70,7 @@ func PreviewMediaDirectoryMerge(db *gorm.DB, userID, targetID, mappingID uint) (
 	if strings.TrimRight(target.ContentPrefix, "/") != strings.TrimRight(pathhelper.SafeFilePathJoin(mapping.ContentPrefix, contentMount), "/") {
 		return nil, fmt.Errorf("STRM 内容前缀不等价，不能无损合并")
 	}
-	// 两侧都检查；历史快照保留原值，未完成的计划和恢复任务仍阻止合并。
+	// 两侧都检查。只读预览不作废计划，合并确认时才处理尚未执行的预览。
 	if err := checkMediaDirectoryOrganizeTasks(db, []uint{targetID, mappingID}); err != nil {
 		return nil, err
 	}
@@ -106,6 +106,9 @@ func PreviewMediaDirectoryMerge(db *gorm.DB, userID, targetID, mappingID uint) (
 
 // ApplyMediaDirectoryMerge 必须在已取得写锁的事务内调用；引用和两条配置一并提交或回滚。
 func ApplyMediaDirectoryMerge(db *gorm.DB, userID uint, preview *MediaDirectoryMergePreview) error {
+	if err := CancelReadyOrganizePlans(db, userID, preview.Directory.ID, preview.MappingID); err != nil {
+		return err
+	}
 	if _, err := mediaDirectoryMergeReferences(db, userID, preview.MappingID, preview.Directory.ID, true); err != nil {
 		return err
 	}

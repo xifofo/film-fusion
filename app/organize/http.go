@@ -102,6 +102,11 @@ func (h *Handler) CheckMediaLocalStatus(c *gin.Context) {
 		h.error(c, http.StatusBadRequest, 400, "云盘目录不存在或无权限")
 		return
 	}
+	dir, err := h.organizeRuntimeDirectory(dir)
+	if err != nil {
+		h.error(c, http.StatusBadRequest, 400, err.Error())
+		return
+	}
 
 	info := service.MoviePilotMediaInfo{
 		MediaType: strings.TrimSpace(req.MediaType),

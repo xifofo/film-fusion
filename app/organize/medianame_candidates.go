@@ -50,13 +50,20 @@ func (h *Service) loadMedianameCandidatePlan(userID uint, id string) (Organize11
 		return req, result, errors.New("候选计划不存在或无权限，请重新预览")
 	}
 	if row.Status != "ready" {
-		return req, result, errors.New("候选计划已执行或执行中，请重新预览")
+		return req, result, errors.New("候选计划已失效、已执行或正在执行，请重新预览")
 	}
 	if json.Unmarshal([]byte(row.RequestJSON), &req) != nil || json.Unmarshal([]byte(row.ResultJSON), &result) != nil || !result.DryRun || result.Pipeline == nil || result.Pipeline.Schema != 1 {
 		return req, result, errors.New("候选计划缺少有效快照，请重新预览")
 	}
 	var dir model.MediaDirectory
-	if err := h.store().Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil || organizeDirectoryConditions(dir) != row.DirectoryJSON {
+	if err := h.store().Where("id = ? AND user_id = ?", row.CloudDirectoryID, userID).Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
+		return req, result, errors.New("媒体库目录或整理条件已变化，请重新预览")
+	}
+	dir, err := h.organizeRuntimeDirectory(dir)
+	if err != nil {
+		return req, result, err
+	}
+	if organizeDirectoryConditions(dir) != row.DirectoryJSON {
 		return req, result, errors.New("媒体库目录或整理条件已变化，请重新预览")
 	}
 	return req, result, nil

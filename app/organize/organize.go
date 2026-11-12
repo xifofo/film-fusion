@@ -41,7 +41,7 @@ func (h *Service) logOrganize115CookieFailure(userID uint, req Organize115Cookie
 	})
 }
 
-func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115CookieRequest) (Organize115CookieResult, error) {
+func (h *Service) computeOrganize115CookieResult(dir model.MediaDirectory, req Organize115CookieRequest) (Organize115CookieResult, error) {
 	folderIDs := normalizeFolderIDs(req.FolderIDs, req.FolderID)
 	if len(folderIDs) == 0 {
 		return Organize115CookieResult{}, fmt.Errorf("115 目录ID为空")
@@ -59,21 +59,10 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 	category := strings.TrimSpace(req.Category)
 	bestVersionEnabled := resolveBestVersionEnabled(mediaType, req.BestVersionEnabled)
 
-	var dir model.MediaDirectory
-	if err := h.store().Preload("CloudStorage").
-		Where("id = ? AND user_id = ?", req.CloudDirectoryID, userID).
-		Scopes(model.OrganizingDirectories).First(&dir).Error; err != nil {
-		return Organize115CookieResult{}, fmt.Errorf("云盘目录不存在或无权限")
-	}
-
-	storage := dir.CloudStorage
-	if storage == nil {
-		var storageModel model.CloudStorage
-		if err := h.store().Where("id = ? AND user_id = ?", dir.CloudStorageID, userID).
-			First(&storageModel).Error; err != nil {
-			return Organize115CookieResult{}, fmt.Errorf("云存储不存在或无权限")
-		}
-		storage = &storageModel
+	var storage model.CloudStorage
+	if err := h.store().WithContext(h.requestContext()).
+		Where("id = ? AND user_id = ?", dir.CloudStorageID, dir.UserID).First(&storage).Error; err != nil {
+		return Organize115CookieResult{}, fmt.Errorf("云存储不存在或无权限")
 	}
 
 	if strings.TrimSpace(storage.Cookie) == "" {
@@ -121,7 +110,7 @@ func (h *Service) computeOrganize115CookieResult(userID uint, req Organize115Coo
 			processOrganizeArgs{
 				medianameOverrides:     req.medianameOverrides,
 				dir:                    dir,
-				storage:                storage,
+				storage:                &storage,
 				webClient:              webClient,
 				categoryCfg:            categoryCfg,
 				includeExts:            includeExts,
