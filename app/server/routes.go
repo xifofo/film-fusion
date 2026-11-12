@@ -461,6 +461,7 @@ func (s *Server) setupRoutes() {
 		embyVersionCheck := protected.Group("/emby-version-check")
 		{
 			embyVersionCheck.POST("/scan", s.versionCheckHandler.Scan)
+			embyVersionCheck.POST("/files/delete", s.versionCheckHandler.DeleteFiles)
 			embyVersionCheck.GET("/status", s.versionCheckHandler.Status)
 			embyVersionCheck.GET("/setting", s.versionCheckHandler.GetSetting)
 			embyVersionCheck.PUT("/setting", s.versionCheckHandler.UpdateSetting)

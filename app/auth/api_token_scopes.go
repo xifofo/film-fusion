@@ -32,7 +32,7 @@ func APITokenScopes() []APITokenScope {
 		{"emby-accounts", "Emby 账户管理", "查询账户并设置到期时间", []string{"/api/emby-accounts"}},
 		{"emby-bindings", "Emby 账号绑定", "管理 Emby 与 115 账号绑定", []string{"/api/emby-bindings"}},
 		{"emby-missing", "Emby 缺集扫描", "扫描缺集及管理扫描配置和黑名单", []string{"/api/emby-missing"}},
-		{"emby-version-check", "Emby 多版本检查", "扫描本地媒体多版本并管理配置", []string{"/api/emby-version-check"}},
+		{"emby-version-check", "Emby 多版本检查", "扫描本地媒体多版本、删除扫描结果中的本地文件并管理配置", []string{"/api/emby-version-check"}},
 		{"emby-image-optimization", "Emby 图片优化", "管理图片优化配置及执行测试", []string{"/api/emby-image-optimization"}},
 		{"emby-proxy", "Emby 代理管理", "查看、清空代理日志及解除登录保护限制", []string{"/api/emby-proxy"}},
 		{"logs", "日志中心", "读取运行日志并查询、清空整理日志", []string{"/api/logs", "/api/organize-logs"}},

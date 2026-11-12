@@ -57,7 +57,7 @@ func TestEmbyVersionCheckJobRunsInBackgroundAndKeepsResult(t *testing.T) {
 	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.2160p.strm")
 	writeTestVersionFile(t, root, "Movies/Dune (2021) {tmdb-438631}/Dune.1080p.strm")
 
-	handler := NewEmbyVersionCheckHandler(nil)
+	handler := NewEmbyVersionCheckHandler(nil, nil)
 	job, started := handler.startJob(42, EmbyVersionCheckRequest{
 		CloudPathIDs: []uint{7},
 		MediaType:    "movie",

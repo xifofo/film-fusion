@@ -88,7 +88,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	embySortNameService := service.NewEmbySortNameService(cfg, log, embyClient)
 	embyStatsService := service.NewEmbyStatsService(cfg, log, embyClient)
 	embyMissingService := service.NewEmbyMissingService(cfg, log, embyClient)
-	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(log)
+	embyVersionCheckHandler := handler.NewEmbyVersionCheckHandler(log, embyClient)
 	notificationService := service.NewNotificationService(cfg, log)
 
 	s := &Server{

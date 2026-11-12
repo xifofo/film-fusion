@@ -5,6 +5,7 @@ import (
 	"film-fusion/app/logger"
 	"film-fusion/app/model"
 	"film-fusion/app/organize"
+	"film-fusion/app/utils/embyhelper"
 	"film-fusion/app/utils/pathhelper"
 	"fmt"
 	"io/fs"
@@ -23,17 +24,21 @@ import (
 
 // EmbyVersionCheckHandler 扫描云路径映射对应的本地目录，找出电影/单集的多版本内容。
 type EmbyVersionCheckHandler struct {
-	logger    *logger.Logger
-	mu        sync.RWMutex
-	jobs      map[uint]*EmbyVersionCheckJob
-	scheduler *embyVersionCheckScheduler
+	logger     *logger.Logger
+	mu         sync.RWMutex
+	jobs       map[uint]*EmbyVersionCheckJob
+	scheduler  *embyVersionCheckScheduler
+	deleting   map[uint]bool
+	embyClient *embyhelper.EmbyClient
 }
 
-func NewEmbyVersionCheckHandler(log *logger.Logger) *EmbyVersionCheckHandler {
+func NewEmbyVersionCheckHandler(log *logger.Logger, embyClient *embyhelper.EmbyClient) *EmbyVersionCheckHandler {
 	return &EmbyVersionCheckHandler{
-		logger:    log,
-		jobs:      make(map[uint]*EmbyVersionCheckJob),
-		scheduler: newEmbyVersionCheckScheduler(database.GetDB()),
+		logger:     log,
+		embyClient: embyClient,
+		deleting:   make(map[uint]bool),
+		jobs:       make(map[uint]*EmbyVersionCheckJob),
+		scheduler:  newEmbyVersionCheckScheduler(database.GetDB()),
 	}
 }
 
@@ -137,6 +142,9 @@ type EmbyVersionFile struct {
 	VersionScore     int       `json:"version_score,omitempty"`
 	VersionReasons   []string  `json:"version_reasons,omitempty"`
 	VersionSignature string    `json:"version_signature,omitempty"`
+
+	// 扫描时保留本地文件身份，删除前检测同路径替换；不传给客户端。
+	identity fs.FileInfo
 }
 
 type embyVersionGroup struct {
@@ -240,7 +248,7 @@ func (h *EmbyVersionCheckHandler) Scan(c *gin.Context) {
 
 	job, ok := h.startJob(userID, req, mediaType, paths)
 	if !ok {
-		h.error(c, http.StatusConflict, 409, "已有本地多版本检查正在后台运行")
+		h.error(c, http.StatusConflict, 409, "已有本地检查或文件删除正在执行")
 		return
 	}
 	h.success(c, job, "检查已在后台开始")
@@ -259,9 +267,10 @@ func (h *EmbyVersionCheckHandler) Status(c *gin.Context) {
 
 func (h *EmbyVersionCheckHandler) startJob(userID uint, req EmbyVersionCheckRequest, mediaType string, paths []model.MediaDirectory) (*EmbyVersionCheckJob, bool) {
 	h.mu.Lock()
-	if current := h.jobs[userID]; current != nil && current.Running {
+	if current := h.jobs[userID]; h.deleting[userID] || (current != nil && current.Running) {
+		snapshot := cloneEmbyVersionCheckJob(current)
 		h.mu.Unlock()
-		return cloneEmbyVersionCheckJob(current), false
+		return snapshot, false
 	}
 	selectedIDs := append([]uint(nil), req.CloudPathIDs...)
 	job := &EmbyVersionCheckJob{
@@ -551,6 +560,7 @@ func buildEmbyVersionFile(p model.MediaDirectory, storageName, localRoot, absPat
 		VersionScore:     score,
 		VersionReasons:   reasons,
 		VersionSignature: signature,
+		identity:         info,
 	}
 }
 
