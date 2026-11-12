@@ -14,17 +14,15 @@ import (
 	"film-fusion/app/utils/pathhelper"
 )
 
-// organizeRuntimeDirectory 校验同时用作目录名称的 CloudDrive2 源路径。
-// 只有去掉挂载名后仍对应已配置的 115 目录 ID，才将该挂载名移到 STRM 的输出根。
+// organizeRuntimeDirectory 让同一条 CloudDrive2 配置同时承担同步与整理。
+// 整理根按同步源路径与 115 目录 ID 校验，名称仅用于展示，挂载名只进入本地及播放输出。
+// 已合并的历史配置已有输出换算前缀，继续沿用其公共输出根。
 func (h *Service) organizeRuntimeDirectory(dir model.MediaDirectory) (model.MediaDirectory, error) {
 	if !dir.MappingEnabled || dir.SourceType != model.SourceTypeCloudDrive2 || dir.MappingPathPrefix != "" {
 		return dir, nil
 	}
 
-	configuredPath := "/" + strings.Trim(dir.DirectoryName, "/")
-	if configuredPath != dir.SourcePath {
-		return dir, nil
-	}
+	configuredPath := dir.SourcePath
 	if normalized, err := pathhelper.NormalizeUntrustedPath(configuredPath); err != nil || normalized != configuredPath {
 		return dir, fmt.Errorf("CloudDrive2 源路径无效，请检查媒体目录配置")
 	}
@@ -49,6 +47,7 @@ func (h *Service) organizeRuntimeDirectory(dir model.MediaDirectory) (model.Medi
 		// 115 中确实可能有一个与挂载同名的目录，保留能匹配所选 ID 的实际路径。
 		cid, found, err = h.web115Svc.ResolveDirPathWithClient(client, configuredPath)
 		if found && cid == dir.DirectoryID {
+			dir.DirectoryName = configuredPath
 			return dir, nil
 		}
 		if cloudErr != nil || err != nil {
